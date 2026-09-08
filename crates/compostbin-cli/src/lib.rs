@@ -4,6 +4,8 @@ use apple_container::engine::{CliEngine, Engine};
 use clap::Parser;
 use cli::{Arguments, Command};
 use compostbin_core::credentials::{self, Keychain, SeedOutcome};
+use compostbin_core::doctor::{self, Status};
+use compostbin_core::image;
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest};
 use compostbin_core::paths::PathResolver;
 use compostbin_core::session::{AddOutcome, Session};
@@ -47,7 +49,9 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       }
     }
 
-    Command::Build | Command::Doctor => Err("not implemented yet".into()),
+    Command::Build => build_base_image(&load_session(&manifest_path, resolver, &project_dir)?),
+
+    Command::Doctor => report_diagnosis(&load_session(&manifest_path, resolver, &project_dir)?),
 
     Command::Init => {
       let mut manifest = Manifest::default();
@@ -84,7 +88,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       }
 
       let engine = CliEngine::new();
-      engine.run(&session.run_spec())?;
+      session.start(&engine)?;
 
       let mut claude = vec!["claude".to_string()];
       claude.extend(arguments);
@@ -106,6 +110,37 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       Ok(0)
     }
   }
+}
+
+/// Builds the base image, echoing where the Dockerfile landed so a failed build
+/// can be retried by hand.
+fn build_base_image(session: &Session) -> Result<i32, Box<dyn Error>> {
+  let context = image::context(session);
+  println!("building {} from {}", session.manifest.project.image, context.display());
+
+  Ok(image::build(session, &CliEngine::new())?)
+}
+
+/// Prints every check, exiting non-zero when any of them failed so `doctor` is
+/// usable as a precondition in a script.
+fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
+  let checks = doctor::diagnose(
+    session,
+    &CliEngine::new(),
+    &Keychain,
+    std::env::var_os("ANTHROPIC_API_KEY").is_some(),
+  );
+
+  for check in &checks {
+    let label = match check.status {
+      Status::Fail => "FAIL",
+      Status::Ok => "ok  ",
+      Status::Warn => "warn",
+    };
+    println!("{label}  {}: {}", check.name, check.detail);
+  }
+
+  Ok(i32::from(checks.iter().any(|check| check.status == Status::Fail)))
 }
 
 fn load_session(

@@ -1,5 +1,31 @@
 use std::path::PathBuf;
 
+/// A `container build` invocation. The Dockerfile is not named: it is written
+/// into `context` as `Dockerfile`, which is where the CLI looks by default.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BuildSpec {
+  pub context: PathBuf,
+  pub memory: Option<String>,
+  pub tag: String,
+}
+
+impl BuildSpec {
+  pub fn to_argv(&self) -> Vec<String> {
+    let mut argv = vec!["build".to_string()];
+
+    if let Some(memory) = &self.memory {
+      argv.push("--memory".to_string());
+      argv.push(memory.clone());
+    }
+
+    argv.push("--tag".to_string());
+    argv.push(self.tag.clone());
+    argv.push(self.context.display().to_string());
+
+    argv
+  }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EnvVar {
   /// `--env NAME`, inheriting the value from the host environment.
@@ -137,6 +163,38 @@ impl RunSpec {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn builds_build_argv() {
+    let spec = BuildSpec {
+      context: "/Users/sax/.cache/compostbin/build".into(),
+      memory: Some("8G".to_string()),
+      tag: "compostbin/base:latest".to_string(),
+    };
+
+    assert_eq!(
+      spec.to_argv(),
+      [
+        "build",
+        "--memory",
+        "8G",
+        "--tag",
+        "compostbin/base:latest",
+        "/Users/sax/.cache/compostbin/build",
+      ]
+    );
+  }
+
+  #[test]
+  fn builds_build_argv_without_a_memory_limit() {
+    let spec = BuildSpec {
+      context: "/tmp/context".into(),
+      memory: None,
+      tag: "base:latest".to_string(),
+    };
+
+    assert_eq!(spec.to_argv(), ["build", "--tag", "base:latest", "/tmp/context"]);
+  }
 
   #[test]
   fn builds_exec_argv() {

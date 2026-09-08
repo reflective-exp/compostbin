@@ -57,6 +57,12 @@ impl Session {
     AddOutcome::NeedsRestart
   }
 
+  /// Resolves a manifest path string against this session's working directory
+  /// and home, so callers need no `PathResolver` of their own.
+  pub fn resolve(&self, raw: &str) -> PathBuf {
+    self.resolver.resolve(raw)
+  }
+
   /// Claude's home on the host — the source side of the bind mount, and so the
   /// place to seed credentials before the container starts.
   pub fn claude_home(&self) -> PathBuf {
@@ -142,6 +148,24 @@ impl Session {
       name: self.container_name(),
       workdir: Some(self.project_dir.clone()),
     }
+  }
+
+  /// Makes the session's container exist and be running, doing nothing when it
+  /// already is: `container run` refuses a name that is taken, so a second `run`
+  /// must attach rather than recreate. A container that exists but has stopped
+  /// is deleted and recreated, since its mounts may no longer match the manifest.
+  pub fn start(&self, engine: &impl Engine) -> Result<(), EngineError> {
+    let name = self.container_name();
+
+    if engine.running_containers()?.contains(&name) {
+      return Ok(());
+    }
+
+    if engine.containers()?.contains(&name) {
+      engine.delete(&name)?;
+    }
+
+    engine.run(&self.run_spec()).map(|_| ())
   }
 
   /// Recreates the container so a new mount takes effect — mounts cannot be added
@@ -258,6 +282,46 @@ source   = "~/.cargo/registry"
   }
 
   #[test]
+  fn start_attaches_to_an_already_running_container() {
+    let engine = RecordingEngine::with_containers(&[("compostbin-cb", true)]);
+
+    session().start(&engine).expect("start should succeed");
+
+    assert_eq!(
+      engine.calls(),
+      [vec!["ls", "--quiet"]],
+      "a running container must not be recreated"
+    );
+  }
+
+  #[test]
+  fn start_recreates_a_stopped_container() {
+    let engine = RecordingEngine::with_containers(&[("compostbin-cb", false)]);
+
+    session().start(&engine).expect("start should succeed");
+
+    let calls = engine.calls();
+    assert_eq!(calls[0], ["ls", "--quiet"]);
+    assert_eq!(calls[1], ["ls", "--all", "--quiet"]);
+    assert_eq!(calls[2], ["delete", "compostbin-cb"]);
+    assert_eq!(calls[3], session().run_spec().to_argv());
+    assert_eq!(calls.len(), 4);
+  }
+
+  #[test]
+  fn start_creates_a_container_that_does_not_exist() {
+    let engine = RecordingEngine::with_containers(&[("compostbin-other", true)]);
+
+    session().start(&engine).expect("start should succeed");
+
+    let calls = engine.calls();
+    assert_eq!(calls[0], ["ls", "--quiet"]);
+    assert_eq!(calls[1], ["ls", "--all", "--quiet"]);
+    assert_eq!(calls[2], session().run_spec().to_argv());
+    assert_eq!(calls.len(), 3, "nothing to delete: {calls:?}");
+  }
+
+  #[test]
   fn restarts_by_stopping_deleting_and_continuing() {
     let engine = RecordingEngine::new();
 
@@ -284,7 +348,7 @@ source   = "~/.cargo/registry"
 
     let run = &engine.calls()[2];
     assert!(
-      run.contains(&"/Users/sax/.compostbin/claude-home:/root/.claude".to_string()),
+      run.contains(&"/Users/sax/.local/state/compostbin/claude-home:/root/.claude".to_string()),
       "the recreated container must remount Claude's home: {run:?}"
     );
   }
@@ -328,7 +392,7 @@ source   = "~/.cargo/registry"
         },
         Mount {
           readonly: false,
-          source: "/Users/sax/.compostbin/claude-home".into(),
+          source: "/Users/sax/.local/state/compostbin/claude-home".into(),
           target: "/root/.claude".into(),
         },
       ]
@@ -348,7 +412,7 @@ source   = "~/.cargo/registry"
       [
         "/Users/sax/workspace",
         "/Users/sax/.cargo/registry",
-        "/Users/sax/.compostbin/claude-home",
+        "/Users/sax/.local/state/compostbin/claude-home",
       ]
     );
   }
@@ -357,7 +421,7 @@ source   = "~/.cargo/registry"
   fn resolves_claude_home_on_the_host() {
     assert_eq!(
       session().claude_home(),
-      PathBuf::from("/Users/sax/.compostbin/claude-home")
+      PathBuf::from("/Users/sax/.local/state/compostbin/claude-home")
     );
   }
 
@@ -381,7 +445,7 @@ source   = "~/.cargo/registry"
         "--volume",
         "/Users/sax/.cargo/registry:/Users/sax/.cargo/registry:ro",
         "--volume",
-        "/Users/sax/.compostbin/claude-home:/root/.claude",
+        "/Users/sax/.local/state/compostbin/claude-home:/root/.claude",
         "--workdir",
         "/Users/sax/workspace/compostbin",
         "compostbin/base:latest",

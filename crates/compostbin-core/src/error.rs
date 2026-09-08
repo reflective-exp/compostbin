@@ -1,3 +1,4 @@
+use apple_container::error::EngineError;
 use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::io;
@@ -26,6 +27,37 @@ impl Error for CredentialError {
       Self::Io(error) => Some(error),
       Self::Keychain(_) => None,
     }
+  }
+}
+
+/// A base image that could not be written into a build context or built.
+#[derive(Debug)]
+pub enum ImageError {
+  Engine(EngineError),
+  Io(PathError),
+}
+
+impl Display for ImageError {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+    match self {
+      Self::Engine(error) => error.fmt(formatter),
+      Self::Io(error) => error.fmt(formatter),
+    }
+  }
+}
+
+impl Error for ImageError {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Engine(error) => Some(error),
+      Self::Io(error) => Some(error),
+    }
+  }
+}
+
+impl From<EngineError> for ImageError {
+  fn from(error: EngineError) -> Self {
+    Self::Engine(error)
   }
 }
 

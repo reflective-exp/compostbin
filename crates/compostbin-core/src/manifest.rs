@@ -2,7 +2,7 @@ use crate::error::{ManifestError, PathError};
 use serde::{Deserialize, Serialize, Serializer};
 use std::path::Path;
 
-pub const DEFAULT_CLAUDE_HOME: &str = "~/.compostbin/claude-home";
+pub const DEFAULT_CLAUDE_HOME: &str = "~/.local/state/compostbin/claude-home";
 pub const DEFAULT_CONTAINER_CPUS: u32 = 4;
 pub const DEFAULT_CONTAINER_MEMORY: &str = "8G";
 pub const DEFAULT_IMAGE: &str = "compostbin/base:latest";
@@ -168,7 +168,7 @@ source = "~/code/vendor/libfoo"
 target = "~/code/vendor/libfoo"
 
 [claude]
-home               = "~/.compostbin/claude-home"
+home               = "~/.local/state/compostbin/claude-home"
 seed_from_keychain = true
 
 [safety]
@@ -176,7 +176,7 @@ snapshot = true
 "#;
 
   const EXPECTED_RENDERING: &str = r#"[claude]
-home = "~/.compostbin/claude-home"
+home = "~/.local/state/compostbin/claude-home"
 seed_from_keychain = true
 
 [container]
@@ -260,7 +260,7 @@ roots = ["~/workspace"]
     assert_eq!(manifest.paths[1].target.as_deref(), Some("~/code/vendor/libfoo"));
     assert_eq!(manifest.paths.len(), 2);
 
-    assert_eq!(manifest.claude.home, "~/.compostbin/claude-home");
+    assert_eq!(manifest.claude.home, "~/.local/state/compostbin/claude-home");
     assert_eq!(manifest.claude.seed_from_keychain, true);
 
     assert_eq!(manifest.safety.snapshot, true);
@@ -322,7 +322,7 @@ source = "~/a-first"
     assert_eq!(manifest.workspace.roots, [] as [String; 0]);
     assert_eq!(manifest.paths.len(), 0);
 
-    assert_eq!(manifest.claude.home, "~/.compostbin/claude-home");
+    assert_eq!(manifest.claude.home, "~/.local/state/compostbin/claude-home");
     assert_eq!(manifest.claude.seed_from_keychain, true);
 
     assert_eq!(manifest.safety.snapshot, true);

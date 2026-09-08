@@ -114,7 +114,10 @@ mod tests {
     let cwd = std::env::current_dir().expect("cwd");
     let home = std::env::var("HOME").expect("HOME");
     assert_eq!(resolver.resolve("Cargo.toml"), cwd.join("Cargo.toml"));
-    assert_eq!(resolver.resolve("~/.compostbin"), Path::new(&home).join(".compostbin"));
+    assert_eq!(
+      resolver.resolve("~/.local/state/compostbin"),
+      Path::new(&home).join(".local/state/compostbin")
+    );
   }
 
   #[test]

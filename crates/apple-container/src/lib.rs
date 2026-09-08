@@ -5,3 +5,4 @@ pub mod error;
 #[cfg(any(feature = "fake", test))]
 pub mod fake;
 pub mod model;
+pub mod parse;

@@ -1,0 +1,18 @@
+[claude]
+home = "~/.local/state/compostbin/claude-home"
+seed_from_keychain = true
+
+[container]
+cpus = 4
+env = []
+memory = "8G"
+
+[project]
+image = "compostbin/base:latest"
+name = "compostbin"
+
+[safety]
+snapshot = true
+
+[workspace]
+roots = []

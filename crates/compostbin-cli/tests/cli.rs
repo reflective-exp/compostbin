@@ -30,7 +30,7 @@ fn init_writes_a_manifest_named_after_the_directory() {
   assert_eq!(
     std::fs::read_to_string(project_dir.join(".config/compostbin.toml")).expect("manifest should exist"),
     r#"[claude]
-home = "~/.compostbin/claude-home"
+home = "~/.local/state/compostbin/claude-home"
 seed_from_keychain = true
 
 [container]
@@ -73,7 +73,7 @@ fn ls_lists_the_project_and_claude_home() {
     listed,
     [
       project_dir.display().to_string(),
-      format!("{home}/.compostbin/claude-home"),
+      format!("{home}/.local/state/compostbin/claude-home"),
     ]
   );
 }
