@@ -2,4 +2,6 @@
 
 //! Manifest, path resolution, and session lifecycle for compostbin.
 
+pub mod error;
 pub mod manifest;
+pub mod paths;

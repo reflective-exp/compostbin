@@ -11,5 +11,8 @@ apple-container.workspace = true
 serde.workspace = true
 toml.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [features]
 strict = []

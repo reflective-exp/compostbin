@@ -9,6 +9,7 @@ version.workspace = true
 
 [dev-dependencies]
 compostbin-core.workspace = true
+tempfile.workspace = true
 toml.workspace = true
 
 [features]

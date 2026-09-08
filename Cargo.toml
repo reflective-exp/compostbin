@@ -13,4 +13,5 @@ version = "0.1.0"
 apple-container = { path = "crates/apple-container" }
 compostbin-core = { path = "crates/compostbin-core" }
 serde = { version = "1", features = ["derive"] }
+tempfile = "3"
 toml = "1"
