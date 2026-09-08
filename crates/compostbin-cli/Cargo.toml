@@ -12,3 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 compostbin-core.workspace = true
+
+[features]
+strict = [] # Treat warnings as a build error.
