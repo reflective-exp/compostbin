@@ -1,0 +1,69 @@
+{
+  "hooks": {
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "direnv export bash > \"$CLAUDE_ENV_FILE\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "direnv export bash > \"$CLAUDE_ENV_FILE\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.command' | grep -qE 'cargo +(nextest +run|test)\\b[^|;&]*(-p|--package)[ =]' && { echo 'BLOCKED: do not run tests per-crate. Run the whole suite: cargo nextest run. Per-crate runs miss the shared build cache and are SLOWER, not faster.' >&2; exit 2; } || exit 0",
+            "statusMessage": "Checking cargo test scope"
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.command' | grep -qE 'git +(checkout|commit|rebase|stash)' && { echo 'BLOCKED: do not run destructive git operations. Let the human do that.' >&2; exit 2; } || exit 0",
+            "statusMessage": "Checking destructive git ops"
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.command' | grep -qE 'sed -i ' && { echo 'BLOCKED: edit files directly. When you use sed, you frequently make unintended changes and corrupt files.' >&2; exit 2; } || exit 0",
+            "statusMessage": "Checking sed used for file edits"
+          }
+        ]
+      }
+    ],
+    "FileChanged": [
+      {
+        "matcher": ".envrc",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "direnv export bash > \"$CLAUDE_ENV_FILE\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo fmt || true",
+            "statusMessage": "Reformatting code"
+          }
+        ]
+      }
+    ]
+  }
+}
