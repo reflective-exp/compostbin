@@ -1,20 +1,52 @@
+use crate::error::{ManifestError, PathError};
 use serde::{Deserialize, Serialize, Serializer};
+use std::path::Path;
 
 pub const DEFAULT_CLAUDE_HOME: &str = "~/.compostbin/claude-home";
 pub const DEFAULT_CONTAINER_CPUS: u32 = 4;
 pub const DEFAULT_CONTAINER_MEMORY: &str = "8G";
 pub const DEFAULT_IMAGE: &str = "compostbin/base:latest";
+/// Checked in beside the project it configures.
+pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Manifest {
   pub claude: ClaudeConfig,
   pub container: ContainerConfig,
-  #[serde(serialize_with = "PathEntry::serialize_sorted_by_source")]
+  #[serde(
+    serialize_with = "PathEntry::serialize_sorted_by_source",
+    skip_serializing_if = "Vec::is_empty"
+  )]
   pub paths: Vec<PathEntry>,
   pub project: ProjectConfig,
   pub safety: SafetyConfig,
   pub workspace: WorkspaceConfig,
+}
+
+impl Manifest {
+  pub fn load(path: &Path) -> Result<Self, ManifestError> {
+    let text = std::fs::read_to_string(path).map_err(|source| ManifestError::Io(PathError::new(path, source)))?;
+
+    toml::from_str(&text).map_err(|source| ManifestError::Parse {
+      path: path.to_path_buf(),
+      source,
+    })
+  }
+
+  /// Creates the parent directory, so `init` works in a project with no `.config`.
+  pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
+    let rendered = toml::to_string(self).map_err(|source| ManifestError::Render {
+      path: path.to_path_buf(),
+      source,
+    })?;
+
+    if let Some(parent) = path.parent() {
+      std::fs::create_dir_all(parent).map_err(|source| ManifestError::Io(PathError::new(parent, source)))?;
+    }
+
+    std::fs::write(path, rendered).map_err(|source| ManifestError::Io(PathError::new(path, source)))
+  }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -112,6 +144,7 @@ pub struct WorkspaceConfig {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use tempfile::TempDir;
 
   const FULL_MANIFEST: &str = r#"
 [project]
@@ -170,6 +203,41 @@ snapshot = true
 [workspace]
 roots = ["~/workspace"]
 "#;
+
+  #[test]
+  fn saves_and_loads() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
+    let manifest: Manifest = toml::from_str(FULL_MANIFEST).expect("manifest should parse");
+
+    manifest.save(&path).expect("save should succeed");
+
+    assert_eq!(
+      std::fs::read_to_string(&path).expect("manifest should exist"),
+      EXPECTED_RENDERING
+    );
+    assert_eq!(
+      Manifest::load(&path)
+        .expect("load should succeed")
+        .project
+        .name
+        .as_deref(),
+      Some("compostbin")
+    );
+  }
+
+  #[test]
+  fn load_names_a_missing_file() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
+
+    let error = Manifest::load(&path).expect_err("missing manifest should error");
+
+    assert!(
+      error.to_string().contains("compostbin.toml"),
+      "error should name the manifest: {error}"
+    );
+  }
 
   #[test]
   fn parses_all_keys() {

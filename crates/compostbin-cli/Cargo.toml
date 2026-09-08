@@ -6,12 +6,21 @@ repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[lib]
+name = "compostbin_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "compostbin"
 path = "src/main.rs"
 
 [dependencies]
+apple-container.workspace = true
+clap.workspace = true
 compostbin-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [features]
 strict = [] # Treat warnings as a build error.

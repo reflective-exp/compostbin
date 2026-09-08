@@ -1,4 +1,4 @@
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, PathEntry};
 use crate::paths::{PathResolver, root_containing};
 use apple_container::engine::Engine;
 use apple_container::error::EngineError;
@@ -12,8 +12,17 @@ pub const CLAUDE_HOME_TARGET: &str = "/root/.claude";
 pub const KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
 pub const NAME_PREFIX: &str = "compostbin-";
 
+/// What `add` did, and therefore what the caller must do next.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AddOutcome {
+  /// Already inside a mounted root — visible in the container right now.
+  AlreadyMounted { root: PathBuf },
+  /// Recorded in the manifest, but invisible until the container is recreated.
+  NeedsRestart,
+}
+
 pub struct Session {
-  manifest: Manifest,
+  pub manifest: Manifest,
   project_dir: PathBuf,
   resolver: PathResolver,
 }
@@ -25,6 +34,27 @@ impl Session {
       project_dir: project_dir.into(),
       resolver,
     }
+  }
+
+  /// Records a path in the manifest unless a mounted root already covers it.
+  /// `path` must already be canonical: a symlink pointing out of a root looks
+  /// contained but is not, in the container.
+  pub fn add(&mut self, path: impl Into<PathBuf>, readonly: bool) -> AddOutcome {
+    let path = path.into();
+
+    if let Some(root) = root_containing(&path, &self.resolved_roots()) {
+      return AddOutcome::AlreadyMounted {
+        root: root.to_path_buf(),
+      };
+    }
+
+    self.manifest.paths.push(PathEntry {
+      readonly,
+      source: path.display().to_string(),
+      target: None,
+    });
+
+    AddOutcome::NeedsRestart
   }
 
   pub fn container_name(&self) -> String {
@@ -183,6 +213,42 @@ source   = "~/.cargo/registry"
       PathResolver::new("/Users/sax/workspace/compostbin", "/Users/sax"),
       "/Users/sax/workspace/compostbin",
     )
+  }
+
+  #[test]
+  fn add_inside_a_root_changes_nothing() {
+    let mut session = session();
+
+    let outcome = session.add("/Users/sax/workspace/other", false);
+
+    assert_eq!(
+      outcome,
+      AddOutcome::AlreadyMounted {
+        root: "/Users/sax/workspace".into()
+      }
+    );
+    assert_eq!(session.manifest.paths.len(), 1, "no new [[paths]] entry");
+    assert_eq!(session.mounts().len(), 3, "no new mount");
+  }
+
+  #[test]
+  fn add_outside_every_root_records_a_path() {
+    let mut session = session();
+
+    let outcome = session.add("/Users/sax/vendor/libfoo", true);
+
+    assert_eq!(outcome, AddOutcome::NeedsRestart);
+    assert_eq!(session.manifest.paths[1].source, "/Users/sax/vendor/libfoo");
+    assert_eq!(session.manifest.paths[1].readonly, true);
+    assert_eq!(session.manifest.paths[1].target, None);
+    assert!(
+      session.mounts().contains(&Mount {
+        readonly: true,
+        source: "/Users/sax/vendor/libfoo".into(),
+        target: "/Users/sax/vendor/libfoo".into(),
+      }),
+      "the added path must become a mount"
+    );
   }
 
   #[test]

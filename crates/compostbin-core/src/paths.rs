@@ -16,6 +16,18 @@ impl PathResolver {
     }
   }
 
+  pub fn from_env() -> Result<Self, PathError> {
+    let cwd = std::env::current_dir().map_err(|source| PathError::new(".", source))?;
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+      PathError::new(
+        "$HOME",
+        std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"),
+      )
+    })?;
+
+    Ok(Self::new(cwd, PathBuf::from(home)))
+  }
+
   /// Resolves, then follows symlinks and normalises `.` and `..` against the real
   /// filesystem. Fails if the path does not exist.
   pub fn canonicalize(&self, raw: &str) -> Result<PathBuf, PathError> {
@@ -93,6 +105,16 @@ mod tests {
         .expect("should resolve"),
       root.join("real/file.txt")
     );
+  }
+
+  #[test]
+  fn reads_cwd_and_home_from_env() {
+    let resolver = PathResolver::from_env().expect("environment should provide cwd and home");
+
+    let cwd = std::env::current_dir().expect("cwd");
+    let home = std::env::var("HOME").expect("HOME");
+    assert_eq!(resolver.resolve("Cargo.toml"), cwd.join("Cargo.toml"));
+    assert_eq!(resolver.resolve("~/.compostbin"), Path::new(&home).join(".compostbin"));
   }
 
   #[test]
