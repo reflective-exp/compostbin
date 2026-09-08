@@ -78,6 +78,81 @@ fn ls_lists_the_project_and_claude_home() {
   );
 }
 
+/// A project with `workspace.roots` pointing at a sibling `workspace/` tree.
+fn project_with_a_root(temp: &TempDir) -> std::path::PathBuf {
+  let base = temp.path().canonicalize().expect("canonical temp");
+  let project_dir = base.join("my-project");
+  std::fs::create_dir_all(project_dir.join(".config")).expect("create project dir");
+  std::fs::create_dir_all(base.join("workspace/inside")).expect("create root");
+  std::fs::create_dir_all(base.join("outside")).expect("create outside dir");
+  std::fs::write(
+    project_dir.join(".config/compostbin.toml"),
+    format!("[workspace]\nroots = [\"{}\"]\n", base.join("workspace").display()),
+  )
+  .expect("write manifest");
+
+  project_dir
+}
+
+#[test]
+fn add_inside_a_root_records_no_path_entry() {
+  let temp = TempDir::new().expect("temp dir");
+  let project_dir = project_with_a_root(&temp);
+  let inside = temp
+    .path()
+    .canonicalize()
+    .expect("canonical temp")
+    .join("workspace/inside");
+
+  let output = compostbin(&project_dir, &["add", &inside.display().to_string()]);
+
+  assert!(
+    output.status.success(),
+    "add failed: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(
+    String::from_utf8_lossy(&output.stdout).contains("already mounted"),
+    "stdout: {}",
+    String::from_utf8_lossy(&output.stdout)
+  );
+  let manifest = std::fs::read_to_string(project_dir.join(".config/compostbin.toml")).expect("manifest");
+  assert!(
+    !manifest.contains("[[paths]]"),
+    "an in-root path must not be recorded: {manifest}"
+  );
+}
+
+#[test]
+fn add_outside_every_root_records_a_path_without_restarting() {
+  let temp = TempDir::new().expect("temp dir");
+  let project_dir = project_with_a_root(&temp);
+  let outside = temp
+    .path()
+    .canonicalize()
+    .expect("canonical temp")
+    .join("outside");
+
+  let output = compostbin(&project_dir, &["add", &outside.display().to_string(), "--readonly"]);
+
+  assert!(
+    output.status.success(),
+    "add failed: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(
+    String::from_utf8_lossy(&output.stdout).contains("--restart"),
+    "stdout must say how to make the path visible: {}",
+    String::from_utf8_lossy(&output.stdout)
+  );
+  let manifest = std::fs::read_to_string(project_dir.join(".config/compostbin.toml")).expect("manifest");
+  assert!(
+    manifest.contains(&format!("source = \"{}\"", outside.display())),
+    "manifest: {manifest}"
+  );
+  assert!(manifest.contains("readonly = true"), "manifest: {manifest}");
+}
+
 #[test]
 fn ls_without_a_manifest_names_the_missing_file() {
   let temp = TempDir::new().expect("temp dir");

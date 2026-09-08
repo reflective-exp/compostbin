@@ -57,6 +57,12 @@ impl Session {
     AddOutcome::NeedsRestart
   }
 
+  /// Claude's home on the host — the source side of the bind mount, and so the
+  /// place to seed credentials before the container starts.
+  pub fn claude_home(&self) -> PathBuf {
+    self.resolver.resolve(&self.manifest.claude.home)
+  }
+
   pub fn container_name(&self) -> String {
     let project = self
       .manifest
@@ -108,7 +114,7 @@ impl Session {
 
     mounts.push(Mount {
       readonly: false,
-      source: self.resolver.resolve(&self.manifest.claude.home),
+      source: self.claude_home(),
       target: PathBuf::from(CLAUDE_HOME_TARGET),
     });
 
@@ -344,6 +350,14 @@ source   = "~/.cargo/registry"
         "/Users/sax/.cargo/registry",
         "/Users/sax/.compostbin/claude-home",
       ]
+    );
+  }
+
+  #[test]
+  fn resolves_claude_home_on_the_host() {
+    assert_eq!(
+      session().claude_home(),
+      PathBuf::from("/Users/sax/.compostbin/claude-home")
     );
   }
 

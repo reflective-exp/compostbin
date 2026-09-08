@@ -3,6 +3,7 @@ pub mod cli;
 use apple_container::engine::{CliEngine, Engine};
 use clap::Parser;
 use cli::{Arguments, Command};
+use compostbin_core::credentials::{self, Keychain, SeedOutcome};
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest};
 use compostbin_core::paths::PathResolver;
 use compostbin_core::session::{AddOutcome, Session};
@@ -69,6 +70,19 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 
     Command::Run { arguments } => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
+
+      if credentials::seed(
+        &session.claude_home(),
+        session.manifest.claude.seed_from_keychain,
+        &Keychain,
+      )? == SeedOutcome::NotInKeychain
+      {
+        eprintln!(
+          "no \"{}\" entry in the login Keychain; the session will need ANTHROPIC_API_KEY or an interactive login",
+          credentials::KEYCHAIN_SERVICE
+        );
+      }
+
       let engine = CliEngine::new();
       engine.run(&session.run_spec())?;
 

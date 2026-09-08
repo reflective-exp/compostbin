@@ -3,6 +3,32 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// A Claude token that could not be read from the Keychain or written into
+/// Claude's home.
+#[derive(Debug)]
+pub enum CredentialError {
+  Io(PathError),
+  Keychain(String),
+}
+
+impl Display for CredentialError {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+    match self {
+      Self::Io(error) => error.fmt(formatter),
+      Self::Keychain(message) => write!(formatter, "reading the login Keychain: {message}"),
+    }
+  }
+}
+
+impl Error for CredentialError {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Io(error) => Some(error),
+      Self::Keychain(_) => None,
+    }
+  }
+}
+
 /// A manifest that could not be read, parsed, or written. Every variant names the
 /// file, since the CLI may be looking at a manifest the user did not expect.
 #[derive(Debug)]
