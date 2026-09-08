@@ -7,3 +7,7 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+
+[features]
+fake = []      # Expose RecordingEngine to other crates' tests.
+strict = []
