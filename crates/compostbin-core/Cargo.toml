@@ -1,0 +1,10 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "compostbin-core"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+apple-container.workspace = true

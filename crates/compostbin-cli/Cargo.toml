@@ -1,0 +1,14 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "compostbin-cli"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "compostbin"
+path = "src/main.rs"
+
+[dependencies]
+compostbin-core.workspace = true

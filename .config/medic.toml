@@ -1,0 +1,42 @@
+[doctor]
+checks = [
+  {check = "homebrew"},
+  {check = "tool-versions", command = "plugin-installed", args = {plugin = "rust"}},
+  {check = "tool-versions", command = "package-installed", args = {plugin = "rust"}},
+  {check = "rust", command = "crate-installed", args = {name = ["cargo-audit","cargo-outdated", "cargo-nextest"]}},
+  {check = "rust", command = "target-installed", args = {target = ["aarch64-apple-darwin"]}},
+]
+
+[test]
+checks = [
+  {name = "rust: test!", shell = "cargo nextest run --color always", verbose = true},
+  {name = "Check for warnings", shell = "cargo check --features strict --color always"},
+]
+
+[audit]
+checks = [
+  {name = "rust: audit", shell = "cargo audit", verbose = true},
+  {name = "rust: check", shell = "cargo check", remedy = "cargo fix --allow-dirty"},
+  {name = "rust: clippy", shell = "cargo clippy -- -D warnings", remedy = "cargo clippy --fix --allow-dirty"},
+  {check = "rust", command = "format-check"},
+]
+
+[outdated]
+checks = [
+  {check = "rust"},
+]
+
+[update]
+steps = [
+  {step = "git", command = "pull"},
+  {doctor = {}},
+]
+
+[shipit]
+steps = [
+  {audit = {}},
+  {update = {}},
+  {test = {}},
+  {step = "git", command = "push"},
+]
+
