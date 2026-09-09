@@ -5,6 +5,7 @@ RUN apt-get update \
       build-essential \
       ca-certificates \
       curl \
+      direnv \
       git \
       jq \
       less \
@@ -20,6 +21,10 @@ RUN curl --fail --silent --show-error --location https://deb.nodesource.com/setu
  && rm -rf /var/lib/apt/lists/*
 
 RUN npm install --global @anthropic-ai/claude-code
+
+# direnv only takes effect through a shell hook, and Claude Code's Bash tool
+# initializes each shell from the profile, so hook it there.
+RUN echo 'eval "$(direnv hook bash)"' >> /root/.bashrc
 
 # The guest half of the host-command channel. It speaks the spool protocol in
 # compostbin-core's `host` module, and is a shell script because the container is
