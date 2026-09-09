@@ -1,8 +1,8 @@
 //! The host's own Claude, copied into the session's Claude home.
 //!
 //! Not the token — that is `credentials` — and not history or projects, which
-//! belong to the session. These are the things the user maintains once, on the
-//! host, and expects to find in every container.
+//! belong to the session. Only what the user maintains once, on the host, and
+//! expects to find in every container.
 
 use crate::error::PathError;
 use std::path::Path;
@@ -11,27 +11,24 @@ use std::path::Path;
 pub const HOST_CLAUDE_HOME: &str = "~/.claude";
 
 /// What every session gets: the user's house style, their settings, their
-/// skills. Not configurable and never named in a manifest — this is the user's
-/// Claude rather than a per-project decision, and a manifest written before any
-/// of these existed must not have to be edited to get them.
+/// skills. Not configurable and never named in a manifest, because this is the
+/// user's Claude rather than a per-project decision.
 pub const HOST_CLAUDE_SETTINGS: [&str; 3] = ["CLAUDE.md", "settings.json", "skills"];
 
-/// Deep enough for any plausible skill tree, and shallow enough that a symlink
-/// loop under `~/.claude` ends the copy instead of filling the disk.
+/// Deep enough for any skill tree, shallow enough that a symlink loop under
+/// `~/.claude` ends the copy instead of filling the disk.
 const MAX_DEPTH: usize = 32;
 
-/// Copies `HOST_CLAUDE_SETTINGS`, and whatever `extra` the manifest adds, from
-/// the host's own `~/.claude` into the session's home, overwriting what is there.
-/// An entry may be a file (`CLAUDE.md`) or a directory (`skills`), which is
-/// copied whole.
+/// Copies `HOST_CLAUDE_SETTINGS`, plus whatever `extra` the manifest adds, from
+/// the host's `~/.claude` into the session's home, overwriting what is there. An
+/// entry may be a file (`CLAUDE.md`) or a directory (`skills`), copied whole.
 ///
-/// The host is authoritative on purpose: an edit on the host must reach the next
-/// session rather than being shadowed by a stale copy. That is why a shared
-/// directory is replaced rather than merged — a skill deleted on the host must
-/// disappear from the session too. Everything else in the session home —
-/// history, projects, the token the container refreshes — is session state and
-/// is never overwritten from here. Names are joined as single components, so a
-/// manifest cannot reach outside `~/.claude` with `../`.
+/// The host is authoritative: an edit there must reach the next session rather
+/// than being shadowed by a stale copy, which is why a shared directory is
+/// replaced rather than merged — a skill deleted on the host disappears from the
+/// session too. Everything else in the session home — history, projects, the
+/// refreshed token — is session state and is never overwritten from here. Names
+/// are joined as single components, so a manifest cannot escape with `../`.
 pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<Vec<String>, PathError> {
   let mut names: Vec<String> = HOST_CLAUDE_SETTINGS
     .iter()
@@ -51,8 +48,8 @@ pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<
     }
 
     let source = host_home.join(&name);
-    // Metadata rather than the entry's own type: a symlinked skills directory is
-    // a normal way to keep them under version control elsewhere.
+    // Metadata rather than the entry's own type: symlinking the skills directory
+    // is a normal way to keep it under version control elsewhere.
     let Ok(metadata) = std::fs::metadata(&source) else {
       continue;
     };
@@ -75,8 +72,7 @@ pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<
   Ok(copied)
 }
 
-/// Removes whatever is at `path`, directory or file, and says nothing when there
-/// is nothing there.
+/// Removes whatever is at `path`, directory or file; a no-op when nothing is.
 fn remove(path: &Path) -> Result<(), PathError> {
   let Ok(metadata) = std::fs::symlink_metadata(path) else {
     return Ok(());
@@ -123,8 +119,8 @@ mod tests {
   use super::*;
   use tempfile::TempDir;
 
-  /// A host home holding every settings entry, so a test can assert on what it
-  /// adds rather than on the baseline.
+  /// A host home holding every settings entry, so a test can assert on what a
+  /// case adds rather than on the baseline.
   fn host_home(temp: &TempDir) -> std::path::PathBuf {
     let host = temp.path().join("host-claude");
     std::fs::create_dir_all(host.join("skills")).expect("create host skills");

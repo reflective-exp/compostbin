@@ -3,8 +3,8 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::io;
 use std::process::ExitStatus;
 
-/// A failed `container` invocation. Carries the argv and captured stderr, because
-/// a bare exit status tells the user nothing about what to fix.
+/// A failed `container` invocation. Carries the argv and captured stderr: a bare
+/// exit status says nothing about what to fix.
 #[derive(Debug)]
 pub enum EngineError {
   /// The command ran and exited non-zero.

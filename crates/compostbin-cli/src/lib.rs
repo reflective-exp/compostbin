@@ -35,8 +35,8 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
     } => {
       let canonical = resolver.canonicalize(&path.display().to_string())?;
 
-      // The container runs with the user's own privileges either way, so this is
-      // a guardrail against a slip rather than a boundary — hence `--force`.
+      // A guardrail against a slip rather than a boundary — the container runs
+      // with the user's own privileges either way — hence `--force`.
       if let Some(danger) = danger(&canonical, &resolver)
         && !force
       {
@@ -94,8 +94,8 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
         return Ok(1);
       }
 
-      // Installed before the loop starts, so a signal arriving immediately is
-      // still seen as a request to stop rather than killing a claimed request.
+      // Before the loop, so a signal arriving immediately stops the agent rather
+      // than killing a claimed request.
       let stop = signals::stop_on_termination()?;
 
       println!(
@@ -130,9 +130,8 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
     Command::Ls => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
 
-      // Host path, then where it appears in the container, then why it is there:
-      // a path being in-root rather than explicit is what decides whether `add`
-      // needed a restart, so it belongs in the listing.
+      // Host path, then where it appears in the container, then why: in-root
+      // rather than explicit is what decides whether `add` needed a restart.
       for entry in session.workspace().entries() {
         let origin = match entry.origin {
           Origin::Explicit => "explicit",
@@ -187,8 +186,8 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       let mut claude = vec!["claude".to_string()];
       claude.extend(arguments);
 
-      // The agent lives exactly as long as the session: `exec` blocks until
-      // Claude exits, and the flag stops it as soon as it does.
+      // The agent lives as long as the session: `exec` blocks until Claude
+      // exits, and the flag stops it as soon as it does.
       let stop = AtomicBool::new(false);
       let spool = Spool::new(session.host_spool());
 
@@ -212,8 +211,8 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
         code
       })?;
 
-      // Best effort: nothing guarantees this runs — a killed session leaves the
-      // spool behind, which is what `compostbin clean` is for.
+      // Best effort: a killed session leaves the spool behind, which is what
+      // `compostbin clean` is for.
       if let Err(error) = session.clean(false) {
         eprintln!("compostbin: could not clean up after the session: {error}");
       }
@@ -239,7 +238,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
   }
 }
 
-/// Builds the base image, echoing where the Dockerfile landed so a failed build
+/// Builds the base image, naming where the Dockerfile landed so a failed build
 /// can be retried by hand.
 fn build_base_image(session: &Session) -> Result<i32, Box<dyn Error>> {
   let context = image::context(session);

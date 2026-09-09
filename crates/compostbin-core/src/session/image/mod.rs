@@ -5,9 +5,8 @@ use apple_container::engine::Engine;
 use apple_container::model::BuildSpec;
 use std::path::PathBuf;
 
-/// Where the embedded Dockerfile is written before building. Kept rather than
-/// discarded so a failed build can be reproduced by hand, and under `.cache`
-/// rather than `.local/state` because every byte of it is regenerable.
+/// Where the embedded Dockerfile is written before building. Kept, so a failed
+/// build can be reproduced by hand; under `.cache` because it is regenerable.
 pub const BUILD_CONTEXT: &str = "~/.cache/compostbin/build";
 pub const DOCKERFILE: &str = include_str!("Dockerfile");
 pub const DOCKERFILE_NAME: &str = "Dockerfile";
@@ -19,9 +18,9 @@ pub const GUEST_CLIENT_NAME: &str = "compostbin-host";
 /// adds anything to it. The builder is started first, at the manifest's memory
 /// size: installing Claude Code OOMs the builder's 2 GB default.
 ///
-/// The base is shared by every project, so anything that belongs to one project
-/// — direnv, a language toolchain, a private CA — goes in the derived image
-/// instead of growing the base for everyone.
+/// The base is shared by every project, so anything belonging to one project —
+/// direnv, a language toolchain, a private CA — goes in the derived image rather
+/// than growing the base for everyone.
 pub fn build(session: &Session, engine: &impl Engine) -> Result<i32, ImageError> {
   let context = context(session);
   std::fs::create_dir_all(&context).map_err(|source| ImageError::Io(PathError::new(&context, source)))?;
@@ -62,11 +61,11 @@ pub fn build(session: &Session, engine: &impl Engine) -> Result<i32, ImageError>
 }
 
 /// The Dockerfile for the project's own image, or `None` when the manifest adds
-/// nothing and the session can run the base image itself.
+/// nothing and the session can run the base itself.
 ///
-/// Packages install as root because apt needs to; the manifest's `run` lines
-/// execute as `claude`, the user the session actually runs as, so a line
-/// appending to `~/.bashrc` writes the file the session will read.
+/// Packages install as root because apt needs to; `run` lines execute as
+/// `claude`, so a line appending to `~/.bashrc` writes the file the session
+/// will read.
 pub fn project_dockerfile(manifest: &Manifest) -> Option<String> {
   if manifest.image.is_empty() {
     return None;
@@ -99,8 +98,8 @@ pub fn context(session: &Session) -> PathBuf {
   session.resolve(BUILD_CONTEXT).join("base")
 }
 
-/// The project image's build context — beside the base's, named for the session
-/// so two projects building at once cannot overwrite each other's Dockerfile.
+/// Beside the base's, named for the session so two projects building at once
+/// cannot overwrite each other's Dockerfile.
 pub fn project_context(session: &Session) -> PathBuf {
   session
     .resolve(BUILD_CONTEXT)
@@ -138,8 +137,8 @@ mod tests {
     );
   }
 
-  /// The Dockerfile `COPY`s the client, so the build fails outright if the
-  /// context holds only the Dockerfile.
+  /// The Dockerfile `COPY`s the client, so a context holding only the Dockerfile
+  /// fails the build.
   #[test]
   fn writes_the_guest_client_into_the_build_context() {
     let home = TempDir::new().expect("temp dir");

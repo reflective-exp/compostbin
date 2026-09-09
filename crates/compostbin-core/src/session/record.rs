@@ -1,16 +1,12 @@
 //! What the container that is running now was actually started with.
 //!
-//! F11 has no workaround: mounts cannot be added to a running container, and
-//! `start` deliberately attaches to a live one rather than recreating it. So a
-//! manifest edited mid-session is silently ignored until `stop` + `run` —
-//! dogfooding hit exactly that, and nothing anywhere reported it, which is
-//! indistinguishable from the feature being broken.
+//! Mounts cannot be added to a running container, and `start` attaches to a live
+//! one rather than recreating it. So a manifest edited mid-session is ignored
+//! until `stop` + `run`, which without a record looks like a broken feature.
 //!
-//! The mount set is recorded by whoever creates the container rather than read
-//! back out of `container inspect`. The CLI's JSON is Apple's, unversioned, and
-//! would have to be re-probed on every upgrade (§9), whereas what the check
-//! needs — the mounts as they stood when *this* container was created — is
-//! already ours at the moment we ask for them.
+//! Recorded by whoever creates the container rather than read back out of
+//! `container inspect`: that CLI's JSON is Apple's and unversioned, so it would
+//! need re-probing on every upgrade, while the mounts we passed are already ours.
 
 use crate::error::{ManifestError, PathError};
 use apple_container::model::Mount;
@@ -20,9 +16,8 @@ use std::path::Path;
 /// Beside Claude's home and the spool, under the session state directory.
 pub const RECORD_FILE: &str = "mounts.toml";
 
-/// One mount as it was passed to `container run`. Paths are strings because that
-/// is what TOML holds, and because the record is only ever compared, never
-/// resolved: it describes a container that already exists.
+/// One mount as it was passed to `container run`. Paths are strings: TOML holds
+/// them that way, and the record is only ever compared, never resolved.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordedMount {
@@ -60,9 +55,8 @@ impl Record {
     }
   }
 
-  /// `None` when there is no record, which is not an error: a session started
-  /// before this existed, or one whose state directory was cleaned while it ran,
-  /// has nothing to compare against.
+  /// `None` when there is no record, which is not an error: a state directory
+  /// cleaned mid-session leaves nothing to compare against.
   pub fn load(path: &Path) -> Result<Option<Self>, ManifestError> {
     let text = match std::fs::read_to_string(path) {
       Ok(text) => text,
@@ -78,8 +72,8 @@ impl Record {
       })
   }
 
-  /// Creates the state directory, because `run` may be creating the very first
-  /// container for this project.
+  /// Creates the state directory, since `run` may be creating this project's
+  /// first container.
   pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
     let rendered = toml::to_string(self).map_err(|source| ManifestError::Render {
       path: path.to_path_buf(),
@@ -95,9 +89,8 @@ impl Record {
 
   /// How the manifest's mounts differ from the ones the container really has.
   ///
-  /// Matched by guest path: that is the thing a session actually reaches for, so
-  /// a mount whose source moved is a *changed* mount rather than one removed and
-  /// another added, and reads that way in `doctor`'s output.
+  /// Matched by guest path, since that is what a session reaches for: a mount
+  /// whose source moved is a *changed* mount rather than a removal and an add.
   pub fn drift(&self, wanted: &[Mount]) -> Drift {
     let wanted: Vec<RecordedMount> = wanted.iter().map(RecordedMount::of).collect();
     let mut drift = Drift::default();
@@ -130,7 +123,7 @@ impl Record {
 }
 
 /// Every way the manifest and the running container disagree, kept apart because
-/// each one reads differently: a mount the manifest gained is invisible in the
+/// each reads differently: a mount the manifest gained is invisible in the
 /// session, one it lost is still exposed, and one that moved points elsewhere.
 #[derive(Debug, Default, PartialEq)]
 pub struct Drift {
@@ -144,9 +137,8 @@ impl Drift {
     self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty()
   }
 
-  /// One line per disagreeing mount, each phrased by what the user would
-  /// otherwise see happen. A line rather than a joined sentence because a mount
-  /// is already two paths wide, and three of them on one line cannot be read.
+  /// One line per disagreeing mount, phrased by what the user would otherwise
+  /// see happen. A line each, because a mount is already two paths wide.
   pub fn lines(&self) -> Vec<String> {
     let groups = [
       ("declared but not mounted, so invisible in the session", &self.added),
@@ -224,8 +216,7 @@ mod tests {
     );
   }
 
-  /// Matched by guest path, so this is one changed mount rather than an add and
-  /// a remove — the session still has `/workspace/a`, pointing somewhere else.
+  /// The session still has `/workspace/a`, pointing somewhere else.
   #[test]
   fn a_mount_whose_source_moved_reads_as_one_change() {
     let drift = recorded(&[mount("/host/old", "/workspace/a")]).drift(&[mount("/host/new", "/workspace/a")]);
@@ -270,12 +261,12 @@ mod tests {
     assert_eq!(
       Record::load(&path).expect("load should succeed"),
       Some(Record::of(&mounts)),
-      "the record is only useful if it survives the process that wrote it"
+      "the record must survive the process that wrote it"
     );
   }
 
-  /// A session that predates the record, or one whose state directory was
-  /// cleaned while it ran. `doctor` says so rather than claiming a match.
+  /// A session whose state directory was cleaned while it ran. `doctor` says so
+  /// rather than claiming a match.
   #[test]
   fn a_missing_record_is_not_an_error() {
     let temp = TempDir::new().expect("temp dir");

@@ -61,10 +61,9 @@ impl From<EngineError> for ImageError {
   }
 }
 
-/// A TOML file compostbin owns — the project manifest, or a session's record of
-/// the mounts its container was created with — that could not be read, parsed,
-/// or written. Every variant names the file, since the CLI may be looking at a
-/// manifest the user did not expect.
+/// A TOML file compostbin owns — the project manifest, or a session's mount
+/// record — that could not be read, parsed, or written. Every variant names the
+/// file, since the CLI may be looking at a manifest the user did not expect.
 #[derive(Debug)]
 pub enum ManifestError {
   Io(PathError),
@@ -102,8 +101,8 @@ impl Error for ManifestError {
 }
 
 /// A container that could not be created, or whose mount record could not be
-/// written. Both belong to one step — `run` records what it started the
-/// container with — so the caller has one thing to handle rather than two.
+/// written. One error because they are one step: `run` records what it started
+/// the container with.
 #[derive(Debug)]
 pub enum SessionError {
   Engine(EngineError),
@@ -149,9 +148,9 @@ impl From<ManifestError> for SessionError {
   }
 }
 
-/// A filesystem error that remembers which path caused it. `std::io::Error` alone
-/// reports "No such file or directory" without naming the file, which is useless
-/// in `add` and `doctor` output.
+/// A filesystem error that remembers which path caused it. `std::io::Error`
+/// alone says "No such file or directory" without naming the file, which is
+/// useless in `add` and `doctor` output.
 #[derive(Debug)]
 pub struct PathError {
   path: PathBuf,
@@ -184,8 +183,7 @@ impl Error for PathError {
 }
 
 /// Why a host command was refused — an outcome reported to the guest, not a
-/// failure of the agent. Separate from `HostError` so it compares by value,
-/// which the allowlist tests assert on.
+/// failure of the agent. Separate from `HostError` so it compares by value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Refusal {
   /// Declared without `arguments = true`.

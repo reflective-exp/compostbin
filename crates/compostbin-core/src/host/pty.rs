@@ -1,9 +1,8 @@
 //! A pseudo-terminal for host commands declared `tty = true`.
 //!
-//! This wires up descriptors; it never changes what is executed. The terminal is
-//! deliberately *not* obtained by wrapping the command in `script -c` or
-//! `sh -c` — the usual shortcuts — because either would reintroduce shell
-//! parsing, and with it the injection the allowlist exists to prevent.
+//! This wires up descriptors; it never changes what is executed. The usual
+//! shortcuts — wrapping the command in `script -c` or `sh -c` — would reintroduce
+//! shell parsing, and with it the injection the allowlist exists to prevent.
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};

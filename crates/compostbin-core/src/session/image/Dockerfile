@@ -28,14 +28,13 @@ COPY compostbin-host /usr/local/bin/compostbin-host
 RUN chmod +x /usr/local/bin/compostbin-host
 
 # Everything past this point belongs to the unprivileged user the session runs
-# as. Nothing in a session should need root: the mounts are the user's own files,
-# and a container that installs packages at run time is a container whose image
-# is wrong.
+# as. Nothing in a session needs root: the mounts are the user's own files, and a
+# container that installs packages at run time is one whose image is wrong.
 RUN useradd --create-home --shell /bin/bash claude
 
-# Both are mounted from the host at run time (D5, D2); created here, owned by
-# `claude`, so the first run has a mountpoint even before the host directory
-# exists and nothing under them is left owned by root.
+# Both are mounted from the host at run time; created here, owned by `claude`, so
+# the first run has a mountpoint even before the host directory exists and
+# nothing under them is left owned by root.
 RUN mkdir -p /home/claude/.claude /workspace \
  && chown -R claude:claude /home/claude /workspace
 

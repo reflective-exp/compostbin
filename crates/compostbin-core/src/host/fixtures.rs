@@ -1,6 +1,5 @@
-//! Fixtures shared by the submodule tests. Here rather than in any one of them
-//! because the allowlist and the spool are what every side of the bridge needs
-//! to be tested at all.
+//! Fixtures shared by the submodule tests: the allowlist and the spool, which
+//! every side of the bridge needs to be tested at all.
 
 use crate::host::Spool;
 use crate::manifest::HostCommand;
@@ -16,8 +15,8 @@ pub fn commands(entries: &[(&str, &[&str], bool)]) -> BTreeMap<String, HostComma
         HostCommand {
           arguments: *arguments,
           argv: argv.iter().map(|word| word.to_string()).collect(),
-          // These tests are all about the pipe path, where the streams stay
-          // separate and can be asserted on independently.
+          // The pipe path, where the streams stay separate and can be asserted
+          // on independently.
           tty: false,
         },
       )
@@ -25,8 +24,7 @@ pub fn commands(entries: &[(&str, &[&str], bool)]) -> BTreeMap<String, HostComma
     .collect()
 }
 
-/// One command declared `tty = true`, which is the only way to reach the pty
-/// path — the flag is per command, and off by default.
+/// One command declared `tty = true`, the only way to reach the pty path.
 pub fn terminal_command(name: &str, argv: &[&str]) -> BTreeMap<String, HostCommand> {
   let mut commands = commands(&[(name, argv, false)]);
   commands

@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Session state, keyed by container name: Claude's home (which persists, so
-/// `claude --continue` works) beside the transient spool (which `clean` removes).
+/// Session state, keyed by container name: Claude's home, which persists so
+/// `--continue` works, beside the spool, which `clean` removes.
 pub const SESSIONS_DIR: &str = "~/.local/state/compostbin/sessions";
 pub const DEFAULT_CONTAINER_CPUS: u32 = 4;
 pub const DEFAULT_CONTAINER_MEMORY: &str = "8G";
@@ -18,12 +18,12 @@ pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
 pub struct Manifest {
   pub claude: ClaudeConfig,
   pub container: ContainerConfig,
-  /// Skipped when empty so a manifest that declares no host commands renders
-  /// exactly as it did before the feature existed.
+  /// Skipped when empty, so a manifest that declares no host commands renders
+  /// no table.
   #[serde(skip_serializing_if = "HostConfig::is_empty")]
   pub host: HostConfig,
-  /// Per-project additions to the base image. Empty by default, and skipped when
-  /// empty so a project that needs nothing renders no table.
+  /// Per-project additions to the base image, skipped when empty so a project
+  /// that needs nothing renders no table.
   #[serde(skip_serializing_if = "ImageConfig::is_empty")]
   pub image: ImageConfig,
   #[serde(
@@ -63,16 +63,15 @@ impl Manifest {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClaudeConfig {
-  /// Overrides the per-session default under `SESSIONS_DIR`. Unset is the
-  /// normal case: sharing one home between projects would mean `--continue`
-  /// resumed whichever project spoke last.
+  /// Overrides the per-session default under `SESSIONS_DIR`. Normally unset:
+  /// sharing one home between projects would make `--continue` resume whichever
+  /// project spoke last.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub home: Option<String>,
   pub seed_from_keychain: bool,
   /// Extra `~/.claude` entries — files or whole directories — this project wants
-  /// beyond the host settings every session already gets. Empty in the normal
-  /// case, and skipped when empty so a manifest says nothing about sharing until
-  /// it has something of its own to add.
+  /// beyond the host settings every session already gets. Skipped when empty, so
+  /// a manifest says nothing about sharing until it has something to add.
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub shared: Vec<String>,
 }
@@ -106,8 +105,8 @@ impl Default for ContainerConfig {
 }
 
 /// Commands the guest may ask the host to run, keyed by the name it sends. A map
-/// rather than an array of tables: the name is a lookup key, and a `BTreeMap`
-/// renders alphabetically, keeping diffs deterministic.
+/// because the name is a lookup key, and a `BTreeMap` because rendering
+/// alphabetically keeps diffs deterministic.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HostConfig {
@@ -116,8 +115,7 @@ pub struct HostConfig {
   /// work.
   ///
   /// Declared before `commands`, against this table's alphabetical order, and it
-  /// must stay there: TOML cannot express a bare value after a table, so
-  /// serialising it second makes `save` fail.
+  /// must stay there: TOML cannot express a bare value after a table.
   pub concurrency: usize,
   pub commands: BTreeMap<String, HostCommand>,
 }
@@ -139,8 +137,7 @@ impl HostConfig {
   }
 }
 
-/// `argv` lives only on the host; the guest sends the name it is keyed by, never
-/// a command line of its own.
+/// `argv` lives only on the host; the guest sends the key, never a command line.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostCommand {
@@ -149,17 +146,15 @@ pub struct HostCommand {
   pub arguments: bool,
   pub argv: Vec<String>,
   /// Run under a pty, so colour, progress and prompts work. A terminal is one
-  /// device, so this merges stdout and stderr — off by default, keeping them
-  /// separate for anything read by a machine.
+  /// device, so this merges stdout and stderr — hence off by default, keeping
+  /// them separate for anything read by a machine.
   #[serde(default)]
   pub tty: bool,
 }
 
-/// Per-project image additions. direnv is the motivating case: it is a property
-/// of a project, not of every project, so it does not belong in the base image.
-///
-/// Non-empty means the session runs a derived image built `FROM` the base;
-/// empty means it runs the base image itself, with no build of its own.
+/// Per-project image additions, for what belongs to one project rather than
+/// every project — direnv, say. Non-empty means the session runs a derived image
+/// built `FROM` the base; empty means it runs the base image itself.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ImageConfig {
@@ -183,8 +178,8 @@ pub struct PathEntry {
   pub readonly: bool,
   pub source: String,
   /// An absolute *guest* path, for the rare case where something must appear at
-  /// a fixed location. The default — `/workspace/<basename>` — is what keeps
-  /// host paths out of the container.
+  /// a fixed location. The default, `/workspace/<basename>`, is what keeps host
+  /// paths out of the container.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub target: Option<String>,
 }
@@ -316,8 +311,7 @@ tty = true
   }
 
   /// TOML cannot express a bare value after a table, so `concurrency` has to
-  /// serialise before `commands`. Saving a manifest with commands is what would
-  /// fail if that order were ever reversed.
+  /// serialise before `commands`; reversing that order breaks this save.
   #[test]
   fn saves_a_manifest_that_declares_host_commands() {
     let temp = TempDir::new().expect("temp dir");

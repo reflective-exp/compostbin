@@ -1,9 +1,8 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-/// `CARGO_BIN_EXE_*` is set only for tests inside the binary's own package, and
-/// cargo guarantees the binary is rebuilt before they run. Locating it by hand
-/// from `current_exe` would happily test a stale build.
+/// Cargo rebuilds the binary before these run and points this at it. Locating it
+/// by hand from `current_exe` would happily test a stale build.
 const BINARY: &str = env!("CARGO_BIN_EXE_compostbin");
 
 fn compostbin(project_dir: &std::path::Path, arguments: &[&str]) -> std::process::Output {

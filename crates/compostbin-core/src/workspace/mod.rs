@@ -1,8 +1,7 @@
 //! Which host paths a session can see, and where they land in the guest.
 //!
-//! `paths` is the layer beneath, turning what the manifest says into host paths;
-//! `danger` is the judgement on top of it, deciding which of those should not be
-//! mounted at all.
+//! `paths` beneath turns what the manifest says into host paths; `danger` on top
+//! decides which of those should not be mounted at all.
 
 pub mod danger;
 pub mod paths;
@@ -11,12 +10,11 @@ use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// Everything the session mounts lands under this one guest directory, so no
-/// host path — and with it no host username or directory layout — is visible
-/// inside the container.
+/// host path — and so no host username or directory layout — is visible inside
+/// the container.
 pub const WORKSPACE_TARGET: &str = "/workspace";
 
-/// Why a host path is in the workspace, which is all `ls` needs to explain a
-/// mount to the person reading it.
+/// Why a host path is in the workspace — all `ls` needs to explain a mount.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Origin {
   /// A `[[paths]]` entry: mounted because it was asked for by name.
@@ -35,10 +33,9 @@ pub struct Entry {
   pub readonly: bool,
 }
 
-/// A host symlink lying inside a mounted tree whose target lies outside every
-/// mounted tree. It reads perfectly well on the host and is dead in the
-/// container (plan §1, F5), which makes it the likeliest silent failure there
-/// is: the path exists, and simply is not there.
+/// A host symlink inside a mounted tree whose target lies outside every mounted
+/// tree. It reads perfectly well on the host and is dead in the container, so
+/// the path exists and simply is not there.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Escape {
   pub link: PathBuf,
@@ -46,9 +43,9 @@ pub struct Escape {
 }
 
 /// What a walk of the mounted trees found. `exhausted` matters as much as the
-/// escapes do: a `roots` entry with a `target/` or `node_modules` under it has
-/// no useful bound, so the walk stops rather than costing a minute of `doctor`,
-/// and says so instead of reporting a clean tree it never finished reading.
+/// escapes: a root with a `target/` or `node_modules` under it has no useful
+/// bound, so the walk stops rather than costing a minute of `doctor`, and says so
+/// instead of reporting a clean tree it never finished reading.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Escapes {
   pub escapes: Vec<Escape>,
@@ -62,12 +59,11 @@ pub const WALK_LIMIT: usize = 50_000;
 /// The host paths a session exposes, each with the `/workspace` path it appears
 /// at in the guest.
 ///
-/// Nothing here is a symlink farm. A session directory of symlinks pointing at
-/// the real projects is the obvious way to assemble one tree out of many, and it
-/// does not work: a host symlink inside a mounted tree that points outside it
-/// dangles in the container (plan §1, F5). So each entry is its own bind mount,
-/// and the assembly happens in the argv rather than on the host filesystem.
-/// Consequence: adding a path still requires recreating the container (F11).
+/// Not a symlink farm. Assembling one tree out of many by symlinking the real
+/// projects into a session directory does not work: a host symlink pointing out
+/// of a mounted tree dangles in the container. So each entry is its own bind
+/// mount, assembled in the argv — which is why adding a path requires recreating
+/// the container.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Workspace {
   entries: Vec<Entry>,
@@ -80,8 +76,8 @@ impl Workspace {
 
   /// Adds `host` under a `/workspace` name derived from its basename, or at
   /// `target` when one was declared. Later entries never take a name an earlier
-  /// one holds: a second `libfoo` becomes `libfoo-2`, so two projects that share
-  /// a basename can both be mounted.
+  /// one holds — a second `libfoo` becomes `libfoo-2` — so two projects sharing a
+  /// basename can both be mounted.
   pub fn push(&mut self, host: impl Into<PathBuf>, target: Option<PathBuf>, origin: Origin, readonly: bool) {
     let host = host.into();
     let guest = match target {
@@ -101,9 +97,8 @@ impl Workspace {
     &self.entries
   }
 
-  /// The guest path for a host path lying in, or under, one of the entries.
-  /// `None` when nothing mounted covers it — the caller cannot make it visible
-  /// by guessing.
+  /// The guest path for a host path in or under one of the entries. `None` when
+  /// nothing mounted covers it, which no guess can fix.
   pub fn guest_path(&self, host: &Path) -> Option<PathBuf> {
     self.entries.iter().find_map(|entry| {
       host
@@ -113,13 +108,12 @@ impl Workspace {
     })
   }
 
-  /// Every symlink in a mounted tree that escapes every mounted tree (F5).
+  /// Every symlink in a mounted tree that escapes every mounted tree.
   ///
   /// Symlinks are found, never followed: a link to a directory is reported and
-  /// not descended into, which both bounds the walk against cycles and matches
-  /// what the container sees. A link that is broken on the host too is skipped —
-  /// it is equally broken in both places, so it is not the silent divergence
-  /// this check exists to find.
+  /// not descended into, which bounds the walk against cycles and matches what
+  /// the container sees. A link broken on the host too is skipped — equally
+  /// broken in both places is not a divergence.
   pub fn escaping_symlinks(&self, limit: usize) -> Escapes {
     let mut found = Escapes::default();
     let mut budget = limit;
@@ -162,9 +156,9 @@ impl Workspace {
     found
   }
 
-  /// `<basename>`, or `<basename>-2`, `-3`, … if that is taken. A path with no
-  /// basename at all (`/`) is named `root`, which `doctor` will complain about
-  /// long before it is mounted.
+  /// `<basename>`, or `<basename>-2`, `-3`, … if taken. A path with no basename
+  /// (`/`) is named `root`, which `doctor` complains about long before it is
+  /// mounted.
   fn unique_name(&self, host: &Path) -> String {
     let base = host
       .file_name()
@@ -195,7 +189,7 @@ mod tests {
   use tempfile::TempDir;
 
   /// A canonical temp root, so macOS's `/var` -> `/private/var` symlink does not
-  /// turn every path in these assertions into an escape of its own.
+  /// turn every path in these assertions into an escape.
   fn temp_root() -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("temp dir");
     let root = temp.path().canonicalize().expect("canonical temp root");
@@ -238,7 +232,7 @@ mod tests {
     assert_eq!(
       workspace.escaping_symlinks(WALK_LIMIT),
       Escapes::default(),
-      "the target is mounted too, so the link is live in the container (F4)"
+      "the target is mounted too, so the link is live in the container"
     );
   }
 
@@ -254,7 +248,7 @@ mod tests {
     assert_eq!(
       workspace.escaping_symlinks(WALK_LIMIT),
       Escapes::default(),
-      "equally broken in both places is not a container-specific divergence"
+      "equally broken in both places is not a divergence"
     );
   }
 

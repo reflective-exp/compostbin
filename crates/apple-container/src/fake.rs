@@ -3,9 +3,8 @@ use crate::error::EngineError;
 use crate::model::{BuildSpec, ExecSpec, RunSpec};
 use std::cell::RefCell;
 
-/// An `Engine` that records the argv of every call instead of running anything.
-/// Lets callers assert both what was invoked and — just as importantly — that
-/// nothing was invoked.
+/// An `Engine` that records the argv of every call instead of running anything,
+/// so callers can assert what was invoked and that nothing else was.
 #[derive(Debug, Default)]
 pub struct RecordingEngine {
   calls: RefCell<Vec<Vec<String>>>,
@@ -13,7 +12,7 @@ pub struct RecordingEngine {
   containers: Vec<(String, bool)>,
   exec_exit_code: i32,
   /// `None` poses a daemon that has not been started, where every plugin call
-  /// fails (F13).
+  /// fails.
   images: Option<Vec<String>>,
   version: Option<String>,
 }

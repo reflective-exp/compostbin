@@ -44,15 +44,13 @@ impl Spool {
   /// Clears whatever the last container left in flight, returning what it
   /// removed.
   ///
-  /// A guest client removes its own files on the way out, but nothing guarantees
-  /// it gets to: killed mid-request, it leaves chunks and a claim that no one
-  /// will ever collect, and they accumulate for the life of the session
-  /// directory. The safe moment to sweep is the one where no guest can be
-  /// waiting on any of it — creating the container — because every client that
-  /// could have submitted a request died with the container before it.
+  /// A guest client removes its own files on the way out, but a killed one leaves
+  /// chunks and a claim that nothing will ever collect. Creating the container is
+  /// the safe moment to sweep them: every client that could be waiting died with
+  /// the container before it.
   ///
-  /// Requests are deliberately not swept: one submitted between `create` and the
-  /// container starting is a live request, and dropping it would hang its client.
+  /// Requests are deliberately not swept — one submitted between `create` and the
+  /// container starting is live, and dropping it would hang its client.
   pub fn sweep(&self) -> Result<Vec<PathBuf>, PathError> {
     let mut removed = Vec::new();
 
@@ -118,9 +116,8 @@ mod tests {
   use crate::host::{OUTPUT_STREAM, STATUS_SUFFIX};
   use tempfile::TempDir;
 
-  /// The gap §9 recorded: a client killed mid-request leaves chunks and a claim
-  /// that nothing will ever collect. Creating a container is the moment they are
-  /// provably dead, so that is when they go.
+  /// Creating a container is the moment a killed client's leftovers are provably
+  /// dead.
   #[test]
   fn sweeps_what_a_killed_client_left_behind() {
     let (_temp, spool) = spool();
@@ -144,8 +141,8 @@ mod tests {
     assert_eq!(std::fs::read_dir(spool.running()).expect("running").count(), 0);
   }
 
-  /// A request submitted between the sweep and the container starting is live:
-  /// dropping it would hang the client that is waiting on its status.
+  /// A request submitted between the sweep and the container starting is live;
+  /// dropping it would hang the client waiting on its status.
   #[test]
   fn sweeps_nothing_a_client_is_still_waiting_on() {
     let (_temp, spool) = spool();

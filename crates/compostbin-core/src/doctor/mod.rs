@@ -1,9 +1,8 @@
 //! What to say when something about a session is wrong.
 //!
-//! One submodule per subject — the engine, what is mounted, and the ways out of
-//! the container — because a check is only ever a paragraph of prose about one
-//! of them. `diagnose` is the whole of the public surface: the checks themselves
-//! stay internal, so the order they run in is decided in exactly one place.
+//! One submodule per subject: the engine, what is mounted, and the ways out of
+//! the container. `diagnose` is the whole public surface — the checks stay
+//! internal, so the order they run in is decided in one place.
 
 mod engine;
 mod host;
@@ -26,16 +25,15 @@ pub enum Status {
 pub struct Check {
   pub detail: String,
   /// The findings behind `detail`, when a check is about several things at once
-  /// — missing paths, dead symlinks, allowlisted commands. Kept apart from the
-  /// sentence rather than joined into it because these are the parts a reader
-  /// scans down, and a line of them separated by commas is unreadable at the
-  /// width a path already takes.
+  /// — missing paths, dead symlinks, allowlisted commands. Kept out of the
+  /// sentence: a reader scans them down a column, and comma-separated they are
+  /// unreadable at the width a path already takes.
   pub items: Vec<String>,
   pub name: String,
   pub status: Status,
 }
 
-/// Every §7 check, in a fixed order. `api_key_present` is passed in rather than
+/// Every check, in a fixed order. `api_key_present` is passed in rather than
 /// read here so the whole diagnosis is a pure function of its inputs.
 pub fn diagnose(
   session: &Session,
@@ -69,9 +67,8 @@ fn check(name: &str, status: Status, detail: impl Into<String>) -> Check {
   }
 }
 
-/// A check whose sentence is a heading over a list. The sentence still has to
-/// stand on its own: the items are printed under it, not inside it, so it must
-/// say what they are without naming any of them.
+/// A check whose sentence is a heading over a list. The items print under the
+/// sentence, not inside it, so it must say what they are without naming any.
 fn listed(name: &str, status: Status, detail: impl Into<String>, items: Vec<String>) -> Check {
   Check {
     items,
@@ -80,8 +77,8 @@ fn listed(name: &str, status: Status, detail: impl Into<String>, items: Vec<Stri
 }
 
 /// Every case is driven through `diagnose` rather than the check it is about:
-/// the order and the completeness of the list are part of what `doctor` promises,
-/// and a test that called one check directly would not notice it being dropped.
+/// order and completeness are part of what `doctor` promises, and a test calling
+/// one check directly would not notice it being dropped.
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -134,9 +131,8 @@ mod tests {
     format!("\"{}\"", path.join(suffix).display())
   }
 
-  /// The findings alone, for the cases that only care that a check named the
-  /// thing it found. How they are laid out is the CLI's business, not this
-  /// crate's, so nothing here reconstructs a printed line.
+  /// The findings alone, for cases that only care a check named what it found.
+  /// Layout is the CLI's business, so nothing here rebuilds a printed line.
   fn findings(check: &Check) -> String {
     check.items.join("\n")
   }
@@ -389,9 +385,8 @@ mod tests {
     );
   }
 
-  /// The silent failure dogfooding found: the session kept running with the
-  /// mount set it was created with, and nothing anywhere said the manifest had
-  /// moved on.
+  /// The session keeps the mount set it was created with, so something has to
+  /// say the manifest moved on.
   #[test]
   fn warns_when_the_running_container_predates_a_manifest_change() {
     let home = TempDir::new().expect("temp dir");
@@ -446,8 +441,8 @@ mod tests {
     assert_eq!(check(&checks, "container mounts").status, Status::Ok);
   }
 
-  /// Nothing has been started, so there is no mount set to disagree with — and
-  /// a fresh checkout must not be told to stop a container that does not exist.
+  /// Nothing has been started, so there is no mount set to disagree with, and a
+  /// fresh checkout must not be told to stop a container that does not exist.
   #[test]
   fn says_nothing_is_running_rather_than_warning() {
     let home = TempDir::new().expect("temp dir");

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 /// A `container build` invocation. The Dockerfile is not named: it is written
-/// into `context` as `Dockerfile`, which is where the CLI looks by default.
+/// into `context` as `Dockerfile`, where the CLI looks by default.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BuildSpec {
   pub context: PathBuf,

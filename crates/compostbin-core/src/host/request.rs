@@ -4,13 +4,11 @@ use crate::error::Refusal;
 use crate::manifest::HostCommand;
 use std::collections::BTreeMap;
 
-/// Arguments that point a command at other code or configuration. Hygiene
-/// against widening one by accident, not a boundary: a command that compiles the
-/// repo already runs the repo's code on the host by design.
+/// Arguments that point a command at other code or configuration. Hygiene, not a
+/// boundary: a command that compiles the repo already runs the repo's code.
 pub const DENIED_ARGUMENT_PREFIXES: [&str; 3] = ["--config", "--manifest-path", "-Z"];
 
-/// One guest request: the name of an allowlisted command, plus any arguments
-/// the guest appended.
+/// The name of an allowlisted command, plus any arguments the guest appended.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Request {
   pub arguments: Vec<String>,
@@ -25,9 +23,9 @@ impl Request {
     }
   }
 
-  /// One field per line, command first: the writer is a shell script, and a
-  /// format it emits with `printf '%s\n'` has no escaping to get wrong. The cost
-  /// is that an argument may not contain a newline.
+  /// One field per line, command first: the writer is a shell script, and what
+  /// `printf '%s\n'` emits has no escaping to get wrong. The cost is that an
+  /// argument may not contain a newline.
   pub fn render(&self) -> Result<String, Refusal> {
     for field in std::iter::once(&self.command).chain(self.arguments.iter()) {
       if field.contains('\n') {
@@ -60,7 +58,7 @@ impl Request {
   }
 }
 
-/// The argv to run, or why the request is refused. Pure, so the whole allowlist
+/// The argv to run, or why the request is refused. Pure, so the allowlist
 /// decision is testable without a filesystem or a container.
 pub fn resolve(commands: &BTreeMap<String, HostCommand>, request: &Request) -> Result<Vec<String>, Refusal> {
   let Some(command) = commands.get(&request.command) else {
@@ -118,7 +116,7 @@ mod tests {
     );
   }
 
-  /// The whole point of the per-command flag: `test` is exact, `test-one` is not.
+  /// The per-command flag: `test` is exact, `test-one` is not.
   #[test]
   fn refuses_arguments_unless_the_command_opted_in() {
     let filter = vec!["my_test".to_string()];
@@ -144,8 +142,7 @@ mod tests {
     }
   }
 
-  /// A denied prefix must not swallow a legitimate argument that merely starts
-  /// with the same letters.
+  /// A denied prefix must not swallow an argument that merely starts the same.
   #[test]
   fn allows_an_argument_that_only_looks_like_a_denied_one() {
     assert_eq!(

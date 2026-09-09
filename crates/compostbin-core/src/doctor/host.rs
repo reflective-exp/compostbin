@@ -1,12 +1,12 @@
-//! The two ways a session reaches back out of the container: the commands it may
-//! run on the host, and the token it authenticates to Anthropic with.
+//! The two ways a session reaches out of the container: the commands it may run
+//! on the host, and the token it authenticates with.
 
 use super::{Check, Status, check, listed};
 use crate::session::Session;
 use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialSource, KEYCHAIN_SERVICE};
 
-/// Every allowlisted command runs on the host with the user's own privileges
-/// (D6), so this is where that stops being invisible.
+/// Every allowlisted command runs on the host with the user's own privileges,
+/// so this is where that stops being invisible.
 pub fn allowlist(session: &Session) -> Check {
   if session.manifest.host.is_empty() {
     return check(

@@ -14,7 +14,7 @@ pub trait Engine {
   fn delete(&self, name: &str) -> Result<(), EngineError>;
 
   /// Runs a command in a live container, inheriting our stdio so an interactive
-  /// session keeps the real terminal. Returns the process exit code.
+  /// session keeps the real terminal.
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError>;
 
   /// Every image the daemon holds, as `name:tag`. Fails when the daemon is not
@@ -27,9 +27,8 @@ pub trait Engine {
   /// Only the containers that are running, and so ready for `exec`.
   fn running_containers(&self) -> Result<Vec<String>, EngineError>;
 
-  /// Starts the builder container, which `build` needs running. Idempotent: it
-  /// succeeds when the builder is already up. Sized explicitly because the
-  /// 2 GB default OOMs on the Claude Code install.
+  /// Starts the builder container `build` needs, succeeding when it is already
+  /// up. Sized explicitly because the 2 GB default OOMs installing Claude Code.
   fn start_builder(&self, memory: Option<&str>) -> Result<(), EngineError>;
 
   fn stop(&self, name: &str) -> Result<(), EngineError>;
@@ -81,8 +80,8 @@ impl CliEngine {
     Ok(parse::names(&stdout))
   }
 
-  /// Runs with our stdio inherited, so long-running output reaches the terminal
-  /// as it happens instead of being buffered until the process ends.
+  /// Inherits our stdio, so long-running output reaches the terminal as it
+  /// happens instead of buffering until the process ends.
   fn passthrough(&self, argv: Vec<String>) -> Result<i32, EngineError> {
     let status = Command::new(&self.program)
       .args(&argv)

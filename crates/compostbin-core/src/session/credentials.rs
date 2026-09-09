@@ -16,8 +16,8 @@ pub enum SeedOutcome {
   Seeded,
 }
 
-/// A place to read the host's Claude token from. `Ok(None)` means "no such
-/// entry", which is not an error: the session may authenticate by API key.
+/// A place to read the host's Claude token from. `Ok(None)` — no such entry — is
+/// not an error: the session may authenticate by API key.
 pub trait CredentialSource {
   fn read(&self) -> Result<Option<String>, CredentialError>;
 }
@@ -48,9 +48,9 @@ impl CredentialSource for Keychain {
   }
 }
 
-/// Copies the host's Claude token into the bind-mounted Claude home, but only
-/// when there is no token there already: the container refreshes its own token
-/// into that same file, and it may be newer than the Keychain's.
+/// Copies the host's Claude token into the bind-mounted Claude home, only when
+/// none is there already: the container refreshes its own token into that same
+/// file, and it may be newer than the Keychain's.
 pub fn seed(claude_home: &Path, enabled: bool, source: &impl CredentialSource) -> Result<SeedOutcome, CredentialError> {
   if !enabled {
     return Ok(SeedOutcome::Disabled);

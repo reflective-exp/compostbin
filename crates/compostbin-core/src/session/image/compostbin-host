@@ -1,13 +1,12 @@
 #!/bin/sh
 # Ask the host to run an allowlisted command and behave as though this shell had
 # run it: stdin goes to it, stdout and stderr come back on ours, we exit with its
-# status. A shell script rather than compostbin itself, because the container is
-# Linux and compostbin is a macOS binary; it speaks the spool protocol in
-# compostbin-core's `host` module.
+# status. A shell script rather than compostbin itself, the container being Linux
+# and compostbin a macOS binary; it speaks the spool protocol in `host`.
 #
-# Output arrives as numbered chunks, not a stream we watch grow: a file this side
-# observes while the host is still appending stays stale here forever (F14).
-# Each chunk is renamed into place, so it is complete before we open it.
+# Output arrives as numbered chunks, not a stream we watch grow: a file observed
+# here while the host appends to it stays stale forever. Each chunk is renamed
+# into place, so it is complete before we open it.
 set -eu
 
 spool=/run/compostbin/host
@@ -22,16 +21,16 @@ if [ "$#" -lt 1 ]; then
   exit 64
 fi
 
-# Timestamp first, so ids sort into arrival order and the host serves them in
-# that order. The random suffix is for concurrency: Claude's subagents each call
-# this script independently, and two of them must not pick the same id.
+# Timestamp first, so ids sort into arrival order and are served in it. The
+# random suffix is for concurrency: subagents call this script independently,
+# and two must not pick the same id.
 id="$(date +%s)-$$-$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
 responses="$spool/responses"
 input="$responses/$id.in"
 status="$responses/$id.status"
 
 # Emits one stream's chunks in sequence order, removing each once written. The
-# glob sorts lexicographically, hence the fixed-width sequence numbers.
+# glob sorts lexicographically, hence fixed-width sequence numbers.
 drain() {
   for chunk in "$responses/$id.$1."*; do
     [ -e "$chunk" ] || continue
@@ -43,12 +42,12 @@ drain() {
   done
 }
 
-# Input first, so anything piped in is waiting when the command starts. The
-# marker tells the host input has ended, a file having no EOF of its own; if our
-# stdin never closes it never appears, and the host stops pumping at exit.
+# Input first, so anything piped in is waiting when the command starts. A file
+# has no EOF of its own, so the marker says input has ended; if our stdin never
+# closes it never appears, and the host stops pumping at exit.
 : > "$input"
-# Duplicated onto another descriptor first: a background job in a non-interactive
-# shell gets stdin from /dev/null, so a plain `cat &` would forward nothing.
+# Duplicated onto another descriptor: a background job in a non-interactive shell
+# gets stdin from /dev/null, so a plain `cat &` would forward nothing.
 exec 3<&0
 ( cat <&3 >> "$input" 2>/dev/null || true; : > "$input.eof" ) &
 forwarder=$!

@@ -1,6 +1,6 @@
-//! Everything that can be wrong about what the container can see: a declared
-//! path that is not there, a link that dies at the mount boundary, a mount set
-//! the running container never got, and a mount that hands over too much.
+//! What can be wrong about what the container can see: a declared path that is
+//! not there, a link that dies at the mount boundary, a mount set the running
+//! container never got, and a mount that hands over too much.
 
 use super::{Check, Status, check, listed};
 use crate::session::Session;
@@ -9,8 +9,8 @@ use crate::workspace::WALK_LIMIT;
 use crate::workspace::danger::{Danger, danger};
 use apple_container::engine::Engine;
 
-/// Roots and explicit paths only. Claude's home is deliberately excluded: `run`
-/// creates it, so its absence before the first session is normal.
+/// Roots and explicit paths only. Claude's home is excluded: `run` creates it,
+/// so its absence before the first session is normal.
 pub fn mounted_paths(session: &Session) -> Check {
   let declared = session
     .manifest
@@ -36,13 +36,12 @@ pub fn mounted_paths(session: &Session) -> Check {
   )
 }
 
-/// The likeliest silent failure of the whole design: a symlink that resolves
-/// on the host and dangles in the container, because its target is outside every
-/// mounted tree (F5). Nothing reports it — the file is simply not there.
+/// A symlink that resolves on the host and dangles in the container, its target
+/// being outside every mounted tree. Nothing else reports it — the file is simply
+/// not there.
 ///
-/// A warning rather than a failure: the session runs, and the fix is either to
-/// mount the target or to stop relying on the link, both of which are the user's
-/// call.
+/// A warning, not a failure: the session runs, and the fix — mount the target, or
+/// stop relying on the link — is the user's call.
 pub fn dangling_symlinks(session: &Session) -> Check {
   const NAMED: usize = 5;
 
@@ -65,8 +64,8 @@ pub fn dangling_symlinks(session: &Session) -> Check {
     .map(|escape| format!("{} -> {}", escape.link.display(), escape.target.display()))
     .collect();
 
-  // The count goes in the list rather than the sentence, so the sentence stays
-  // true however many were named.
+  // In the list rather than the sentence, so the sentence stays true however
+  // many were named.
   let rest = found.escapes.len().saturating_sub(named.len());
   if rest > 0 {
     named.push(format!("and {rest} more"));
@@ -80,14 +79,14 @@ pub fn dangling_symlinks(session: &Session) -> Check {
   )
 }
 
-/// Whether the container that is running now has the mounts the manifest
-/// describes. `run` attaches to a live container rather than recreating it, and
-/// F11 forbids adding mounts to one, so a manifest edited mid-session takes
-/// effect at the next `stop` + `run` and not before. Nothing else says so: the
-/// path is simply missing in the guest, which reads as the feature being broken.
+/// Whether the running container has the mounts the manifest describes. `run`
+/// attaches to a live container, and mounts cannot be added to one, so a manifest
+/// edited mid-session takes effect at the next `stop` + `run` and not before.
+/// Nothing else says so: the path is simply missing in the guest, which reads as
+/// the feature being broken.
 ///
-/// A warning, not a failure — the session works, and recreating the container is
-/// the user's call — but the *fix* is named, because it is not guessable.
+/// A warning, not a failure — recreating the container is the user's call — but
+/// the fix is named, because it is not guessable.
 pub fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
   let name = session.container_name();
 
@@ -144,8 +143,8 @@ pub fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
   )
 }
 
-/// Every mounted path, not only roots: a manifest can be edited by hand, so
-/// `add`'s refusal is not the only way a dangerous path gets in.
+/// Every mounted path, not only roots: a hand-edited manifest bypasses `add`'s
+/// refusal.
 pub fn root_breadth(session: &Session) -> Check {
   let dangerous: Vec<String> = session
     .workspace()

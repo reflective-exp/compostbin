@@ -76,9 +76,9 @@ mod tests {
     PathResolver::new("/Users/user/workspace/compostbin", "/Users/user")
   }
 
-  /// A temp tree containing `real/file.txt` and a `link` symlink pointing at `real`.
-  /// The returned path is canonical, so macOS's `/var` -> `/private/var` symlink does
-  /// not leak into the assertions.
+  /// A temp tree holding `real/file.txt` and a `link` symlink pointing at `real`.
+  /// The returned path is canonical, so macOS's `/var` -> `/private/var` symlink
+  /// does not leak into the assertions.
   fn linked_tree() -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("temp dir");
     let root = temp.path().canonicalize().expect("canonical temp root");

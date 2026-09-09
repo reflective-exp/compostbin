@@ -1,12 +1,12 @@
-//! What the `container` CLI and its daemon say about themselves, and whether the
-//! image a session needs is among what they have built.
+//! What the `container` CLI and its daemon say about themselves, and whether
+//! they hold the image a session needs.
 
 use super::{Check, Status, check};
 use crate::session::Session;
 use apple_container::engine::Engine;
 use apple_container::error::EngineError;
 
-/// The `container` CLI version every fact in the plan was measured against.
+/// The `container` CLI version this crate's behaviour was verified against.
 pub const TESTED_CLI_VERSION: &str = "1.3.1";
 
 pub fn cli_version(engine: &impl Engine) -> Check {
@@ -15,7 +15,7 @@ pub fn cli_version(engine: &impl Engine) -> Check {
     Ok(Some(version)) => check(
       "container CLI",
       Status::Warn,
-      format!("{version}; every fact in the plan was measured on {TESTED_CLI_VERSION}"),
+      format!("{version}; compostbin was verified against {TESTED_CLI_VERSION}"),
     ),
     Ok(None) => check("container CLI", Status::Warn, "unrecognised version output"),
     Err(error) => check("container CLI", Status::Fail, error.to_string()),

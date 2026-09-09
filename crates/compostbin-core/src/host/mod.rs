@@ -1,11 +1,10 @@
 //! The bridge back out of the container: the guest's only way to run anything on
-//! the host (D6, §10).
+//! the host.
 //!
-//! The wire format lives here rather than in any one submodule because it is the
-//! contract between three parties — the guest client (a shell script), the spool
-//! that carries the files, and the agent that serves them — and none of the three
-//! owns it. `request` is what may run, `spool` is where the files go, `agent` is
-//! what runs them, and `pty` is the terminal a command can ask for.
+//! The wire format lives here because it is a contract none of its three parties
+//! owns: the guest client (a shell script), the spool carrying the files, and the
+//! agent serving them. `request` is what may run, `spool` is where the files go,
+//! `agent` runs them, `pty` is the terminal a command can ask for.
 
 mod agent;
 mod pty;
@@ -41,9 +40,9 @@ pub const REJECTED_EXIT_CODE: i32 = 126;
 /// a unix-only import.
 pub const SIGNALLED_EXIT_CODE: i32 = 128;
 
-/// Published as numbered chunks — `<id>.out.000001`, `.000002`, … — not one
-/// growing file: per F14, a file the guest watches grow stays stale there
-/// forever, so every inode it opens must already be complete.
+/// Numbered chunks — `<id>.out.000001`, `.000002`, … — not one growing file: a
+/// file the guest watches grow stays stale across the mount, so every inode it
+/// opens must already be complete.
 pub const OUTPUT_STREAM: &str = "out";
 pub const ERROR_STREAM: &str = "err";
 /// Zero-padded, so a lexicographic sort is sequence order — what the client's

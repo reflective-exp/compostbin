@@ -1,5 +1,5 @@
-//! Turning `container` CLI output into values. Kept in one module so output
-//! drift between CLI versions has a single place to be absorbed.
+//! Turning `container` CLI output into values. One module, so drift between CLI
+//! versions has a single place to be absorbed.
 
 /// Names from any `--quiet` listing — images or containers — one per line.
 pub fn names(stdout: &str) -> Vec<String> {

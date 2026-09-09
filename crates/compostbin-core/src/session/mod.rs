@@ -1,11 +1,8 @@
 //! One project's container, and the state that outlives it.
 //!
-//! The submodules are the things a session owns rather than uses: the image it
-//! runs (`image`), the token it authenticates with (`credentials`), the host
-//! Claude config it starts from (`settings`), and the record of what its
-//! container was created with (`record`). The mounts themselves are built here,
-//! from the workspace — `record` is only what they were at the moment the
-//! container came into being.
+//! The submodules are what a session owns rather than uses: its image, its
+//! token, the host Claude config it starts from, and the record of what its
+//! container was created with. Mounts are built here, from the workspace.
 
 pub mod credentials;
 pub mod image;
@@ -22,13 +19,12 @@ use apple_container::engine::Engine;
 use apple_container::model::{EnvVar, ExecSpec, Mount, RunSpec};
 use std::path::PathBuf;
 
-/// Where Claude's home is mounted inside the container. The container runs as
-/// `claude`, matching the reference implementation.
+/// Where Claude's home is mounted inside the container, which runs as `claude`.
 pub const CLAUDE_HOME_TARGET: &str = "/home/claude/.claude";
 /// Under the session state directory: kept, because `claude --continue` reads it.
 pub const CLAUDE_HOME_DIR: &str = "claude-home";
-/// Under the session state directory: removed by `clean`, because it holds only
-/// requests in flight.
+/// Under the session state directory: removed by `clean`, holding only requests
+/// in flight.
 pub const SPOOL_DIR: &str = "host";
 /// Keeps a detached container alive so `exec` has something to attach to.
 pub const KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
@@ -59,8 +55,8 @@ impl Session {
   }
 
   /// Records a path in the manifest unless a mounted root already covers it.
-  /// `path` must already be canonical: a symlink pointing out of a root looks
-  /// contained but is not, in the container.
+  /// `path` must be canonical: a symlink out of a root looks contained and is
+  /// not.
   pub fn add(&mut self, path: impl Into<PathBuf>, readonly: bool) -> AddOutcome {
     let path = path.into();
 
@@ -79,8 +75,8 @@ impl Session {
     AddOutcome::NeedsRestart
   }
 
-  /// Resolves a manifest path string against this session's working directory
-  /// and home, so callers need no `PathResolver` of their own.
+  /// Resolves a manifest path string against this session's cwd and home, so
+  /// callers need no `PathResolver` of their own.
   pub fn resolve(&self, raw: &str) -> PathBuf {
     self.resolver.resolve(raw)
   }
@@ -89,12 +85,12 @@ impl Session {
     &self.resolver
   }
 
-  /// Claude's home on the host — the source side of the bind mount, and so the
-  /// place to seed credentials before the container starts.
+  /// The source side of the bind mount, and so where credentials are seeded
+  /// before the container starts.
   ///
-  /// Per session unless the manifest overrides it: one shared home would mean
-  /// every project's `--continue` resumed whichever project ran last, and one
-  /// project's history would be readable from another project's container.
+  /// Per session unless the manifest overrides it: one shared home would make
+  /// `--continue` resume whichever project ran last, and expose one project's
+  /// history to another's container.
   pub fn claude_home(&self) -> PathBuf {
     match &self.manifest.claude.home {
       Some(home) => self.resolver.resolve(home),
@@ -111,15 +107,15 @@ impl Session {
   }
 
   /// What the session may delete on exit: state that means nothing once the
-  /// container is gone. Claude's home is deliberately not here — losing it
-  /// would lose the conversation `--continue` reattaches to.
+  /// container is gone. Not Claude's home — that holds the conversation
+  /// `--continue` reattaches to.
   pub fn transient_state(&self) -> Vec<PathBuf> {
     vec![self.host_spool()]
   }
 
   /// Removes this session's transient state, and with `everything` the session
-  /// directory whole — Claude's home included. Missing paths are not an error:
-  /// `clean` exists precisely because an earlier exit may not have run.
+  /// directory whole. Missing paths are not an error: `clean` exists because an
+  /// earlier exit may not have run.
   pub fn clean(&self, everything: bool) -> Result<Vec<PathBuf>, PathError> {
     let targets = if everything {
       vec![self.state_dir()]
@@ -156,9 +152,9 @@ impl Session {
     format!("{NAME_PREFIX}{project}")
   }
 
-  /// The host paths this session exposes, in declaration order: roots, then the
+  /// The host paths this session exposes, in declaration order: roots, the
   /// project directory when no root covers it, then explicit `[[paths]]`. Order
-  /// matters — a name is taken by the first entry that claims it.
+  /// matters — a name goes to the first entry that claims it.
   pub fn workspace(&self) -> Workspace {
     let mut workspace = Workspace::new();
 
@@ -215,10 +211,8 @@ impl Session {
     mounts
   }
 
-  /// Where the session lands inside the container: the project directory's own
-  /// `/workspace` path. Falling back to `/workspace` itself keeps a
-  /// misconfigured manifest from starting a container in a directory that is not
-  /// mounted at all.
+  /// Where the session lands inside the container. The fallback to `/workspace`
+  /// keeps a misconfigured manifest from starting in an unmounted directory.
   pub fn workdir(&self) -> PathBuf {
     self
       .workspace()
@@ -227,13 +221,13 @@ impl Session {
   }
 
   /// Inside the session directory, so concurrent projects cannot see each
-  /// other's requests and `clean` takes it away with the rest.
+  /// other's requests and `clean` takes it with the rest.
   pub fn host_spool(&self) -> PathBuf {
     self.state_dir().join(SPOOL_DIR)
   }
 
-  /// The image the session runs: a derived one when the manifest adds packages
-  /// or build steps, otherwise the shared base itself.
+  /// A derived image when the manifest adds packages or build steps, otherwise
+  /// the shared base itself.
   pub fn image(&self) -> String {
     if self.manifest.image.is_empty() {
       self.manifest.project.image.clone()
@@ -266,7 +260,7 @@ impl Session {
   }
 
   /// The mount source must exist before the container starts, and the guest
-  /// cannot create it. A no-op when no commands are declared.
+  /// cannot create it. A no-op with no commands declared.
   pub fn prepare_host_spool(&self) -> Result<(), PathError> {
     if self.manifest.host.is_empty() {
       return Ok(());
@@ -275,21 +269,19 @@ impl Session {
     Spool::new(self.host_spool()).create()
   }
 
-  /// Where this session records the mounts its container was created with, so
-  /// `doctor` can tell a manifest edited mid-session from one that took effect.
+  /// Where the container's creation-time mounts are recorded, so `doctor` can
+  /// tell a manifest edited mid-session from one that took effect.
   pub fn mount_record(&self) -> PathBuf {
     self.state_dir().join(RECORD_FILE)
   }
 
-  /// Creates the container and records what it was created with. The two are one
-  /// step: a container whose mounts went unrecorded is one `doctor` can say
-  /// nothing about.
+  /// Creates the container and records what it was created with. One step,
+  /// because `doctor` can say nothing about unrecorded mounts.
   fn create(&self, engine: &impl Engine) -> Result<(), SessionError> {
     let spec = self.run_spec();
 
     // Every guest client that could still be waiting on a response died with the
-    // container this one replaces, so now is the one moment their leftovers are
-    // provably nobody's.
+    // container this one replaces, so their leftovers are now provably nobody's.
     if !self.manifest.host.is_empty() {
       Spool::new(self.host_spool()).sweep()?;
     }
@@ -300,14 +292,12 @@ impl Session {
     Ok(())
   }
 
-  /// Makes the session's container exist and be running, doing nothing when it
-  /// already is: `container run` refuses a name that is taken, so a second `run`
-  /// must attach rather than recreate. A container that exists but has stopped
-  /// is deleted and recreated, since its mounts may no longer match the manifest.
+  /// Makes the container exist and be running. `container run` refuses a name
+  /// that is taken, so a second `run` attaches rather than recreates; a stopped
+  /// container is deleted first, its mounts no longer trustworthy.
   ///
-  /// Attaching leaves the record alone on purpose. It describes the container
-  /// that is running, not the manifest as it reads now, and the gap between the
-  /// two is the whole point of the check.
+  /// Attaching leaves the record alone: it describes the running container, not
+  /// the manifest as it reads now, and `doctor` checks the gap between them.
   pub fn start(&self, engine: &impl Engine) -> Result<(), SessionError> {
     let name = self.container_name();
 
@@ -322,9 +312,8 @@ impl Session {
     self.create(engine)
   }
 
-  /// Recreates the container so a new mount takes effect — mounts cannot be added
-  /// to a running container — then reattaches to the same Claude conversation.
-  /// Cheap because Claude's home is a bind mount that outlives the container.
+  /// Recreates the container so a new mount takes effect, then reattaches to the
+  /// same conversation — cheap, because Claude's home outlives the container.
   pub fn restart(&self, engine: &impl Engine) -> Result<i32, SessionError> {
     let name = self.container_name();
     engine.stop(&name)?;
@@ -334,13 +323,12 @@ impl Session {
     Ok(engine.exec(&self.exec_spec(&["claude".to_string(), "--continue".to_string()]))?)
   }
 
-  /// `IS_SANDBOX=1` is set on the process rather than the container, matching the
-  /// reference implementation: it tells Claude it is already sandboxed.
+  /// `IS_SANDBOX=1` tells Claude it is already sandboxed.
   ///
   /// `CLAUDE_CONFIG_DIR` moves `.claude.json` — the account, the onboarding
-  /// answers, and the per-project trust — into the bind-mounted home. It lives at
-  /// `~/.claude.json` by default, outside the mount, so a new container starts
-  /// logged out however faithfully `~/.claude` is preserved.
+  /// answers, the per-project trust — into the bind-mounted home. It defaults to
+  /// `~/.claude.json`, outside the mount, so without this every new container
+  /// starts logged out however faithfully `~/.claude` is preserved.
   pub fn exec_spec(&self, arguments: &[String]) -> ExecSpec {
     ExecSpec {
       arguments: arguments.to_vec(),
@@ -403,8 +391,8 @@ source   = "~/.cargo/registry"
     )
   }
 
-  /// A session whose home really exists, for the tests that create a container:
-  /// creating one writes the mount record, which needs somewhere to land.
+  /// A session whose home really exists, for the tests that create a container
+  /// and so write a mount record.
   fn session_under(base: &std::path::Path) -> Session {
     Session::new(
       toml::from_str(MANIFEST).expect("manifest should parse"),
@@ -534,7 +522,7 @@ source   = "~/.cargo/registry"
   }
 
   /// What `doctor`'s stale-mount check reads: the container's real mount set,
-  /// which the manifest stops describing the moment it is edited (F11).
+  /// which the manifest stops describing once edited.
   #[test]
   fn records_the_mounts_the_container_was_created_with() {
     let temp = TempDir::new().expect("temp dir");
@@ -549,9 +537,7 @@ source   = "~/.cargo/registry"
       .expect("start must have written a record");
     assert_eq!(recorded, Record::of(&session.mounts()));
 
-    // Editing the manifest afterwards must not touch the record: the container
-    // still has the mounts it was created with, and saying otherwise is the
-    // silent failure this exists to catch.
+    // The container still has the mounts it was created with.
     session.manifest.paths.push(PathEntry {
       readonly: false,
       source: base.join("vendor").display().to_string(),
@@ -564,8 +550,8 @@ source   = "~/.cargo/registry"
     );
   }
 
-  /// §9's accumulating spool: the leftovers of a client that was killed go when
-  /// the container they belonged to is replaced, and not while it is still up.
+  /// A killed client's leftovers go when its container is replaced, not while
+  /// that container is still up.
   #[test]
   fn creating_a_container_sweeps_the_last_ones_leftovers() {
     let temp = TempDir::new().expect("temp dir");
@@ -688,8 +674,8 @@ source   = "~/.cargo/registry"
     );
   }
 
-  /// D6: with no allowlist there is no channel at all, rather than an empty
-  /// one — so the spool must be absent from the argv, not merely unused.
+  /// No allowlist means no channel at all: the spool must be absent from the
+  /// argv, not merely unused.
   #[test]
   fn mounts_the_spool_only_when_commands_are_declared() {
     let spool = "/Users/user/.local/state/compostbin/sessions/compostbin-cb/host";
@@ -718,8 +704,8 @@ source   = "~/.cargo/registry"
     );
   }
 
-  /// The mount source has to exist before `run`, and only then: `prepare` is
-  /// what creates it, so an undeclared channel must leave nothing behind.
+  /// `prepare` creates the mount source, so an undeclared channel must leave
+  /// nothing behind.
   #[test]
   fn prepares_the_spool_only_when_commands_are_declared() {
     let temp = TempDir::new().expect("temp dir");
