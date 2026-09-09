@@ -1,3 +1,10 @@
+//! Which host paths a session can see, and where they land in the guest.
+//!
+//! `paths` is the layer beneath: turning what the manifest says into host paths,
+//! and judging whether one is too broad or too sensitive to mount at all.
+
+pub mod paths;
+
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 

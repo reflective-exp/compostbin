@@ -1,7 +1,17 @@
-mod pty;
+//! Claiming a request, running it, and publishing what it produced.
+//!
+//! Everything here exists to make one guarantee hold: when the guest sees
+//! `<id>.status`, every byte of output is already a complete inode it can read
+//! (F14). Hence chunks published by rename, and a status file written last.
 
-use crate::error::{HostError, PathError, Refusal};
+use crate::error::PathError;
 use crate::host::pty::Pty;
+use crate::host::request::{Request, resolve};
+use crate::host::spool::Spool;
+use crate::host::{
+  CHUNK_SIZE, ERROR_STREAM, INPUT_EOF_SUFFIX, INPUT_SUFFIX, OUTPUT_STREAM, PARTIAL_SUFFIX, REJECTED_EXIT_CODE,
+  REQUEST_SUFFIX, SEQUENCE_WIDTH, SIGNALLED_EXIT_CODE, STATUS_SUFFIX,
+};
 use crate::manifest::HostCommand;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -11,242 +21,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-/// Fixed, not configurable: the guest client is a shell script and cannot read
-/// the manifest.
-pub const GUEST_SPOOL_TARGET: &str = "/run/compostbin/host";
-
-/// Requests land here, one file per request.
-pub const REQUESTS_DIR: &str = "requests";
-/// Claimed requests are renamed here, so no agent runs one twice.
-pub const RUNNING_DIR: &str = "running";
-/// Output chunks, and — written last — `<id>.status`.
-pub const RESPONSES_DIR: &str = "responses";
-
-/// Submitted as `.partial`, then renamed, so the agent never reads a
-/// half-written request.
-pub const REQUEST_SUFFIX: &str = ".request";
-pub const PARTIAL_SUFFIX: &str = ".partial";
-
-/// The shell's "found but not executable" — the closest existing meaning.
-pub const REJECTED_EXIT_CODE: i32 = 126;
-/// Killed by a signal. The shell says 128 + signal, but the number is not worth
-/// a unix-only import.
-pub const SIGNALLED_EXIT_CODE: i32 = 128;
-
-/// Published as numbered chunks — `<id>.out.000001`, `.000002`, … — not one
-/// growing file: per F14, a file the guest watches grow stays stale there
-/// forever, so every inode it opens must already be complete.
-pub const OUTPUT_STREAM: &str = "out";
-pub const ERROR_STREAM: &str = "err";
-/// Zero-padded, so a lexicographic sort is sequence order — what the client's
-/// glob relies on.
-pub const SEQUENCE_WIDTH: usize = 6;
-/// Big enough that a noisy build does not make thousands of files.
-const CHUNK_SIZE: usize = 64 * 1024;
-/// A file has no EOF of its own, so the guest marks the end with `<id>.in.eof`.
-pub const INPUT_SUFFIX: &str = ".in";
-pub const INPUT_EOF_SUFFIX: &str = ".in.eof";
-/// Written last, by rename: its appearance means the request is complete.
-pub const STATUS_SUFFIX: &str = ".status";
-
-/// Arguments that point a command at other code or configuration. Hygiene
-/// against widening one by accident, not a boundary: a command that compiles the
-/// repo already runs the repo's code on the host by design.
-pub const DENIED_ARGUMENT_PREFIXES: [&str; 3] = ["--config", "--manifest-path", "-Z"];
-
-/// One guest request: the name of an allowlisted command, plus any arguments
-/// the guest appended.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Request {
-  pub arguments: Vec<String>,
-  pub command: String,
-}
-
-impl Request {
-  pub fn new(command: impl Into<String>, arguments: Vec<String>) -> Self {
-    Self {
-      arguments,
-      command: command.into(),
-    }
-  }
-
-  /// One field per line, command first: the writer is a shell script, and a
-  /// format it emits with `printf '%s\n'` has no escaping to get wrong. The cost
-  /// is that an argument may not contain a newline.
-  pub fn render(&self) -> Result<String, Refusal> {
-    for field in std::iter::once(&self.command).chain(self.arguments.iter()) {
-      if field.contains('\n') {
-        return Err(Refusal::NewlineInArgument(field.clone()));
-      }
-    }
-
-    let mut rendered = self.command.clone();
-    for argument in &self.arguments {
-      rendered.push('\n');
-      rendered.push_str(argument);
-    }
-    rendered.push('\n');
-
-    Ok(rendered)
-  }
-
-  pub fn parse(text: &str) -> Result<Self, Refusal> {
-    let mut lines = text.lines();
-    let command = lines.next().unwrap_or_default().to_string();
-
-    if command.is_empty() {
-      return Err(Refusal::EmptyRequest);
-    }
-
-    Ok(Self {
-      arguments: lines.map(str::to_string).collect(),
-      command,
-    })
-  }
-}
-
-/// The argv to run, or why the request is refused. Pure, so the whole allowlist
-/// decision is testable without a filesystem or a container.
-pub fn resolve(commands: &BTreeMap<String, HostCommand>, request: &Request) -> Result<Vec<String>, Refusal> {
-  let Some(command) = commands.get(&request.command) else {
-    return Err(Refusal::UnknownCommand(request.command.clone()));
-  };
-
-  if command.argv.is_empty() {
-    return Err(Refusal::EmptyCommand(request.command.clone()));
-  }
-
-  if !request.arguments.is_empty() {
-    if !command.arguments {
-      return Err(Refusal::ArgumentsNotAllowed(request.command.clone()));
-    }
-
-    if let Some(denied) = request
-      .arguments
-      .iter()
-      .find(|argument| is_denied(argument))
-    {
-      return Err(Refusal::DeniedArgument(denied.clone()));
-    }
-  }
-
-  let mut argv = command.argv.clone();
-  argv.extend(request.arguments.iter().cloned());
-  Ok(argv)
-}
-
-/// Matches `--config=x` as well as bare `--config`: both reach the same place.
-fn is_denied(argument: &str) -> bool {
-  DENIED_ARGUMENT_PREFIXES
-    .iter()
-    .any(|denied| argument == *denied || argument.starts_with(&format!("{denied}=")))
-}
-
-/// The request/response directory tree, on whichever side of the mount the
-/// caller happens to be.
-pub struct Spool {
-  root: PathBuf,
-}
-
-impl Spool {
-  pub fn new(root: impl Into<PathBuf>) -> Self {
-    Self { root: root.into() }
-  }
-
-  pub fn root(&self) -> &Path {
-    &self.root
-  }
-
-  pub fn requests(&self) -> PathBuf {
-    self.root.join(REQUESTS_DIR)
-  }
-
-  pub fn running(&self) -> PathBuf {
-    self.root.join(RUNNING_DIR)
-  }
-
-  pub fn responses(&self) -> PathBuf {
-    self.root.join(RESPONSES_DIR)
-  }
-
-  /// Called on the host before the container starts: the guest cannot create
-  /// these itself on a mount that does not yet exist.
-  pub fn create(&self) -> Result<(), PathError> {
-    for directory in [self.requests(), self.running(), self.responses()] {
-      std::fs::create_dir_all(&directory).map_err(|source| PathError::new(&directory, source))?;
-    }
-    Ok(())
-  }
-
-  /// Clears whatever the last container left in flight, returning what it
-  /// removed.
-  ///
-  /// A guest client removes its own files on the way out, but nothing guarantees
-  /// it gets to: killed mid-request, it leaves chunks and a claim that no one
-  /// will ever collect, and they accumulate for the life of the session
-  /// directory. The safe moment to sweep is the one where no guest can be
-  /// waiting on any of it — creating the container — because every client that
-  /// could have submitted a request died with the container before it.
-  ///
-  /// Requests are deliberately not swept: one submitted between `create` and the
-  /// container starting is a live request, and dropping it would hang its client.
-  pub fn sweep(&self) -> Result<Vec<PathBuf>, PathError> {
-    let mut removed = Vec::new();
-
-    for directory in [self.running(), self.responses()] {
-      let entries = match std::fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
-        Err(source) => return Err(PathError::new(&directory, source)),
-      };
-
-      for entry in entries {
-        let path = entry
-          .map_err(|source| PathError::new(&directory, source))?
-          .path();
-
-        if path.is_dir() {
-          continue;
-        }
-
-        std::fs::remove_file(&path).map_err(|source| PathError::new(&path, source))?;
-        removed.push(path);
-      }
-    }
-
-    removed.sort();
-    Ok(removed)
-  }
-
-  /// Writes a request the way the guest does: `.partial` first, then rename.
-  pub fn submit(&self, id: &str, request: &Request) -> Result<(), HostError> {
-    let rendered = request.render()?;
-    let partial = self.requests().join(format!("{id}{PARTIAL_SUFFIX}"));
-    let final_path = self.requests().join(format!("{id}{REQUEST_SUFFIX}"));
-
-    std::fs::write(&partial, rendered).map_err(|source| HostError::Io(PathError::new(&partial, source)))?;
-    std::fs::rename(&partial, &final_path).map_err(|source| HostError::Io(PathError::new(&partial, source)))
-  }
-
-  /// The oldest unclaimed id. Ids are timestamp-prefixed, so name order is
-  /// arrival order.
-  fn next_request_id(&self) -> Result<Option<String>, PathError> {
-    let directory = self.requests();
-    let entries = std::fs::read_dir(&directory).map_err(|source| PathError::new(&directory, source))?;
-
-    let mut ids: Vec<String> = Vec::new();
-    for entry in entries {
-      let entry = entry.map_err(|source| PathError::new(&directory, source))?;
-      let name = entry.file_name().to_string_lossy().into_owned();
-      if let Some(id) = name.strip_suffix(REQUEST_SUFFIX) {
-        ids.push(id.to_string());
-      }
-    }
-
-    ids.sort();
-    Ok(ids.into_iter().next())
-  }
-}
+/// Immediate enough for a command, rare enough to be invisible on the host.
+pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The rename *is* the claim: it is atomic, so racing agents cannot both win and
 /// the loser simply looks again.
@@ -496,9 +272,6 @@ fn write_status(spool: &Spool, id: &str, status: i32) -> Result<(), PathError> {
   std::fs::rename(&partial, &final_path).map_err(|source| PathError::new(&partial, source))
 }
 
-/// Immediate enough for a command, rare enough to be invisible on the host.
-pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
-
 /// Serves requests until `stop` is set, each on its own thread. Claude's
 /// subagents call `compostbin-host` independently, so a long test run must not
 /// block everything behind it: requests are claimed one at a time in arrival
@@ -545,51 +318,8 @@ pub fn serve(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::host::fixtures::{allowlist, commands, spool, terminal_command};
   use tempfile::TempDir;
-
-  fn commands(entries: &[(&str, &[&str], bool)]) -> BTreeMap<String, HostCommand> {
-    entries
-      .iter()
-      .map(|(name, argv, arguments)| {
-        (
-          name.to_string(),
-          HostCommand {
-            arguments: *arguments,
-            argv: argv.iter().map(|word| word.to_string()).collect(),
-            // These tests are all about the pipe path, where the streams stay
-            // separate and can be asserted on independently.
-            tty: false,
-          },
-        )
-      })
-      .collect()
-  }
-
-  /// One command declared `tty = true`, which is the only way to reach the pty
-  /// path — the flag is per command, and off by default.
-  fn terminal_command(name: &str, argv: &[&str]) -> BTreeMap<String, HostCommand> {
-    let mut commands = commands(&[(name, argv, false)]);
-    commands
-      .get_mut(name)
-      .expect("the command was just inserted")
-      .tty = true;
-    commands
-  }
-
-  fn allowlist() -> BTreeMap<String, HostCommand> {
-    commands(&[
-      ("test", &["cargo", "nextest", "run", "--workspace"], false),
-      ("test-one", &["cargo", "nextest", "run"], true),
-    ])
-  }
-
-  /// A spool with its directories already created, as the host makes it.
-  fn spool() -> (TempDir, Spool) {
-    let temp = TempDir::new().expect("temp dir");
-    let spool = Spool::new(temp.path().canonicalize().expect("canonical temp"));
-    spool.create().expect("create spool");
-    (temp, spool)
-  }
 
   /// The three things a caller of `compostbin-host` sees: stdout, stderr, status.
   /// A refused request never creates a stdout file, so a missing stream reads as
@@ -636,82 +366,6 @@ mod tests {
     errors: String,
     output: String,
     status: i32,
-  }
-
-  #[test]
-  fn resolves_an_allowlisted_command_to_its_manifest_argv() {
-    assert_eq!(
-      resolve(&allowlist(), &Request::new("test", Vec::new())).expect("should resolve"),
-      ["cargo", "nextest", "run", "--workspace"]
-    );
-  }
-
-  #[test]
-  fn refuses_a_command_that_is_not_on_the_allowlist() {
-    assert_eq!(
-      resolve(&allowlist(), &Request::new("rm", vec!["-rf".to_string()])),
-      Err(Refusal::UnknownCommand("rm".to_string()))
-    );
-  }
-
-  /// The whole point of the per-command flag: `test` is exact, `test-one` is not.
-  #[test]
-  fn refuses_arguments_unless_the_command_opted_in() {
-    let filter = vec!["my_test".to_string()];
-
-    assert_eq!(
-      resolve(&allowlist(), &Request::new("test", filter.clone())),
-      Err(Refusal::ArgumentsNotAllowed("test".to_string()))
-    );
-    assert_eq!(
-      resolve(&allowlist(), &Request::new("test-one", filter)).expect("should resolve"),
-      ["cargo", "nextest", "run", "my_test"]
-    );
-  }
-
-  #[test]
-  fn refuses_arguments_that_redirect_the_command_elsewhere() {
-    for argument in ["--config", "--config=target.runner='sh -c'", "--manifest-path", "-Z"] {
-      assert_eq!(
-        resolve(&allowlist(), &Request::new("test-one", vec![argument.to_string()])),
-        Err(Refusal::DeniedArgument(argument.to_string())),
-        "{argument} should be refused"
-      );
-    }
-  }
-
-  /// A denied prefix must not swallow a legitimate argument that merely starts
-  /// with the same letters.
-  #[test]
-  fn allows_an_argument_that_only_looks_like_a_denied_one() {
-    assert_eq!(
-      resolve(
-        &allowlist(),
-        &Request::new("test-one", vec!["--configured".to_string()])
-      )
-      .expect("should resolve"),
-      ["cargo", "nextest", "run", "--configured"]
-    );
-  }
-
-  #[test]
-  fn round_trips_a_request_through_its_wire_format() {
-    let request = Request::new("test-one", vec!["-p".to_string(), "compostbin-core".to_string()]);
-    let rendered = request.render().expect("should render");
-
-    assert_eq!(rendered, "test-one\n-p\ncompostbin-core\n");
-    assert_eq!(Request::parse(&rendered).expect("should parse"), request);
-  }
-
-  /// A newline would parse as a further argument, so it is refused at the writer.
-  #[test]
-  fn refuses_to_render_an_argument_containing_a_newline() {
-    let argument = "one\ntwo".to_string();
-
-    assert_eq!(
-      Request::new("test-one", vec![argument.clone()]).render(),
-      Err(Refusal::NewlineInArgument(argument))
-    );
   }
 
   #[test]
@@ -1000,7 +654,7 @@ mod tests {
 
     spool
       .submit("0001", &Request::new("greet", Vec::new()))
-      .expect("submit");
+      .expect("submit should succeed");
     serve_once(&spool, &allowlist, Path::new(".")).expect("serve should succeed");
 
     let partials = std::fs::read_dir(spool.responses())
@@ -1015,62 +669,6 @@ mod tests {
       })
       .count();
     assert_eq!(partials, 0);
-  }
-
-  /// The gap §9 recorded: a client killed mid-request leaves chunks and a claim
-  /// that nothing will ever collect. Creating a container is the moment they are
-  /// provably dead, so that is when they go.
-  #[test]
-  fn sweeps_what_a_killed_client_left_behind() {
-    let (_temp, spool) = spool();
-    std::fs::write(spool.running().join("0001"), "greet\n").expect("write claim");
-    std::fs::write(
-      spool
-        .responses()
-        .join(format!("0001.{OUTPUT_STREAM}.000001")),
-      "hello\n",
-    )
-    .expect("write chunk");
-    std::fs::write(spool.responses().join(format!("0001{STATUS_SUFFIX}")), "0\n").expect("write status");
-
-    assert_eq!(spool.sweep().expect("sweep should succeed").len(), 3);
-    assert_eq!(
-      std::fs::read_dir(spool.responses())
-        .expect("responses")
-        .count(),
-      0
-    );
-    assert_eq!(std::fs::read_dir(spool.running()).expect("running").count(), 0);
-  }
-
-  /// A request submitted between the sweep and the container starting is live:
-  /// dropping it would hang the client that is waiting on its status.
-  #[test]
-  fn sweeps_nothing_a_client_is_still_waiting_on() {
-    let (_temp, spool) = spool();
-    spool
-      .submit("0001", &Request::new("greet", Vec::new()))
-      .expect("submit");
-
-    assert_eq!(spool.sweep().expect("sweep should succeed"), Vec::<PathBuf>::new());
-    assert!(
-      spool
-        .requests()
-        .join(format!("0001{REQUEST_SUFFIX}"))
-        .exists()
-    );
-  }
-
-  #[test]
-  fn sweeping_a_spool_that_was_never_created_is_not_an_error() {
-    let temp = TempDir::new().expect("temp dir");
-
-    assert_eq!(
-      Spool::new(temp.path().join("absent"))
-        .sweep()
-        .expect("sweep should succeed"),
-      Vec::<PathBuf>::new()
-    );
   }
 
   #[test]

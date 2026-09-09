@@ -1,8 +1,18 @@
+//! One project's container, and the state that outlives it.
+//!
+//! The submodules are the things a session owns rather than uses: the image it
+//! runs (`image`), the token it authenticates with (`credentials`), and the
+//! record of what it was created with (`mounts`).
+
+pub mod credentials;
+pub mod image;
+pub mod mounts;
+
 use crate::error::{PathError, SessionError};
 use crate::host::{GUEST_SPOOL_TARGET, Spool};
 use crate::manifest::{Manifest, PathEntry, SESSIONS_DIR};
-use crate::mounts::{RECORD_FILE, Record};
-use crate::paths::{PathResolver, root_containing};
+use crate::session::mounts::{RECORD_FILE, Record};
+use crate::workspace::paths::{PathResolver, root_containing};
 use crate::workspace::{Origin, Workspace};
 use apple_container::engine::Engine;
 use apple_container::model::{EnvVar, ExecSpec, Mount, RunSpec};

@@ -9,10 +9,10 @@ use std::path::PathBuf;
 /// discarded so a failed build can be reproduced by hand, and under `.cache`
 /// rather than `.local/state` because every byte of it is regenerable.
 pub const BUILD_CONTEXT: &str = "~/.cache/compostbin/build";
-pub const DOCKERFILE: &str = include_str!("image/Dockerfile");
+pub const DOCKERFILE: &str = include_str!("Dockerfile");
 pub const DOCKERFILE_NAME: &str = "Dockerfile";
 /// The guest-side client, copied into the image by the Dockerfile.
-pub const GUEST_CLIENT: &str = include_str!("image/compostbin-host");
+pub const GUEST_CLIENT: &str = include_str!("compostbin-host");
 pub const GUEST_CLIENT_NAME: &str = "compostbin-host";
 
 /// Builds the base image, and then the project's own image when the manifest
@@ -111,7 +111,7 @@ pub fn project_context(session: &Session) -> PathBuf {
 mod tests {
   use super::*;
   use crate::manifest::Manifest;
-  use crate::paths::PathResolver;
+  use crate::workspace::paths::PathResolver;
   use apple_container::fake::RecordingEngine;
   use tempfile::TempDir;
 

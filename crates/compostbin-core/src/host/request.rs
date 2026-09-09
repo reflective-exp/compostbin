@@ -1,0 +1,180 @@
+//! What the guest asked for, and whether it is allowed.
+
+use crate::error::Refusal;
+use crate::manifest::HostCommand;
+use std::collections::BTreeMap;
+
+/// Arguments that point a command at other code or configuration. Hygiene
+/// against widening one by accident, not a boundary: a command that compiles the
+/// repo already runs the repo's code on the host by design.
+pub const DENIED_ARGUMENT_PREFIXES: [&str; 3] = ["--config", "--manifest-path", "-Z"];
+
+/// One guest request: the name of an allowlisted command, plus any arguments
+/// the guest appended.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Request {
+  pub arguments: Vec<String>,
+  pub command: String,
+}
+
+impl Request {
+  pub fn new(command: impl Into<String>, arguments: Vec<String>) -> Self {
+    Self {
+      arguments,
+      command: command.into(),
+    }
+  }
+
+  /// One field per line, command first: the writer is a shell script, and a
+  /// format it emits with `printf '%s\n'` has no escaping to get wrong. The cost
+  /// is that an argument may not contain a newline.
+  pub fn render(&self) -> Result<String, Refusal> {
+    for field in std::iter::once(&self.command).chain(self.arguments.iter()) {
+      if field.contains('\n') {
+        return Err(Refusal::NewlineInArgument(field.clone()));
+      }
+    }
+
+    let mut rendered = self.command.clone();
+    for argument in &self.arguments {
+      rendered.push('\n');
+      rendered.push_str(argument);
+    }
+    rendered.push('\n');
+
+    Ok(rendered)
+  }
+
+  pub fn parse(text: &str) -> Result<Self, Refusal> {
+    let mut lines = text.lines();
+    let command = lines.next().unwrap_or_default().to_string();
+
+    if command.is_empty() {
+      return Err(Refusal::EmptyRequest);
+    }
+
+    Ok(Self {
+      arguments: lines.map(str::to_string).collect(),
+      command,
+    })
+  }
+}
+
+/// The argv to run, or why the request is refused. Pure, so the whole allowlist
+/// decision is testable without a filesystem or a container.
+pub fn resolve(commands: &BTreeMap<String, HostCommand>, request: &Request) -> Result<Vec<String>, Refusal> {
+  let Some(command) = commands.get(&request.command) else {
+    return Err(Refusal::UnknownCommand(request.command.clone()));
+  };
+
+  if command.argv.is_empty() {
+    return Err(Refusal::EmptyCommand(request.command.clone()));
+  }
+
+  if !request.arguments.is_empty() {
+    if !command.arguments {
+      return Err(Refusal::ArgumentsNotAllowed(request.command.clone()));
+    }
+
+    if let Some(denied) = request
+      .arguments
+      .iter()
+      .find(|argument| is_denied(argument))
+    {
+      return Err(Refusal::DeniedArgument(denied.clone()));
+    }
+  }
+
+  let mut argv = command.argv.clone();
+  argv.extend(request.arguments.iter().cloned());
+  Ok(argv)
+}
+
+/// Matches `--config=x` as well as bare `--config`: both reach the same place.
+fn is_denied(argument: &str) -> bool {
+  DENIED_ARGUMENT_PREFIXES
+    .iter()
+    .any(|denied| argument == *denied || argument.starts_with(&format!("{denied}=")))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::host::fixtures::allowlist;
+
+  #[test]
+  fn resolves_an_allowlisted_command_to_its_manifest_argv() {
+    assert_eq!(
+      resolve(&allowlist(), &Request::new("test", Vec::new())).expect("should resolve"),
+      ["cargo", "nextest", "run", "--workspace"]
+    );
+  }
+
+  #[test]
+  fn refuses_a_command_that_is_not_on_the_allowlist() {
+    assert_eq!(
+      resolve(&allowlist(), &Request::new("rm", vec!["-rf".to_string()])),
+      Err(Refusal::UnknownCommand("rm".to_string()))
+    );
+  }
+
+  /// The whole point of the per-command flag: `test` is exact, `test-one` is not.
+  #[test]
+  fn refuses_arguments_unless_the_command_opted_in() {
+    let filter = vec!["my_test".to_string()];
+
+    assert_eq!(
+      resolve(&allowlist(), &Request::new("test", filter.clone())),
+      Err(Refusal::ArgumentsNotAllowed("test".to_string()))
+    );
+    assert_eq!(
+      resolve(&allowlist(), &Request::new("test-one", filter)).expect("should resolve"),
+      ["cargo", "nextest", "run", "my_test"]
+    );
+  }
+
+  #[test]
+  fn refuses_arguments_that_redirect_the_command_elsewhere() {
+    for argument in ["--config", "--config=target.runner='sh -c'", "--manifest-path", "-Z"] {
+      assert_eq!(
+        resolve(&allowlist(), &Request::new("test-one", vec![argument.to_string()])),
+        Err(Refusal::DeniedArgument(argument.to_string())),
+        "{argument} should be refused"
+      );
+    }
+  }
+
+  /// A denied prefix must not swallow a legitimate argument that merely starts
+  /// with the same letters.
+  #[test]
+  fn allows_an_argument_that_only_looks_like_a_denied_one() {
+    assert_eq!(
+      resolve(
+        &allowlist(),
+        &Request::new("test-one", vec!["--configured".to_string()])
+      )
+      .expect("should resolve"),
+      ["cargo", "nextest", "run", "--configured"]
+    );
+  }
+
+  #[test]
+  fn round_trips_a_request_through_its_wire_format() {
+    let request = Request::new("test-one", vec!["-p".to_string(), "compostbin-core".to_string()]);
+    let rendered = request.render().expect("should render");
+
+    assert_eq!(rendered, "test-one\n-p\ncompostbin-core\n");
+    assert_eq!(Request::parse(&rendered).expect("should parse"), request);
+  }
+
+  /// A newline would parse as a further argument, so it is refused at the writer.
+  #[test]
+  fn refuses_to_render_an_argument_containing_a_newline() {
+    let argument = "one\ntwo".to_string();
+
+    assert_eq!(
+      Request::new("test-one", vec![argument.clone()]).render(),
+      Err(Refusal::NewlineInArgument(argument))
+    );
+  }
+}

@@ -1,16 +1,22 @@
-use crate::credentials::{CREDENTIALS_FILE_NAME, CredentialSource, KEYCHAIN_SERVICE};
-use crate::mounts::Record;
-use crate::paths::{Danger, danger};
-use crate::session::Session;
-use crate::workspace::WALK_LIMIT;
-use apple_container::engine::Engine;
-use apple_container::error::EngineError;
+//! What to say when something about a session is wrong.
+//!
+//! One submodule per subject — the engine, what is mounted, and the ways out of
+//! the container — because a check is only ever a paragraph of prose about one
+//! of them. `diagnose` is the whole of the public surface: the checks themselves
+//! stay internal, so the order they run in is decided in exactly one place.
 
-/// The `container` CLI version every fact in the plan was measured against.
-pub const TESTED_CLI_VERSION: &str = "1.3.1";
+mod engine;
+mod host;
+mod mounts;
+
+use crate::session::Session;
+use crate::session::credentials::CredentialSource;
+use apple_container::engine::Engine;
+
+pub use crate::doctor::engine::TESTED_CLI_VERSION;
 /// Roots so broad that mounting them hands the container the whole account.
 /// Kept as a re-export of the list `add` refuses on, so the two cannot drift.
-pub use crate::paths::BROAD_PATHS as BROAD_ROOTS;
+pub use crate::workspace::paths::BROAD_PATHS as BROAD_ROOTS;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Status {
@@ -37,18 +43,20 @@ pub fn diagnose(
   let images = engine.images();
 
   vec![
-    cli_version(engine),
-    daemon(&images),
-    base_image(session, &images),
-    mounted_paths(session),
-    dangling_symlinks(session),
-    live_mounts(session, engine),
-    root_breadth(session),
-    credentials_check(session, credentials, api_key_present),
-    host_allowlist(session),
+    engine::cli_version(engine),
+    engine::daemon(&images),
+    engine::base_image(session, &images),
+    mounts::mounted_paths(session),
+    mounts::dangling_symlinks(session),
+    mounts::live_mounts(session, engine),
+    mounts::root_breadth(session),
+    host::credentials(session, credentials, api_key_present),
+    host::allowlist(session),
   ]
 }
 
+/// The one constructor, so every check reads as a name, a verdict, and a
+/// sentence explaining it.
 fn check(name: &str, status: Status, detail: impl Into<String>) -> Check {
   Check {
     detail: detail.into(),
@@ -57,269 +65,17 @@ fn check(name: &str, status: Status, detail: impl Into<String>) -> Check {
   }
 }
 
-fn cli_version(engine: &impl Engine) -> Check {
-  match engine.version() {
-    Ok(Some(version)) if version == TESTED_CLI_VERSION => check("container CLI", Status::Ok, version),
-    Ok(Some(version)) => check(
-      "container CLI",
-      Status::Warn,
-      format!("{version}; every fact in the plan was measured on {TESTED_CLI_VERSION}"),
-    ),
-    Ok(None) => check("container CLI", Status::Warn, "unrecognised version output"),
-    Err(error) => check("container CLI", Status::Fail, error.to_string()),
-  }
-}
-
-fn daemon(images: &Result<Vec<String>, EngineError>) -> Check {
-  match images {
-    Ok(_) => check("daemon", Status::Ok, "responding"),
-    Err(error) => check("daemon", Status::Fail, format!("{error}; run `container system start`")),
-  }
-}
-
-fn base_image(session: &Session, images: &Result<Vec<String>, EngineError>) -> Check {
-  let wanted = &session.manifest.project.image;
-
-  match images {
-    Err(_) => check(
-      "base image",
-      Status::Fail,
-      format!("cannot look for {wanted} while the daemon is unreachable"),
-    ),
-    Ok(images) if images.contains(wanted) => check("base image", Status::Ok, wanted),
-    Ok(_) => check(
-      "base image",
-      Status::Fail,
-      format!("{wanted} is not built; run `compostbin build`"),
-    ),
-  }
-}
-
-/// Roots and explicit paths only. Claude's home is deliberately excluded: `run`
-/// creates it, so its absence before the first session is normal.
-fn mounted_paths(session: &Session) -> Check {
-  let declared = session
-    .manifest
-    .workspace
-    .roots
-    .iter()
-    .chain(session.manifest.paths.iter().map(|entry| &entry.source));
-  let missing: Vec<String> = declared
-    .map(|raw| session.resolve(raw))
-    .filter(|path| !path.exists())
-    .map(|path| path.display().to_string())
-    .collect();
-
-  if missing.is_empty() {
-    return check("mounted paths", Status::Ok, "every declared path exists");
-  }
-
-  check(
-    "mounted paths",
-    Status::Fail,
-    format!("missing on the host: {}", missing.join(", ")),
-  )
-}
-
-/// The likeliest silent failure of the whole design: a symlink that resolves
-/// on the host and dangles in the container, because its target is outside every
-/// mounted tree (F5). Nothing reports it — the file is simply not there.
-///
-/// A warning rather than a failure: the session runs, and the fix is either to
-/// mount the target or to stop relying on the link, both of which are the user's
-/// call.
-fn dangling_symlinks(session: &Session) -> Check {
-  const NAMED: usize = 5;
-
-  let found = session.workspace().escaping_symlinks(WALK_LIMIT);
-
-  if found.escapes.is_empty() {
-    let detail = if found.exhausted {
-      format!("none in the first {WALK_LIMIT} entries; the mounted trees are too large to walk in full")
-    } else {
-      "no symlink escapes the mounted trees".to_string()
-    };
-
-    return check("dangling symlinks", Status::Ok, detail);
-  }
-
-  let named: Vec<String> = found
-    .escapes
-    .iter()
-    .take(NAMED)
-    .map(|escape| format!("{} -> {}", escape.link.display(), escape.target.display()))
-    .collect();
-  let rest = found.escapes.len().saturating_sub(named.len());
-  let more = if rest > 0 {
-    format!(" (and {rest} more)")
-  } else {
-    String::new()
-  };
-
-  check(
-    "dangling symlinks",
-    Status::Warn,
-    format!(
-      "dead in the container, because the target is not mounted: {}{more}",
-      named.join(", ")
-    ),
-  )
-}
-
-/// Whether the container that is running now has the mounts the manifest
-/// describes. `run` attaches to a live container rather than recreating it, and
-/// F11 forbids adding mounts to one, so a manifest edited mid-session takes
-/// effect at the next `stop` + `run` and not before. Nothing else says so: the
-/// path is simply missing in the guest, which reads as the feature being broken.
-///
-/// A warning, not a failure — the session works, and recreating the container is
-/// the user's call — but the *fix* is named, because it is not guessable.
-fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
-  let name = session.container_name();
-
-  let running = match engine.running_containers() {
-    Ok(running) => running,
-    Err(error) => {
-      return check(
-        "container mounts",
-        Status::Fail,
-        format!("cannot tell whether {name} is running: {error}"),
-      );
-    }
-  };
-
-  if !running.contains(&name) {
-    return check(
-      "container mounts",
-      Status::Ok,
-      format!("{name} is not running, so the next `compostbin run` mounts what the manifest says"),
-    );
-  }
-
-  let record = match Record::load(&session.mount_record()) {
-    Ok(Some(record)) => record,
-    Ok(None) => {
-      return check(
-        "container mounts",
-        Status::Warn,
-        format!(
-          "{name} is running but nothing recorded what it was started with; `compostbin stop` then `compostbin run` to be sure"
-        ),
-      );
-    }
-    Err(error) => return check("container mounts", Status::Warn, error.to_string()),
-  };
-
-  let drift = record.drift(&session.mounts());
-
-  if drift.is_empty() {
-    return check(
-      "container mounts",
-      Status::Ok,
-      format!("{name} is running with the mounts the manifest declares"),
-    );
-  }
-
-  check(
-    "container mounts",
-    Status::Warn,
-    format!(
-      "{name} was started before the manifest changed — {}; mounts cannot be added to a running container, so `compostbin stop` then `compostbin run`",
-      drift.describe()
-    ),
-  )
-}
-
-/// Every mounted path, not only roots: a manifest can be edited by hand, so
-/// `add`'s refusal is not the only way a dangerous path gets in.
-fn root_breadth(session: &Session) -> Check {
-  let dangerous: Vec<String> = session
-    .workspace()
-    .entries()
-    .iter()
-    .filter_map(|entry| danger(&entry.host, session.resolver()).map(|danger| (entry, danger)))
-    .map(|(entry, danger)| match danger {
-      Danger::Broad(_) => format!(
-        "{} covers a whole account, so the container can read and rewrite all of it",
-        entry.host.display()
-      ),
-      Danger::Sensitive(path) => format!(
-        "{} is mounted, exposing the credentials in {}",
-        entry.host.display(),
-        path.display()
-      ),
-    })
-    .collect();
-
-  if dangerous.is_empty() {
-    return check("mount breadth", Status::Ok, "no mount covers an account or a secret");
-  }
-
-  check("mount breadth", Status::Warn, dangerous.join("; "))
-}
-
-/// Every allowlisted command runs on the host with the user's own privileges
-/// (D6), so this is where that stops being invisible.
-fn host_allowlist(session: &Session) -> Check {
-  if session.manifest.host.is_empty() {
-    return check(
-      "host commands",
-      Status::Ok,
-      "no [host.commands]: the guest has no path to the host",
-    );
-  }
-
-  let listed: Vec<String> = session
-    .manifest
-    .host
-    .commands
-    .iter()
-    .map(|(name, command)| {
-      let widened = if command.arguments { " (+ guest arguments)" } else { "" };
-      format!("{name} = {}{widened}", command.argv.join(" "))
-    })
-    .collect();
-
-  let widened = session
-    .manifest
-    .host
-    .commands
-    .values()
-    .any(|command| command.arguments);
-
-  check(
-    "host commands",
-    if widened { Status::Warn } else { Status::Ok },
-    format!("run on the host as you: {}", listed.join("; ")),
-  )
-}
-
-fn credentials_check(session: &Session, credentials: &impl CredentialSource, api_key_present: bool) -> Check {
-  let seeded = session.claude_home().join(CREDENTIALS_FILE_NAME);
-
-  if seeded.exists() {
-    return check("credentials", Status::Ok, seeded.display().to_string());
-  }
-
-  match credentials.read() {
-    Ok(Some(_)) => check("credentials", Status::Ok, format!("{KEYCHAIN_SERVICE} in the Keychain")),
-    Ok(None) | Err(_) if api_key_present => check("credentials", Status::Ok, "ANTHROPIC_API_KEY is set"),
-    Ok(None) => check(
-      "credentials",
-      Status::Fail,
-      format!("no {KEYCHAIN_SERVICE} entry and no ANTHROPIC_API_KEY; the session cannot authenticate"),
-    ),
-    Err(error) => check("credentials", Status::Fail, error.to_string()),
-  }
-}
-
+/// Every case is driven through `diagnose` rather than the check it is about:
+/// the order and the completeness of the list are part of what `doctor` promises,
+/// and a test that called one check directly would not notice it being dropped.
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::credentials::CREDENTIALS_FILE_NAME;
   use crate::error::CredentialError;
   use crate::manifest::Manifest;
-  use crate::paths::PathResolver;
+  use crate::session::credentials::CREDENTIALS_FILE_NAME;
+  use crate::session::mounts::Record;
+  use crate::workspace::paths::PathResolver;
   use apple_container::fake::RecordingEngine;
   use std::path::Path;
   use tempfile::TempDir;
