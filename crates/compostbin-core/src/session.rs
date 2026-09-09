@@ -211,13 +211,24 @@ impl Session {
 
   /// `IS_SANDBOX=1` is set on the process rather than the container, matching the
   /// reference implementation: it tells Claude it is already sandboxed.
+  ///
+  /// `CLAUDE_CONFIG_DIR` moves `.claude.json` — the account, the onboarding
+  /// answers, and the per-project trust — into the bind-mounted home. It lives at
+  /// `~/.claude.json` by default, outside the mount, so a new container starts
+  /// logged out however faithfully `~/.claude` is preserved.
   pub fn exec_spec(&self, arguments: &[String]) -> ExecSpec {
     ExecSpec {
       arguments: arguments.to_vec(),
-      env: vec![EnvVar::Set {
-        name: "IS_SANDBOX".to_string(),
-        value: "1".to_string(),
-      }],
+      env: vec![
+        EnvVar::Set {
+          name: "CLAUDE_CONFIG_DIR".to_string(),
+          value: CLAUDE_HOME_TARGET.to_string(),
+        },
+        EnvVar::Set {
+          name: "IS_SANDBOX".to_string(),
+          value: "1".to_string(),
+        },
+      ],
       interactive: true,
       name: self.container_name(),
       tty: true,
@@ -391,6 +402,8 @@ source   = "~/.cargo/registry"
         .to_argv(),
       [
         "exec",
+        "--env",
+        "CLAUDE_CONFIG_DIR=/root/.claude",
         "--env",
         "IS_SANDBOX=1",
         "--interactive",

@@ -31,4 +31,9 @@ RUN chmod +x /usr/local/bin/compostbin-host
 # mountpoint even before the host directory exists.
 RUN mkdir -p /root/.claude
 
+# Keeps `.claude.json` — the account and the onboarding answers — inside the
+# mount. Without it Claude writes to ~/.claude.json, which dies with the
+# container, and every restart asks for a fresh login.
+ENV CLAUDE_CONFIG_DIR=/root/.claude
+
 WORKDIR /root
