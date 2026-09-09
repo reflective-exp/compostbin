@@ -41,9 +41,6 @@ memory = "8G"
 image = "compostbin/base:latest"
 name = "my-project"
 
-[safety]
-snapshot = true
-
 [workspace]
 roots = []
 "#

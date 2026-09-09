@@ -14,9 +14,6 @@ use crate::session::credentials::CredentialSource;
 use apple_container::engine::Engine;
 
 pub use crate::doctor::engine::TESTED_CLI_VERSION;
-/// Roots so broad that mounting them hands the container the whole account.
-/// Kept as a re-export of the list `add` refuses on, so the two cannot drift.
-pub use crate::workspace::paths::BROAD_PATHS as BROAD_ROOTS;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Status {
@@ -91,7 +88,7 @@ mod tests {
   use crate::error::CredentialError;
   use crate::manifest::Manifest;
   use crate::session::credentials::CREDENTIALS_FILE_NAME;
-  use crate::session::mounts::Record;
+  use crate::session::record::Record;
   use crate::workspace::paths::PathResolver;
   use apple_container::fake::RecordingEngine;
   use std::path::Path;

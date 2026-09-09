@@ -4,9 +4,9 @@
 
 use super::{Check, Status, check, listed};
 use crate::session::Session;
-use crate::session::mounts::Record;
+use crate::session::record::Record;
 use crate::workspace::WALK_LIMIT;
-use crate::workspace::paths::{Danger, danger};
+use crate::workspace::danger::{Danger, danger};
 use apple_container::engine::Engine;
 
 /// Roots and explicit paths only. Claude's home is deliberately excluded: `run`

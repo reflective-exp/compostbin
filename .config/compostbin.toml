@@ -18,6 +18,9 @@ argv = ["cargo", "audit"]
 [host.commands.check]
 argv = ["cargo", "check", "--workspace", "--all-targets"]
 
+[host.commands.clippy]
+argv = ["cargo", "clippy", "--", "-D", "warnings"]
+
 [host.commands.fmt]
 argv = ["cargo", "fmt", "--all"]
 
@@ -33,9 +36,6 @@ argv = ["cargo", "nextest", "run"]
 [project]
 image = "compostbin/base:latest"
 name = "compostbin"
-
-[safety]
-snapshot = true
 
 [workspace]
 roots = []

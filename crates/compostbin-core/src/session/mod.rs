@@ -2,18 +2,20 @@
 //!
 //! The submodules are the things a session owns rather than uses: the image it
 //! runs (`image`), the token it authenticates with (`credentials`), the host
-//! Claude config it starts from (`settings`), and the record of what it was
-//! created with (`mounts`).
+//! Claude config it starts from (`settings`), and the record of what its
+//! container was created with (`record`). The mounts themselves are built here,
+//! from the workspace — `record` is only what they were at the moment the
+//! container came into being.
 
 pub mod credentials;
 pub mod image;
-pub mod mounts;
+pub mod record;
 pub mod settings;
 
 use crate::error::{PathError, SessionError};
 use crate::host::{GUEST_SPOOL_TARGET, Spool};
 use crate::manifest::{Manifest, PathEntry, SESSIONS_DIR};
-use crate::session::mounts::{RECORD_FILE, Record};
+use crate::session::record::{RECORD_FILE, Record};
 use crate::workspace::paths::{PathResolver, root_containing};
 use crate::workspace::{Origin, Workspace};
 use apple_container::engine::Engine;

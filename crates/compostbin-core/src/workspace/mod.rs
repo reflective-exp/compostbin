@@ -1,8 +1,10 @@
 //! Which host paths a session can see, and where they land in the guest.
 //!
-//! `paths` is the layer beneath: turning what the manifest says into host paths,
-//! and judging whether one is too broad or too sensitive to mount at all.
+//! `paths` is the layer beneath, turning what the manifest says into host paths;
+//! `danger` is the judgement on top of it, deciding which of those should not be
+//! mounted at all.
 
+pub mod danger;
 pub mod paths;
 
 use std::collections::{BTreeSet, VecDeque};

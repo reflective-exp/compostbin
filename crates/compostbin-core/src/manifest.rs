@@ -32,7 +32,6 @@ pub struct Manifest {
   )]
   pub paths: Vec<PathEntry>,
   pub project: ProjectConfig,
-  pub safety: SafetyConfig,
   pub workspace: WorkspaceConfig,
 }
 
@@ -219,18 +218,6 @@ impl Default for ProjectConfig {
   }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct SafetyConfig {
-  pub snapshot: bool,
-}
-
-impl Default for SafetyConfig {
-  fn default() -> Self {
-    Self { snapshot: true }
-  }
-}
-
 /// Roots default to empty: mounting a workspace tree read-write is opt-in.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -271,9 +258,6 @@ shared             = ["agents"]
 [image]
 packages = ["direnv"]
 run      = ["echo 'eval \"$(direnv hook bash)\"' >> ~/.bashrc"]
-
-[safety]
-snapshot = true
 "#;
 
   const EXPECTED_RENDERING: &str = r#"[claude]
@@ -301,9 +285,6 @@ target = "~/code/vendor/libfoo"
 [project]
 image = "compostbin/base:latest"
 name = "compostbin"
-
-[safety]
-snapshot = true
 
 [workspace]
 roots = ["~/workspace"]
@@ -412,8 +393,6 @@ tty = true
 
     assert_eq!(manifest.image.packages, ["direnv"]);
     assert_eq!(manifest.image.run.len(), 1);
-
-    assert_eq!(manifest.safety.snapshot, true);
   }
 
   #[test]
@@ -497,7 +476,5 @@ source = "~/a-first"
       manifest.image.is_empty(),
       "a project with no additions runs the base image itself"
     );
-
-    assert_eq!(manifest.safety.snapshot, true);
   }
 }
