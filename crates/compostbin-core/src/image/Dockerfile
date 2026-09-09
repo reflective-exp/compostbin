@@ -32,13 +32,15 @@ RUN echo 'eval "$(direnv hook bash)"' >> /root/.bashrc
 COPY compostbin-host /usr/local/bin/compostbin-host
 RUN chmod +x /usr/local/bin/compostbin-host
 
+RUN useradd -m -s /bin/bash claude
 # Mounted from the host at run time (D5); created here so the first run has a
 # mountpoint even before the host directory exists.
-RUN mkdir -p /root/.claude
+RUN mkdir -p /home/claude/.claude
 
 # Keeps `.claude.json` — the account and the onboarding answers — inside the
 # mount. Without it Claude writes to ~/.claude.json, which dies with the
 # container, and every restart asks for a fresh login.
-ENV CLAUDE_CONFIG_DIR=/root/.claude
+ENV CLAUDE_CONFIG_DIR=/home/claude/.claude
 
-WORKDIR /root
+USER claude
+WORKDIR /home/claude

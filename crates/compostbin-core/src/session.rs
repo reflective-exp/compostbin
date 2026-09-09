@@ -8,8 +8,8 @@ use apple_container::model::{EnvVar, ExecSpec, Mount, RunSpec};
 use std::path::PathBuf;
 
 /// Where Claude's home is mounted inside the container. The container runs as
-/// root, matching the reference implementation.
-pub const CLAUDE_HOME_TARGET: &str = "/root/.claude";
+/// `claude`, matching the reference implementation.
+pub const CLAUDE_HOME_TARGET: &str = "/home/claude/.claude";
 /// Keeps a detached container alive so `exec` has something to attach to.
 pub const KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
 pub const NAME_PREFIX: &str = "compostbin-";
@@ -389,7 +389,7 @@ source   = "~/.cargo/registry"
 
     let run = &engine.calls()[2];
     assert!(
-      run.contains(&"/Users/sax/.local/state/compostbin/claude-home:/root/.claude".to_string()),
+      run.contains(&"/Users/sax/.local/state/compostbin/claude-home:/home/claude/.claude".to_string()),
       "the recreated container must remount Claude's home: {run:?}"
     );
   }
@@ -403,7 +403,7 @@ source   = "~/.cargo/registry"
       [
         "exec",
         "--env",
-        "CLAUDE_CONFIG_DIR=/root/.claude",
+        "CLAUDE_CONFIG_DIR=/home/claude/.claude",
         "--env",
         "IS_SANDBOX=1",
         "--interactive",
@@ -436,7 +436,7 @@ source   = "~/.cargo/registry"
         Mount {
           readonly: false,
           source: "/Users/sax/.local/state/compostbin/claude-home".into(),
-          target: "/root/.claude".into(),
+          target: "/home/claude/.claude".into(),
         },
       ]
     );
@@ -488,7 +488,7 @@ source   = "~/.cargo/registry"
         "--volume",
         "/Users/sax/.cargo/registry:/Users/sax/.cargo/registry:ro",
         "--volume",
-        "/Users/sax/.local/state/compostbin/claude-home:/root/.claude",
+        "/Users/sax/.local/state/compostbin/claude-home:/home/claude/.claude",
         "--workdir",
         "/Users/sax/workspace/compostbin",
         "compostbin/base:latest",
