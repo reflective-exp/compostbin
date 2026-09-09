@@ -59,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cargo fmt || true",
+            "command": "compostbin-host fmt || true",
             "statusMessage": "Reformatting code"
           }
         ]
