@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+
+cargo build --release
+./target/release/compostbin build
+./target/release/compostbin stop
+./target/release/compostbin run -- $@
