@@ -5,6 +5,7 @@
 pub mod credentials;
 pub mod doctor;
 pub mod error;
+pub mod host;
 pub mod image;
 pub mod manifest;
 pub mod paths;

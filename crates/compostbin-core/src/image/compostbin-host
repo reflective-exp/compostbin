@@ -1,0 +1,83 @@
+#!/bin/sh
+# Ask the host to run an allowlisted command and behave as though this shell had
+# run it: stdin goes to it, stdout and stderr come back on ours, we exit with its
+# status. A shell script rather than compostbin itself, because the container is
+# Linux and compostbin is a macOS binary; it speaks the spool protocol in
+# compostbin-core's `host` module.
+#
+# Output arrives as numbered chunks, not a stream we watch grow: a file this side
+# observes while the host is still appending stays stale here forever (F14).
+# Each chunk is renamed into place, so it is complete before we open it.
+set -eu
+
+spool=/run/compostbin/host
+
+if [ ! -d "$spool/requests" ]; then
+  echo "compostbin-host: this session has no host channel; declare [host.commands] in the manifest" >&2
+  exit 127
+fi
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: compostbin-host <command> [arguments...]" >&2
+  exit 64
+fi
+
+# Timestamp first, so ids sort into arrival order and the host serves them in
+# that order. The random suffix is for concurrency: Claude's subagents each call
+# this script independently, and two of them must not pick the same id.
+id="$(date +%s)-$$-$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
+responses="$spool/responses"
+input="$responses/$id.in"
+status="$responses/$id.status"
+
+# Emits one stream's chunks in sequence order, removing each once written. The
+# glob sorts lexicographically, hence the fixed-width sequence numbers.
+drain() {
+  for chunk in "$responses/$id.$1."*; do
+    [ -e "$chunk" ] || continue
+    case "$chunk" in
+      *.partial) continue ;;
+    esac
+    cat "$chunk"
+    rm -f "$chunk"
+  done
+}
+
+# Input first, so anything piped in is waiting when the command starts. The
+# marker tells the host input has ended, a file having no EOF of its own; if our
+# stdin never closes it never appears, and the host stops pumping at exit.
+: > "$input"
+# Duplicated onto another descriptor first: a background job in a non-interactive
+# shell gets stdin from /dev/null, so a plain `cat &` would forward nothing.
+exec 3<&0
+( cat <&3 >> "$input" 2>/dev/null || true; : > "$input.eof" ) &
+forwarder=$!
+
+# One field per line, command first. Nothing quotes or escapes, so there is no
+# quoting bug to have; the host rejects a newline in an argument.
+printf '%s\n' "$@" > "$spool/requests/$id.partial"
+# Rename, so the agent never sees a half-written request.
+mv "$spool/requests/$id.partial" "$spool/requests/$id.request"
+
+# Status is published last, so checking it *before* draining means the drain that
+# follows sees every chunk.
+while :; do
+  finished=0
+  if [ -f "$status" ]; then
+    finished=1
+  fi
+
+  drain out
+  drain err >&2
+
+  if [ "$finished" -eq 1 ]; then
+    break
+  fi
+
+  sleep 0.1
+done
+
+code=$(cat "$status")
+kill "$forwarder" 2>/dev/null || true
+rm -f "$input" "$input.eof" "$status"
+exit "$code"

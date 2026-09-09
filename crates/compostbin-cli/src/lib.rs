@@ -5,12 +5,14 @@ use clap::Parser;
 use cli::{Arguments, Command};
 use compostbin_core::credentials::{self, Keychain, SeedOutcome};
 use compostbin_core::doctor::{self, Status};
+use compostbin_core::host::{self, Spool};
 use compostbin_core::image;
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest};
 use compostbin_core::paths::PathResolver;
 use compostbin_core::session::{AddOutcome, Session};
 use std::error::Error;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Parses argv and executes the requested command, returning its exit code.
 pub fn run() -> Result<i32, Box<dyn Error>> {
@@ -53,6 +55,36 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 
     Command::Doctor => report_diagnosis(&load_session(&manifest_path, resolver, &project_dir)?),
 
+    Command::HostAgent => {
+      let session = load_session(&manifest_path, resolver, &project_dir)?;
+      session.prepare_host_spool()?;
+
+      if session.manifest.host.is_empty() {
+        eprintln!(
+          "no [host.commands] in {}; there is nothing to serve",
+          manifest_path.display()
+        );
+        return Ok(1);
+      }
+
+      println!(
+        "serving {} host commands from {}",
+        session.manifest.host.commands.len(),
+        session.host_spool().display()
+      );
+
+      // Ctrl-C is the only way out, so the stop flag is never set here.
+      host::serve(
+        &Spool::new(session.host_spool()),
+        &session.manifest.host.commands,
+        &project_dir,
+        session.manifest.host.concurrency,
+        &AtomicBool::new(false),
+      )?;
+
+      Ok(0)
+    }
+
     Command::Init => {
       let mut manifest = Manifest::default();
       manifest.project.name = project_dir
@@ -88,11 +120,37 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       }
 
       let engine = CliEngine::new();
+      session.prepare_host_spool()?;
       session.start(&engine)?;
 
       let mut claude = vec!["claude".to_string()];
       claude.extend(arguments);
-      Ok(engine.exec(&session.exec_spec(&claude))?)
+
+      // The agent lives exactly as long as the session: `exec` blocks until
+      // Claude exits, and the flag stops it as soon as it does.
+      let stop = AtomicBool::new(false);
+      let spool = Spool::new(session.host_spool());
+
+      std::thread::scope(|scope| {
+        if !session.manifest.host.is_empty() {
+          scope.spawn(|| {
+            if let Err(error) = host::serve(
+              &spool,
+              &session.manifest.host.commands,
+              &project_dir,
+              session.manifest.host.concurrency,
+              &stop,
+            ) {
+              eprintln!("compostbin: the host command agent stopped: {error}");
+            }
+          });
+        }
+
+        let code = engine.exec(&session.exec_spec(&claude));
+        stop.store(true, Ordering::Relaxed);
+        code
+      })
+      .map_err(Into::into)
     }
 
     Command::Shell => {

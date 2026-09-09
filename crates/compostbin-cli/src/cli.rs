@@ -26,6 +26,8 @@ pub enum Command {
   Build,
   /// Check the host, the daemon, and every declared path
   Doctor,
+  /// Serve host commands for a session started elsewhere
+  HostAgent,
   /// Write a manifest with detected defaults
   Init,
   /// List the session's mounts
@@ -83,6 +85,7 @@ mod tests {
 
   #[test]
   fn parses_bare_subcommands() {
+    assert_eq!(parse(&["compostbin", "host-agent"]), Command::HostAgent);
     assert_eq!(parse(&["compostbin", "init"]), Command::Init);
     assert_eq!(parse(&["compostbin", "ls"]), Command::Ls);
     assert_eq!(parse(&["compostbin", "shell"]), Command::Shell);

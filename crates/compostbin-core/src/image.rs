@@ -10,6 +10,9 @@ use std::path::PathBuf;
 pub const BUILD_CONTEXT: &str = "~/.cache/compostbin/build";
 pub const DOCKERFILE: &str = include_str!("image/Dockerfile");
 pub const DOCKERFILE_NAME: &str = "Dockerfile";
+/// The guest-side client, copied into the image by the Dockerfile.
+pub const GUEST_CLIENT: &str = include_str!("image/compostbin-host");
+pub const GUEST_CLIENT_NAME: &str = "compostbin-host";
 
 /// Writes the embedded Dockerfile into a build context and builds the image the
 /// manifest names. The builder is started first, at the manifest's memory size:
@@ -18,8 +21,11 @@ pub fn build(session: &Session, engine: &impl Engine) -> Result<i32, ImageError>
   let context = context(session);
   std::fs::create_dir_all(&context).map_err(|source| ImageError::Io(PathError::new(&context, source)))?;
 
-  let dockerfile = context.join(DOCKERFILE_NAME);
-  std::fs::write(&dockerfile, DOCKERFILE).map_err(|source| ImageError::Io(PathError::new(&dockerfile, source)))?;
+  // The Dockerfile `COPY`s the client, so a context without it fails the build.
+  for (name, contents) in [(DOCKERFILE_NAME, DOCKERFILE), (GUEST_CLIENT_NAME, GUEST_CLIENT)] {
+    let path = context.join(name);
+    std::fs::write(&path, contents).map_err(|source| ImageError::Io(PathError::new(&path, source)))?;
+  }
 
   let memory = session.manifest.container.memory.clone();
   engine.start_builder(Some(&memory))?;
@@ -64,6 +70,22 @@ mod tests {
     assert_eq!(
       std::fs::read_to_string(context(&session).join(DOCKERFILE_NAME)).expect("Dockerfile should exist"),
       DOCKERFILE
+    );
+  }
+
+  /// The Dockerfile `COPY`s the client, so the build fails outright if the
+  /// context holds only the Dockerfile.
+  #[test]
+  fn writes_the_guest_client_into_the_build_context() {
+    let home = TempDir::new().expect("temp dir");
+    let session = session(&home);
+
+    build(&session, &RecordingEngine::new()).expect("build should succeed");
+
+    let client = context(&session).join(GUEST_CLIENT_NAME);
+    assert_eq!(
+      std::fs::read_to_string(&client).expect("the client should exist"),
+      GUEST_CLIENT
     );
   }
 

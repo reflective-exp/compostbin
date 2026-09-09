@@ -129,6 +129,7 @@ name = "compostbin-core"
 version = "0.1.0"
 dependencies = [
  "apple-container",
+ "libc",
  "serde",
  "tempfile",
  "toml",

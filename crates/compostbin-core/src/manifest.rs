@@ -1,10 +1,12 @@
 use crate::error::{ManifestError, PathError};
 use serde::{Deserialize, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 pub const DEFAULT_CLAUDE_HOME: &str = "~/.local/state/compostbin/claude-home";
 pub const DEFAULT_CONTAINER_CPUS: u32 = 4;
 pub const DEFAULT_CONTAINER_MEMORY: &str = "8G";
+pub const DEFAULT_HOST_CONCURRENCY: usize = 8;
 pub const DEFAULT_IMAGE: &str = "compostbin/base:latest";
 /// Checked in beside the project it configures.
 pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
@@ -14,6 +16,10 @@ pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
 pub struct Manifest {
   pub claude: ClaudeConfig,
   pub container: ContainerConfig,
+  /// Skipped when empty so a manifest that declares no host commands renders
+  /// exactly as it did before the feature existed.
+  #[serde(skip_serializing_if = "HostConfig::is_empty")]
+  pub host: HostConfig,
   #[serde(
     serialize_with = "PathEntry::serialize_sorted_by_source",
     skip_serializing_if = "Vec::is_empty"
@@ -81,6 +87,56 @@ impl Default for ContainerConfig {
       memory: DEFAULT_CONTAINER_MEMORY.to_string(),
     }
   }
+}
+
+/// Commands the guest may ask the host to run, keyed by the name it sends. A map
+/// rather than an array of tables: the name is a lookup key, and a `BTreeMap`
+/// renders alphabetically, keeping diffs deterministic.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HostConfig {
+  /// How many may run at once: subagents call `compostbin-host` independently,
+  /// and the bound stops a guest looping on submissions from spawning unlimited
+  /// work.
+  ///
+  /// Declared before `commands`, against this table's alphabetical order, and it
+  /// must stay there: TOML cannot express a bare value after a table, so
+  /// serialising it second makes `save` fail.
+  pub concurrency: usize,
+  pub commands: BTreeMap<String, HostCommand>,
+}
+
+impl Default for HostConfig {
+  fn default() -> Self {
+    Self {
+      commands: BTreeMap::new(),
+      concurrency: DEFAULT_HOST_CONCURRENCY,
+    }
+  }
+}
+
+impl HostConfig {
+  /// No commands, no channel: the spool is neither created nor mounted, so a
+  /// project that has not opted in has no guest-to-host path.
+  pub fn is_empty(&self) -> bool {
+    self.commands.is_empty()
+  }
+}
+
+/// `argv` lives only on the host; the guest sends the name it is keyed by, never
+/// a command line of its own.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostCommand {
+  /// Off by default, so a command is exact unless deliberately widened.
+  #[serde(default)]
+  pub arguments: bool,
+  pub argv: Vec<String>,
+  /// Run under a pty, so colour, progress and prompts work. A terminal is one
+  /// device, so this merges stdout and stderr — off by default, keeping them
+  /// separate for anything read by a machine.
+  #[serde(default)]
+  pub tty: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -203,6 +259,47 @@ snapshot = true
 [workspace]
 roots = ["~/workspace"]
 "#;
+
+  const HOST_MANIFEST: &str = r#"
+[host.commands.test]
+argv = ["cargo", "nextest", "run", "--workspace"]
+
+[host.commands.test-one]
+arguments = true
+argv = ["cargo", "nextest", "run"]
+tty = true
+"#;
+
+  #[test]
+  fn parses_host_commands_with_their_defaults() {
+    let manifest: Manifest = toml::from_str(HOST_MANIFEST).expect("should parse");
+
+    let exact = &manifest.host.commands["test"];
+    assert_eq!(exact.argv, ["cargo", "nextest", "run", "--workspace"]);
+    assert!(!exact.arguments, "arguments should be off unless asked for");
+    assert!(!exact.tty, "a tty should be off unless asked for");
+
+    let widened = &manifest.host.commands["test-one"];
+    assert!(widened.arguments);
+    assert!(widened.tty);
+    assert_eq!(manifest.host.concurrency, DEFAULT_HOST_CONCURRENCY);
+  }
+
+  /// TOML cannot express a bare value after a table, so `concurrency` has to
+  /// serialise before `commands`. Saving a manifest with commands is what would
+  /// fail if that order were ever reversed.
+  #[test]
+  fn saves_a_manifest_that_declares_host_commands() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join("compostbin.toml");
+    let manifest: Manifest = toml::from_str(HOST_MANIFEST).expect("should parse");
+
+    manifest.save(&path).expect("save should succeed");
+
+    let reloaded = Manifest::load(&path).expect("load should succeed");
+    assert_eq!(reloaded.host.commands.len(), 2);
+    assert_eq!(reloaded.host.commands["test"].argv, manifest.host.commands["test"].argv);
+  }
 
   #[test]
   fn saves_and_loads() {

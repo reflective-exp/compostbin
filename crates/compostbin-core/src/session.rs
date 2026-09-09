@@ -1,3 +1,5 @@
+use crate::error::PathError;
+use crate::host::{GUEST_SPOOL_TARGET, HOST_SPOOL, Spool};
 use crate::manifest::{Manifest, PathEntry};
 use crate::paths::{PathResolver, root_containing};
 use apple_container::engine::Engine;
@@ -118,6 +120,15 @@ impl Session {
       });
     }
 
+    // With no allowlist there is no channel at all, rather than an empty one.
+    if !self.manifest.host.is_empty() {
+      mounts.push(Mount {
+        readonly: false,
+        source: self.host_spool(),
+        target: PathBuf::from(GUEST_SPOOL_TARGET),
+      });
+    }
+
     mounts.push(Mount {
       readonly: false,
       source: self.claude_home(),
@@ -125,6 +136,15 @@ impl Session {
     });
 
     mounts
+  }
+
+  /// Per container name, so concurrent projects cannot see each other's
+  /// requests.
+  pub fn host_spool(&self) -> PathBuf {
+    self
+      .resolver
+      .resolve(HOST_SPOOL)
+      .join(self.container_name())
   }
 
   pub fn run_spec(&self) -> RunSpec {
@@ -148,6 +168,16 @@ impl Session {
       name: self.container_name(),
       workdir: Some(self.project_dir.clone()),
     }
+  }
+
+  /// The mount source must exist before the container starts, and the guest
+  /// cannot create it. A no-op when no commands are declared.
+  pub fn prepare_host_spool(&self) -> Result<(), PathError> {
+    if self.manifest.host.is_empty() {
+      return Ok(());
+    }
+
+    Spool::new(self.host_spool()).create()
   }
 
   /// Makes the session's container exist and be running, doing nothing when it

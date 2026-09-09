@@ -21,6 +21,12 @@ RUN curl --fail --silent --show-error --location https://deb.nodesource.com/setu
 
 RUN npm install --global @anthropic-ai/claude-code
 
+# The guest half of the host-command channel. It speaks the spool protocol in
+# compostbin-core's `host` module, and is a shell script because the container is
+# Linux while compostbin itself is a macOS binary.
+COPY compostbin-host /usr/local/bin/compostbin-host
+RUN chmod +x /usr/local/bin/compostbin-host
+
 # Mounted from the host at run time (D5); created here so the first run has a
 # mountpoint even before the host directory exists.
 RUN mkdir -p /root/.claude

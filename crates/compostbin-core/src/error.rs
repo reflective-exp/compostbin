@@ -132,3 +132,79 @@ impl Error for PathError {
     Some(&self.source)
   }
 }
+
+/// Why a host command was refused — an outcome reported to the guest, not a
+/// failure of the agent. Separate from `HostError` so it compares by value,
+/// which the allowlist tests assert on.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Refusal {
+  /// Declared without `arguments = true`.
+  ArgumentsNotAllowed(String),
+  DeniedArgument(String),
+  /// An empty `argv` names nothing to run.
+  EmptyCommand(String),
+  EmptyRequest,
+  NewlineInArgument(String),
+  UnknownCommand(String),
+}
+
+impl Display for Refusal {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+    match self {
+      Self::ArgumentsNotAllowed(name) => write!(
+        formatter,
+        "\"{name}\" takes no arguments; declare `arguments = true` on it to allow them"
+      ),
+      Self::DeniedArgument(argument) => write!(
+        formatter,
+        "the argument \"{argument}\" is refused: it can point the command at other code or configuration"
+      ),
+      Self::EmptyCommand(name) => write!(formatter, "\"{name}\" has an empty argv, so it names nothing to run"),
+      Self::EmptyRequest => write!(formatter, "the request names no command"),
+      Self::NewlineInArgument(argument) => write!(
+        formatter,
+        "an argument may not contain a newline, which \"{argument}\" does"
+      ),
+      Self::UnknownCommand(name) => write!(formatter, "\"{name}\" is not in [host.commands]"),
+    }
+  }
+}
+
+impl Error for Refusal {}
+
+/// A host command that could not be submitted or served.
+#[derive(Debug)]
+pub enum HostError {
+  Io(PathError),
+  Refused(Refusal),
+}
+
+impl Display for HostError {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+    match self {
+      Self::Io(error) => error.fmt(formatter),
+      Self::Refused(refusal) => refusal.fmt(formatter),
+    }
+  }
+}
+
+impl Error for HostError {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Io(error) => Some(error),
+      Self::Refused(refusal) => Some(refusal),
+    }
+  }
+}
+
+impl From<PathError> for HostError {
+  fn from(error: PathError) -> Self {
+    Self::Io(error)
+  }
+}
+
+impl From<Refusal> for HostError {
+  fn from(refusal: Refusal) -> Self {
+    Self::Refused(refusal)
+  }
+}
