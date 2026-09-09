@@ -2,7 +2,7 @@
 //! path that is not there, a link that dies at the mount boundary, a mount set
 //! the running container never got, and a mount that hands over too much.
 
-use super::{Check, Status, check};
+use super::{Check, Status, check, listed};
 use crate::session::Session;
 use crate::session::mounts::Record;
 use crate::workspace::WALK_LIMIT;
@@ -28,10 +28,11 @@ pub fn mounted_paths(session: &Session) -> Check {
     return check("mounted paths", Status::Ok, "every declared path exists");
   }
 
-  check(
+  listed(
     "mounted paths",
     Status::Fail,
-    format!("missing on the host: {}", missing.join(", ")),
+    "declared, but missing on the host",
+    missing,
   )
 }
 
@@ -57,26 +58,25 @@ pub fn dangling_symlinks(session: &Session) -> Check {
     return check("dangling symlinks", Status::Ok, detail);
   }
 
-  let named: Vec<String> = found
+  let mut named: Vec<String> = found
     .escapes
     .iter()
     .take(NAMED)
     .map(|escape| format!("{} -> {}", escape.link.display(), escape.target.display()))
     .collect();
-  let rest = found.escapes.len().saturating_sub(named.len());
-  let more = if rest > 0 {
-    format!(" (and {rest} more)")
-  } else {
-    String::new()
-  };
 
-  check(
+  // The count goes in the list rather than the sentence, so the sentence stays
+  // true however many were named.
+  let rest = found.escapes.len().saturating_sub(named.len());
+  if rest > 0 {
+    named.push(format!("and {rest} more"));
+  }
+
+  listed(
     "dangling symlinks",
     Status::Warn,
-    format!(
-      "dead in the container, because the target is not mounted: {}{more}",
-      named.join(", ")
-    ),
+    "dead in the container, because the target is not mounted",
+    named,
   )
 }
 
@@ -134,13 +134,13 @@ pub fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
     );
   }
 
-  check(
+  listed(
     "container mounts",
     Status::Warn,
     format!(
-      "{name} was started before the manifest changed — {}; mounts cannot be added to a running container, so `compostbin stop` then `compostbin run`",
-      drift.describe()
+      "{name} was started before the manifest changed; mounts cannot be added to a running container, so `compostbin stop` then `compostbin run`"
     ),
+    drift.lines(),
   )
 }
 
@@ -169,5 +169,10 @@ pub fn root_breadth(session: &Session) -> Check {
     return check("mount breadth", Status::Ok, "no mount covers an account or a secret");
   }
 
-  check("mount breadth", Status::Warn, dangerous.join("; "))
+  listed(
+    "mount breadth",
+    Status::Warn,
+    "a mount reaches past the project",
+    dangerous,
+  )
 }

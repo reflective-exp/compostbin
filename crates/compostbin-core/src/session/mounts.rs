@@ -144,29 +144,24 @@ impl Drift {
     self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty()
   }
 
-  /// One line, phrased by what the user would otherwise see happen.
-  pub fn describe(&self) -> String {
-    let mut parts = Vec::new();
+  /// One line per disagreeing mount, each phrased by what the user would
+  /// otherwise see happen. A line rather than a joined sentence because a mount
+  /// is already two paths wide, and three of them on one line cannot be read.
+  pub fn lines(&self) -> Vec<String> {
+    let groups = [
+      ("declared but not mounted, so invisible in the session", &self.added),
+      ("mounted but no longer declared, so still exposed", &self.removed),
+      ("mounted differently", &self.changed),
+    ];
 
-    if !self.added.is_empty() {
-      parts.push(format!(
-        "declared but not mounted, so invisible in the session: {}",
-        self.added.join(", ")
-      ));
-    }
-
-    if !self.removed.is_empty() {
-      parts.push(format!(
-        "mounted but no longer declared, so still exposed: {}",
-        self.removed.join(", ")
-      ));
-    }
-
-    if !self.changed.is_empty() {
-      parts.push(format!("mounted differently: {}", self.changed.join(", ")));
-    }
-
-    parts.join("; ")
+    groups
+      .iter()
+      .flat_map(|(reason, mounts)| {
+        mounts
+          .iter()
+          .map(move |mount| format!("{mount} — {reason}"))
+      })
+      .collect()
   }
 }
 
@@ -204,7 +199,10 @@ mod tests {
     assert_eq!(drift.added, ["/host/b -> /workspace/b"]);
     assert!(drift.changed.is_empty() && drift.removed.is_empty(), "{drift:?}");
     assert!(
-      drift.describe().contains("invisible in the session"),
+      drift
+        .lines()
+        .join("\n")
+        .contains("invisible in the session"),
       "the message must say what the user would otherwise just see fail: {drift:?}"
     );
   }
@@ -221,7 +219,7 @@ mod tests {
 
     assert_eq!(drift.removed, ["/host/secret -> /workspace/secret"]);
     assert!(
-      drift.describe().contains("still exposed"),
+      drift.lines().join("\n").contains("still exposed"),
       "an undeclared mount that is still live is the security-relevant half: {drift:?}"
     );
   }

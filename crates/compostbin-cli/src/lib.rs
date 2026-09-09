@@ -1,4 +1,5 @@
 pub mod cli;
+mod report;
 
 use apple_container::engine::{CliEngine, Engine};
 use clap::Parser;
@@ -263,14 +264,7 @@ fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
     std::env::var_os("ANTHROPIC_API_KEY").is_some(),
   );
 
-  for check in &checks {
-    let label = match check.status {
-      Status::Fail => "FAIL",
-      Status::Ok => "ok  ",
-      Status::Warn => "warn",
-    };
-    println!("{label}  {}: {}", check.name, check.detail);
-  }
+  print!("{}", report::Diagnosis(&checks));
 
   Ok(i32::from(checks.iter().any(|check| check.status == Status::Fail)))
 }

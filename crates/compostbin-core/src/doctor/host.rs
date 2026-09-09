@@ -1,7 +1,7 @@
 //! The two ways a session reaches back out of the container: the commands it may
 //! run on the host, and the token it authenticates to Anthropic with.
 
-use super::{Check, Status, check};
+use super::{Check, Status, check, listed};
 use crate::session::Session;
 use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialSource, KEYCHAIN_SERVICE};
 
@@ -16,7 +16,7 @@ pub fn allowlist(session: &Session) -> Check {
     );
   }
 
-  let listed: Vec<String> = session
+  let commands: Vec<String> = session
     .manifest
     .host
     .commands
@@ -34,10 +34,11 @@ pub fn allowlist(session: &Session) -> Check {
     .values()
     .any(|command| command.arguments);
 
-  check(
+  listed(
     "host commands",
     if widened { Status::Warn } else { Status::Ok },
-    format!("run on the host as you: {}", listed.join("; ")),
+    "these run on the host as you",
+    commands,
   )
 }
 

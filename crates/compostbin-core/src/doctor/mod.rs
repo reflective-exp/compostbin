@@ -28,6 +28,12 @@ pub enum Status {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Check {
   pub detail: String,
+  /// The findings behind `detail`, when a check is about several things at once
+  /// — missing paths, dead symlinks, allowlisted commands. Kept apart from the
+  /// sentence rather than joined into it because these are the parts a reader
+  /// scans down, and a line of them separated by commas is unreadable at the
+  /// width a path already takes.
+  pub items: Vec<String>,
   pub name: String,
   pub status: Status,
 }
@@ -60,8 +66,19 @@ pub fn diagnose(
 fn check(name: &str, status: Status, detail: impl Into<String>) -> Check {
   Check {
     detail: detail.into(),
+    items: Vec::new(),
     name: name.to_string(),
     status,
+  }
+}
+
+/// A check whose sentence is a heading over a list. The sentence still has to
+/// stand on its own: the items are printed under it, not inside it, so it must
+/// say what they are without naming any of them.
+fn listed(name: &str, status: Status, detail: impl Into<String>, items: Vec<String>) -> Check {
+  Check {
+    items,
+    ..check(name, status, detail)
   }
 }
 
@@ -118,6 +135,13 @@ mod tests {
 
   fn quoted(path: &Path, suffix: &str) -> String {
     format!("\"{}\"", path.join(suffix).display())
+  }
+
+  /// The findings alone, for the cases that only care that a check named the
+  /// thing it found. How they are laid out is the CLI's business, not this
+  /// crate's, so nothing here reconstructs a printed line.
+  fn findings(check: &Check) -> String {
+    check.items.join("\n")
   }
 
   #[test]
@@ -207,9 +231,7 @@ mod tests {
     let mounts = check(&checks, "mounted paths");
     assert_eq!(mounts.status, Status::Fail);
     assert!(
-      mounts
-        .detail
-        .contains(&base.join("not-there").display().to_string()),
+      findings(mounts).contains(&base.join("not-there").display().to_string()),
       "detail should name the missing path: {mounts:?}"
     );
   }
@@ -232,7 +254,7 @@ mod tests {
     let dangling = check(&checks, "dangling symlinks");
     assert_eq!(dangling.status, Status::Warn);
     assert!(
-      dangling.detail.contains("vendor") && dangling.detail.contains("elsewhere"),
+      findings(dangling).contains("vendor") && findings(dangling).contains("elsewhere"),
       "detail should name the link and where it points: {dangling:?}"
     );
   }
@@ -251,7 +273,7 @@ mod tests {
     let breadth = check(&checks, "mount breadth");
     assert_eq!(breadth.status, Status::Warn);
     assert!(
-      breadth.detail.contains(
+      findings(breadth).contains(
         &home
           .path()
           .canonicalize()
@@ -332,7 +354,7 @@ mod tests {
     let breadth = check(&checks, "mount breadth");
     assert_eq!(breadth.status, Status::Warn);
     assert!(
-      breadth.detail.contains(".ssh"),
+      findings(breadth).contains(".ssh"),
       "detail should name the secret: {breadth:?}"
     );
   }
@@ -360,10 +382,13 @@ mod tests {
       Status::Warn,
       "a command the guest may append arguments to deserves a warning: {allowlist:?}"
     );
-    assert!(allowlist.detail.contains("test = cargo nextest run"), "{allowlist:?}");
-    assert!(
-      allowlist.detail.contains("(+ guest arguments)"),
-      "the widened command must be marked: {allowlist:?}"
+    assert_eq!(
+      allowlist.items,
+      [
+        "test = cargo nextest run",
+        "test-one = cargo nextest run (+ guest arguments)"
+      ],
+      "one command per line, the widened one marked: {allowlist:?}"
     );
   }
 
@@ -396,7 +421,7 @@ mod tests {
     let mounts = check(&checks, "container mounts");
     assert_eq!(mounts.status, Status::Warn);
     assert!(
-      mounts.detail.contains("vendor"),
+      findings(mounts).contains("vendor"),
       "detail should name the path that is not really mounted: {mounts:?}"
     );
     assert!(
