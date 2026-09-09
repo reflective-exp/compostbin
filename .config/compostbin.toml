@@ -13,6 +13,9 @@ memory = "8G"
 packages = ["direnv"]
 run = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
 
+[host.commands.audit]
+argv = ["cargo", "audit"]
+
 [host.commands.check]
 argv = ["cargo", "check", "--workspace", "--all-targets"]
 
