@@ -30,8 +30,8 @@ fn init_writes_a_manifest_named_after_the_directory() {
   assert_eq!(
     std::fs::read_to_string(project_dir.join(".config/compostbin.toml")).expect("manifest should exist"),
     r#"[claude]
-home = "~/.local/state/compostbin/claude-home"
 seed_from_keychain = true
+shared = ["CLAUDE.md", "settings.json"]
 
 [container]
 cpus = 4
@@ -52,7 +52,7 @@ roots = []
 }
 
 #[test]
-fn ls_lists_the_project_and_claude_home() {
+fn ls_shows_where_each_path_lands_in_the_container() {
   let temp = TempDir::new().expect("temp dir");
   let project_dir = temp
     .path()
@@ -72,9 +72,68 @@ fn ls_lists_the_project_and_claude_home() {
   assert_eq!(
     listed,
     [
-      project_dir.display().to_string(),
-      format!("{home}/.local/state/compostbin/claude-home"),
+      format!("{} -> /workspace/my-project (project)", project_dir.display()),
+      format!(
+        "{home}/.local/state/compostbin/sessions/compostbin-my-project/claude-home -> /home/claude/.claude (claude home)"
+      ),
     ]
+  );
+}
+
+#[test]
+fn clean_removes_the_spool_and_keeps_the_conversation() {
+  let temp = TempDir::new().expect("temp dir");
+  let project_dir = temp
+    .path()
+    .canonicalize()
+    .expect("canonical temp")
+    .join("my-project");
+  std::fs::create_dir(&project_dir).expect("create project dir");
+  compostbin(&project_dir, &["init"]);
+
+  let home = std::env::var("HOME").expect("HOME");
+  let state = std::path::Path::new(&home).join(".local/state/compostbin/sessions/compostbin-my-project");
+  std::fs::create_dir_all(state.join("host/requests")).expect("create spool");
+  std::fs::create_dir_all(state.join("claude-home")).expect("create claude home");
+
+  let output = compostbin(&project_dir, &["clean"]);
+
+  assert!(
+    output.status.success(),
+    "clean failed: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(!state.join("host").exists(), "the spool is transient");
+  assert!(
+    state.join("claude-home").exists(),
+    "`clean` must not discard the conversation `--continue` resumes"
+  );
+
+  std::fs::remove_dir_all(&state).expect("remove session state");
+}
+
+#[test]
+fn add_refuses_a_path_full_of_credentials() {
+  let temp = TempDir::new().expect("temp dir");
+  let project_dir = project_with_a_root(&temp);
+  let home = std::env::var("HOME").expect("HOME");
+  let ssh = std::path::Path::new(&home).join(".ssh");
+  if !ssh.is_dir() {
+    return;
+  }
+
+  let output = compostbin(&project_dir, &["add", &ssh.display().to_string()]);
+
+  assert!(!output.status.success(), "add should refuse ~/.ssh");
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(
+    stderr.contains("--force"),
+    "the refusal should name the override: {stderr}"
+  );
+  let manifest = std::fs::read_to_string(project_dir.join(".config/compostbin.toml")).expect("manifest");
+  assert!(
+    !manifest.contains("[[paths]]"),
+    "a refused path must not be recorded: {manifest}"
   );
 }
 

@@ -1,11 +1,17 @@
 [claude]
-home = "~/.local/state/compostbin/claude-home"
 seed_from_keychain = true
+shared = ["CLAUDE.md", "settings.json"]
 
 [container]
 cpus = 4
 env = []
 memory = "8G"
+
+# direnv is a property of this project, not of every project, so it is built
+# into this project's own image rather than into the base everyone shares.
+[image]
+packages = ["direnv"]
+run = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
 
 [host.commands.check]
 argv = ["cargo", "check", "--workspace", "--all-targets"]

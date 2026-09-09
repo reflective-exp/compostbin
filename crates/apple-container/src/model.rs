@@ -207,7 +207,7 @@ mod tests {
       interactive: true,
       name: "compostbin-compostbin".to_string(),
       tty: true,
-      workdir: Some("/Users/user/workspace/compostbin".into()),
+      workdir: Some("/workspace/compostbin".into()),
     };
 
     assert_eq!(
@@ -219,7 +219,7 @@ mod tests {
         "--interactive",
         "--tty",
         "--workdir",
-        "/Users/user/workspace/compostbin",
+        "/workspace/compostbin",
         "compostbin-compostbin",
         "claude",
         "--continue",
@@ -260,7 +260,7 @@ mod tests {
         Mount {
           readonly: false,
           source: "/Users/user/workspace".into(),
-          target: "/Users/user/workspace".into(),
+          target: "/workspace".into(),
         },
         Mount {
           readonly: true,
@@ -269,7 +269,7 @@ mod tests {
         },
       ],
       name: "compostbin-compostbin".to_string(),
-      workdir: Some("/Users/user/workspace/compostbin".into()),
+      workdir: Some("/workspace/compostbin".into()),
     };
 
     assert_eq!(
@@ -288,11 +288,11 @@ mod tests {
         "--name",
         "compostbin-compostbin",
         "--volume",
-        "/Users/user/workspace:/Users/user/workspace",
+        "/Users/user/workspace:/workspace",
         "--volume",
         "/Users/user/.cargo/registry:/Users/user/.cargo/registry:ro",
         "--workdir",
-        "/Users/user/workspace/compostbin",
+        "/workspace/compostbin",
         "compostbin/base:latest",
         "claude",
         "--continue",

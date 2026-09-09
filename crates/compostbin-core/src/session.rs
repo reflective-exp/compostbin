@@ -1,7 +1,8 @@
 use crate::error::PathError;
-use crate::host::{GUEST_SPOOL_TARGET, HOST_SPOOL, Spool};
-use crate::manifest::{Manifest, PathEntry};
+use crate::host::{GUEST_SPOOL_TARGET, Spool};
+use crate::manifest::{Manifest, PathEntry, SESSIONS_DIR};
 use crate::paths::{PathResolver, root_containing};
+use crate::workspace::{Origin, Workspace};
 use apple_container::engine::Engine;
 use apple_container::error::EngineError;
 use apple_container::model::{EnvVar, ExecSpec, Mount, RunSpec};
@@ -10,6 +11,11 @@ use std::path::PathBuf;
 /// Where Claude's home is mounted inside the container. The container runs as
 /// `claude`, matching the reference implementation.
 pub const CLAUDE_HOME_TARGET: &str = "/home/claude/.claude";
+/// Under the session state directory: kept, because `claude --continue` reads it.
+pub const CLAUDE_HOME_DIR: &str = "claude-home";
+/// Under the session state directory: removed by `clean`, because it holds only
+/// requests in flight.
+pub const SPOOL_DIR: &str = "host";
 /// Keeps a detached container alive so `exec` has something to attach to.
 pub const KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
 pub const NAME_PREFIX: &str = "compostbin-";
@@ -65,10 +71,58 @@ impl Session {
     self.resolver.resolve(raw)
   }
 
+  pub fn resolver(&self) -> &PathResolver {
+    &self.resolver
+  }
+
   /// Claude's home on the host — the source side of the bind mount, and so the
   /// place to seed credentials before the container starts.
+  ///
+  /// Per session unless the manifest overrides it: one shared home would mean
+  /// every project's `--continue` resumed whichever project ran last, and one
+  /// project's history would be readable from another project's container.
   pub fn claude_home(&self) -> PathBuf {
-    self.resolver.resolve(&self.manifest.claude.home)
+    match &self.manifest.claude.home {
+      Some(home) => self.resolver.resolve(home),
+      None => self.state_dir().join(CLAUDE_HOME_DIR),
+    }
+  }
+
+  /// Everything this session keeps on the host, under its own container name.
+  pub fn state_dir(&self) -> PathBuf {
+    self
+      .resolver
+      .resolve(SESSIONS_DIR)
+      .join(self.container_name())
+  }
+
+  /// What the session may delete on exit: state that means nothing once the
+  /// container is gone. Claude's home is deliberately not here — losing it
+  /// would lose the conversation `--continue` reattaches to.
+  pub fn transient_state(&self) -> Vec<PathBuf> {
+    vec![self.host_spool()]
+  }
+
+  /// Removes this session's transient state, and with `everything` the session
+  /// directory whole — Claude's home included. Missing paths are not an error:
+  /// `clean` exists precisely because an earlier exit may not have run.
+  pub fn clean(&self, everything: bool) -> Result<Vec<PathBuf>, PathError> {
+    let targets = if everything {
+      vec![self.state_dir()]
+    } else {
+      self.transient_state()
+    };
+
+    let mut removed = Vec::new();
+    for target in targets {
+      if !target.exists() {
+        continue;
+      }
+      std::fs::remove_dir_all(&target).map_err(|source| PathError::new(&target, source))?;
+      removed.push(target);
+    }
+
+    Ok(removed)
   }
 
   pub fn container_name(&self) -> String {
@@ -88,37 +142,46 @@ impl Session {
     format!("{NAME_PREFIX}{project}")
   }
 
-  /// Workspace roots first, then explicit paths, then Claude's home. Order is
-  /// preserved so a nested mount declared later lands on top of its parent.
-  pub fn mounts(&self) -> Vec<Mount> {
-    let mut mounts: Vec<Mount> = self
-      .manifest
-      .workspace
-      .roots
-      .iter()
-      .map(|root| self.identical_mount(root, false))
-      .collect();
+  /// The host paths this session exposes, in declaration order: roots, then the
+  /// project directory when no root covers it, then explicit `[[paths]]`. Order
+  /// matters — a name is taken by the first entry that claims it.
+  pub fn workspace(&self) -> Workspace {
+    let mut workspace = Workspace::new();
+
+    for root in &self.manifest.workspace.roots {
+      workspace.push(self.resolver.resolve(root), None, Origin::Root, false);
+    }
 
     if root_containing(&self.project_dir, &self.resolved_roots()).is_none() {
-      mounts.push(Mount {
-        readonly: false,
-        source: self.project_dir.clone(),
-        target: self.project_dir.clone(),
-      });
+      workspace.push(self.project_dir.clone(), None, Origin::Project, false);
     }
 
     for entry in &self.manifest.paths {
-      let source = self.resolver.resolve(&entry.source);
-      let target = match &entry.target {
-        Some(target) => self.resolver.resolve(target),
-        None => source.clone(),
-      };
-      mounts.push(Mount {
-        readonly: entry.readonly,
-        source,
+      let target = entry.target.as_ref().map(PathBuf::from);
+      workspace.push(
+        self.resolver.resolve(&entry.source),
         target,
-      });
+        Origin::Explicit,
+        entry.readonly,
+      );
     }
+
+    workspace
+  }
+
+  /// Every workspace entry, then the spool, then Claude's home. Order is
+  /// preserved so a nested mount declared later lands on top of its parent.
+  pub fn mounts(&self) -> Vec<Mount> {
+    let mut mounts: Vec<Mount> = self
+      .workspace()
+      .entries()
+      .iter()
+      .map(|entry| Mount {
+        readonly: entry.readonly,
+        source: entry.host.clone(),
+        target: entry.guest.clone(),
+      })
+      .collect();
 
     // With no allowlist there is no channel at all, rather than an empty one.
     if !self.manifest.host.is_empty() {
@@ -138,13 +201,31 @@ impl Session {
     mounts
   }
 
-  /// Per container name, so concurrent projects cannot see each other's
-  /// requests.
-  pub fn host_spool(&self) -> PathBuf {
+  /// Where the session lands inside the container: the project directory's own
+  /// `/workspace` path. Falling back to `/workspace` itself keeps a
+  /// misconfigured manifest from starting a container in a directory that is not
+  /// mounted at all.
+  pub fn workdir(&self) -> PathBuf {
     self
-      .resolver
-      .resolve(HOST_SPOOL)
-      .join(self.container_name())
+      .workspace()
+      .guest_path(&self.project_dir)
+      .unwrap_or_else(|| PathBuf::from(crate::workspace::WORKSPACE_TARGET))
+  }
+
+  /// Inside the session directory, so concurrent projects cannot see each
+  /// other's requests and `clean` takes it away with the rest.
+  pub fn host_spool(&self) -> PathBuf {
+    self.state_dir().join(SPOOL_DIR)
+  }
+
+  /// The image the session runs: a derived one when the manifest adds packages
+  /// or build steps, otherwise the shared base itself.
+  pub fn image(&self) -> String {
+    if self.manifest.image.is_empty() {
+      self.manifest.project.image.clone()
+    } else {
+      format!("compostbin/{}:latest", self.container_name())
+    }
   }
 
   pub fn run_spec(&self) -> RunSpec {
@@ -162,11 +243,11 @@ impl Session {
         .iter()
         .map(|name| EnvVar::Inherit(name.clone()))
         .collect(),
-      image: self.manifest.project.image.clone(),
+      image: self.image(),
       memory: Some(self.manifest.container.memory.clone()),
       mounts: self.mounts(),
       name: self.container_name(),
-      workdir: Some(self.project_dir.clone()),
+      workdir: Some(self.workdir()),
     }
   }
 
@@ -232,7 +313,7 @@ impl Session {
       interactive: true,
       name: self.container_name(),
       tty: true,
-      workdir: Some(self.project_dir.clone()),
+      workdir: Some(self.workdir()),
     }
   }
 
@@ -245,21 +326,13 @@ impl Session {
       .map(|root| self.resolver.resolve(root))
       .collect()
   }
-
-  fn identical_mount(&self, raw: &str, readonly: bool) -> Mount {
-    let source = self.resolver.resolve(raw);
-    Mount {
-      readonly,
-      target: source.clone(),
-      source,
-    }
-  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
   use apple_container::fake::RecordingEngine;
+  use tempfile::TempDir;
 
   const MANIFEST: &str = r#"
 [project]
@@ -316,7 +389,7 @@ source   = "~/.cargo/registry"
       session.mounts().contains(&Mount {
         readonly: true,
         source: "/Users/user/vendor/libfoo".into(),
-        target: "/Users/user/vendor/libfoo".into(),
+        target: "/workspace/libfoo".into(),
       }),
       "the added path must become a mount"
     );
@@ -389,7 +462,9 @@ source   = "~/.cargo/registry"
 
     let run = &engine.calls()[2];
     assert!(
-      run.contains(&"/Users/user/.local/state/compostbin/claude-home:/home/claude/.claude".to_string()),
+      run.contains(
+        &"/Users/user/.local/state/compostbin/sessions/compostbin-cb/claude-home:/home/claude/.claude".to_string()
+      ),
       "the recreated container must remount Claude's home: {run:?}"
     );
   }
@@ -409,7 +484,7 @@ source   = "~/.cargo/registry"
         "--interactive",
         "--tty",
         "--workdir",
-        "/Users/user/workspace/compostbin",
+        "/workspace/workspace/compostbin",
         "compostbin-cb",
         "claude",
         "--continue",
@@ -431,15 +506,16 @@ source   = "~/.cargo/registry"
         Mount {
           readonly: false,
           source: "/Users/user/code/loose".into(),
-          target: "/Users/user/code/loose".into(),
+          target: "/workspace/loose".into(),
         },
         Mount {
           readonly: false,
-          source: "/Users/user/.local/state/compostbin/claude-home".into(),
+          source: "/Users/user/.local/state/compostbin/sessions/compostbin-loose/claude-home".into(),
           target: "/home/claude/.claude".into(),
         },
       ]
     );
+    assert_eq!(session.workdir(), PathBuf::from("/workspace/loose"));
   }
 
   #[test]
@@ -455,16 +531,71 @@ source   = "~/.cargo/registry"
       [
         "/Users/user/workspace",
         "/Users/user/.cargo/registry",
-        "/Users/user/.local/state/compostbin/claude-home",
+        "/Users/user/.local/state/compostbin/sessions/compostbin-cb/claude-home",
       ]
     );
+  }
+
+  /// D6: with no allowlist there is no channel at all, rather than an empty
+  /// one — so the spool must be absent from the argv, not merely unused.
+  #[test]
+  fn mounts_the_spool_only_when_commands_are_declared() {
+    let spool = "/Users/user/.local/state/compostbin/sessions/compostbin-cb/host";
+
+    assert!(
+      !session()
+        .mounts()
+        .iter()
+        .any(|mount| mount.source == PathBuf::from(spool)),
+      "an undeclared channel must not be mounted: {:?}",
+      session().mounts()
+    );
+
+    let mut declared = session();
+    declared.manifest.host =
+      toml::from_str("[commands.test]\nargv = [\"cargo\", \"nextest\", \"run\"]\n").expect("host config should parse");
+
+    assert!(
+      declared.mounts().contains(&Mount {
+        readonly: false,
+        source: spool.into(),
+        target: GUEST_SPOOL_TARGET.into(),
+      }),
+      "a declared command needs the spool mounted: {:?}",
+      declared.mounts()
+    );
+  }
+
+  /// The mount source has to exist before `run`, and only then: `prepare` is
+  /// what creates it, so an undeclared channel must leave nothing behind.
+  #[test]
+  fn prepares_the_spool_only_when_commands_are_declared() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let mut session = Session::new(
+      toml::from_str(MANIFEST).expect("manifest should parse"),
+      PathResolver::new(base.join("project"), &base),
+      base.join("project"),
+    );
+
+    session
+      .prepare_host_spool()
+      .expect("prepare should succeed");
+    assert!(!session.host_spool().exists(), "no allowlist, no spool");
+
+    session.manifest.host =
+      toml::from_str("[commands.test]\nargv = [\"cargo\", \"nextest\", \"run\"]\n").expect("host config should parse");
+    session
+      .prepare_host_spool()
+      .expect("prepare should succeed");
+    assert!(session.host_spool().exists());
   }
 
   #[test]
   fn resolves_claude_home_on_the_host() {
     assert_eq!(
       session().claude_home(),
-      PathBuf::from("/Users/user/.local/state/compostbin/claude-home")
+      PathBuf::from("/Users/user/.local/state/compostbin/sessions/compostbin-cb/claude-home")
     );
   }
 
@@ -484,17 +615,109 @@ source   = "~/.cargo/registry"
         "--name",
         "compostbin-cb",
         "--volume",
-        "/Users/user/workspace:/Users/user/workspace",
+        "/Users/user/workspace:/workspace/workspace",
         "--volume",
-        "/Users/user/.cargo/registry:/Users/user/.cargo/registry:ro",
+        "/Users/user/.cargo/registry:/workspace/registry:ro",
         "--volume",
-        "/Users/user/.local/state/compostbin/claude-home:/home/claude/.claude",
+        "/Users/user/.local/state/compostbin/sessions/compostbin-cb/claude-home:/home/claude/.claude",
         "--workdir",
-        "/Users/user/workspace/compostbin",
+        "/workspace/workspace/compostbin",
         "compostbin/base:latest",
         "sleep",
         "infinity",
       ]
+    );
+  }
+
+  #[test]
+  fn keeps_host_paths_out_of_the_container() {
+    let session = session();
+
+    let leaking: Vec<String> = session
+      .mounts()
+      .iter()
+      .map(|mount| mount.target.display().to_string())
+      .chain([session.workdir().display().to_string()])
+      .filter(|guest| guest.starts_with("/Users"))
+      .collect();
+
+    assert_eq!(
+      leaking,
+      Vec::<String>::new(),
+      "a host path may appear only as the source half of a mount"
+    );
+  }
+
+  #[test]
+  fn runs_the_base_image_unless_the_manifest_adds_to_it() {
+    assert_eq!(session().image(), "compostbin/base:latest");
+
+    let mut session = session();
+    session.manifest.image.packages = vec!["direnv".to_string()];
+
+    assert_eq!(session.image(), "compostbin/compostbin-cb:latest");
+    assert!(
+      session
+        .run_spec()
+        .to_argv()
+        .contains(&"compostbin/compostbin-cb:latest".to_string()),
+      "the session must run the image it built"
+    );
+  }
+
+  #[test]
+  fn cleans_transient_state_but_keeps_the_conversation() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = Session::new(
+      toml::from_str(MANIFEST).expect("manifest should parse"),
+      PathResolver::new(base.join("project"), &base),
+      base.join("project"),
+    );
+    std::fs::create_dir_all(session.host_spool()).expect("create spool");
+    std::fs::create_dir_all(session.claude_home()).expect("create claude home");
+
+    let removed = session.clean(false).expect("clean should succeed");
+
+    assert_eq!(removed, [session.host_spool()]);
+    assert!(!session.host_spool().exists());
+    assert!(
+      session.claude_home().exists(),
+      "the conversation `--continue` reattaches to must survive"
+    );
+  }
+
+  #[test]
+  fn cleaning_everything_takes_the_session_directory() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = Session::new(
+      toml::from_str(MANIFEST).expect("manifest should parse"),
+      PathResolver::new(base.join("project"), &base),
+      base.join("project"),
+    );
+    std::fs::create_dir_all(session.claude_home()).expect("create claude home");
+
+    assert_eq!(
+      session.clean(true).expect("clean should succeed"),
+      [session.state_dir()]
+    );
+    assert!(!session.state_dir().exists());
+  }
+
+  #[test]
+  fn cleaning_state_that_is_already_gone_is_not_an_error() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = Session::new(
+      toml::from_str(MANIFEST).expect("manifest should parse"),
+      PathResolver::new(base.join("project"), &base),
+      base.join("project"),
+    );
+
+    assert_eq!(
+      session.clean(true).expect("clean should succeed"),
+      Vec::<PathBuf>::new()
     );
   }
 }

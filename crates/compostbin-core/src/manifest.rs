@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const DEFAULT_CLAUDE_HOME: &str = "~/.local/state/compostbin/claude-home";
+/// Session state, keyed by container name: Claude's home (which persists, so
+/// `claude --continue` works) beside the transient spool (which `clean` removes).
+pub const SESSIONS_DIR: &str = "~/.local/state/compostbin/sessions";
 pub const DEFAULT_CONTAINER_CPUS: u32 = 4;
 pub const DEFAULT_CONTAINER_MEMORY: &str = "8G";
 pub const DEFAULT_HOST_CONCURRENCY: usize = 8;
@@ -20,6 +22,10 @@ pub struct Manifest {
   /// exactly as it did before the feature existed.
   #[serde(skip_serializing_if = "HostConfig::is_empty")]
   pub host: HostConfig,
+  /// Per-project additions to the base image. Empty by default, and skipped when
+  /// empty so a project that needs nothing renders no table.
+  #[serde(skip_serializing_if = "ImageConfig::is_empty")]
+  pub image: ImageConfig,
   #[serde(
     serialize_with = "PathEntry::serialize_sorted_by_source",
     skip_serializing_if = "Vec::is_empty"
@@ -58,18 +64,34 @@ impl Manifest {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClaudeConfig {
-  pub home: String,
+  /// Overrides the per-session default under `SESSIONS_DIR`. Unset is the
+  /// normal case: sharing one home between projects would mean `--continue`
+  /// resumed whichever project spoke last.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub home: Option<String>,
   pub seed_from_keychain: bool,
+  /// Which of the host's own `~/.claude` files to copy in at session start.
+  /// Config the user maintains once and expects everywhere — not credentials,
+  /// which come from the Keychain, and not history, which is per session.
+  pub shared: Vec<String>,
 }
 
 impl Default for ClaudeConfig {
   fn default() -> Self {
     Self {
-      home: DEFAULT_CLAUDE_HOME.to_string(),
+      home: None,
       seed_from_keychain: true,
+      shared: DEFAULT_SHARED_CLAUDE_FILES
+        .iter()
+        .map(|name| name.to_string())
+        .collect(),
     }
   }
 }
+
+/// Copied from the host's `~/.claude` into the session home on every `run`, so
+/// an edit on the host reaches the next session.
+pub const DEFAULT_SHARED_CLAUDE_FILES: [&str; 2] = ["CLAUDE.md", "settings.json"];
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -139,12 +161,36 @@ pub struct HostCommand {
   pub tty: bool,
 }
 
+/// Per-project image additions. direnv is the motivating case: it is a property
+/// of a project, not of every project, so it does not belong in the base image.
+///
+/// Non-empty means the session runs a derived image built `FROM` the base;
+/// empty means it runs the base image itself, with no build of its own.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ImageConfig {
+  /// `apt-get install`ed as root, before `run`.
+  pub packages: Vec<String>,
+  /// Shell lines run as the `claude` user, so a command writing to `~` lands in
+  /// the home the session actually uses.
+  pub run: Vec<String>,
+}
+
+impl ImageConfig {
+  pub fn is_empty(&self) -> bool {
+    self.packages.is_empty() && self.run.is_empty()
+  }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathEntry {
   #[serde(default)]
   pub readonly: bool,
   pub source: String,
+  /// An absolute *guest* path, for the rare case where something must appear at
+  /// a fixed location. The default — `/workspace/<basename>` — is what keeps
+  /// host paths out of the container.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub target: Option<String>,
 }
@@ -224,21 +270,29 @@ source = "~/code/vendor/libfoo"
 target = "~/code/vendor/libfoo"
 
 [claude]
-home               = "~/.local/state/compostbin/claude-home"
 seed_from_keychain = true
+shared             = ["CLAUDE.md", "settings.json"]
+
+[image]
+packages = ["direnv"]
+run      = ["echo 'eval \"$(direnv hook bash)\"' >> ~/.bashrc"]
 
 [safety]
 snapshot = true
 "#;
 
   const EXPECTED_RENDERING: &str = r#"[claude]
-home = "~/.local/state/compostbin/claude-home"
 seed_from_keychain = true
+shared = ["CLAUDE.md", "settings.json"]
 
 [container]
 cpus = 4
 env = ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
 memory = "8G"
+
+[image]
+packages = ["direnv"]
+run = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
 
 [[paths]]
 readonly = true
@@ -357,8 +411,12 @@ tty = true
     assert_eq!(manifest.paths[1].target.as_deref(), Some("~/code/vendor/libfoo"));
     assert_eq!(manifest.paths.len(), 2);
 
-    assert_eq!(manifest.claude.home, "~/.local/state/compostbin/claude-home");
+    assert_eq!(manifest.claude.home, None);
     assert_eq!(manifest.claude.seed_from_keychain, true);
+    assert_eq!(manifest.claude.shared, ["CLAUDE.md", "settings.json"]);
+
+    assert_eq!(manifest.image.packages, ["direnv"]);
+    assert_eq!(manifest.image.run.len(), 1);
 
     assert_eq!(manifest.safety.snapshot, true);
   }
@@ -419,8 +477,17 @@ source = "~/a-first"
     assert_eq!(manifest.workspace.roots, [] as [String; 0]);
     assert_eq!(manifest.paths.len(), 0);
 
-    assert_eq!(manifest.claude.home, "~/.local/state/compostbin/claude-home");
+    assert_eq!(
+      manifest.claude.home, None,
+      "an unset home is what makes the session's home per project"
+    );
     assert_eq!(manifest.claude.seed_from_keychain, true);
+    assert_eq!(manifest.claude.shared, DEFAULT_SHARED_CLAUDE_FILES);
+
+    assert!(
+      manifest.image.is_empty(),
+      "a project with no additions runs the base image itself"
+    );
 
     assert_eq!(manifest.safety.snapshot, true);
   }

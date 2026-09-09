@@ -14,8 +14,6 @@ use std::time::Duration;
 /// Fixed, not configurable: the guest client is a shell script and cannot read
 /// the manifest.
 pub const GUEST_SPOOL_TARGET: &str = "/run/compostbin/host";
-/// Per project, so sessions cannot read each other's requests.
-pub const HOST_SPOOL: &str = "~/.local/state/compostbin/host";
 
 /// Requests land here, one file per request.
 pub const REQUESTS_DIR: &str = "requests";
@@ -527,6 +525,17 @@ mod tests {
       .collect()
   }
 
+  /// One command declared `tty = true`, which is the only way to reach the pty
+  /// path — the flag is per command, and off by default.
+  fn terminal_command(name: &str, argv: &[&str]) -> BTreeMap<String, HostCommand> {
+    let mut commands = commands(&[(name, argv, false)]);
+    commands
+      .get_mut(name)
+      .expect("the command was just inserted")
+      .tty = true;
+    commands
+  }
+
   fn allowlist() -> BTreeMap<String, HostCommand> {
     commands(&[
       ("test", &["cargo", "nextest", "run", "--workspace"], false),
@@ -790,6 +799,90 @@ mod tests {
         output: "out\n".to_string(),
         status: 0,
       }
+    );
+  }
+
+  /// What `tty = true` is for: the command sees a terminal, so `isatty` is true
+  /// and it gives colour and progress instead of its non-interactive output.
+  #[test]
+  fn gives_a_terminal_to_a_command_that_asked_for_one() {
+    let (_temp, spool) = spool();
+    let allowlist = terminal_command("interactive", &["sh", "-c", "test -t 1 && test -t 0"]);
+
+    spool
+      .submit("0001", &Request::new("interactive", Vec::new()))
+      .expect("submit");
+
+    assert_eq!(
+      serve_one(&spool, &allowlist, Path::new("."), "0001").status,
+      0,
+      "both the command's input and its output should be the terminal"
+    );
+  }
+
+  /// The same command on pipes: the mirror of the assertion above, so the test
+  /// above cannot pass by accident.
+  #[test]
+  fn gives_pipes_to_a_command_that_did_not() {
+    let (_temp, spool) = spool();
+    let allowlist = commands(&[("plain", &["sh", "-c", "test -t 1"], false)]);
+
+    spool
+      .submit("0001", &Request::new("plain", Vec::new()))
+      .expect("submit");
+
+    assert_eq!(serve_one(&spool, &allowlist, Path::new("."), "0001").status, 1);
+  }
+
+  /// A terminal is one device, so the two streams merge. That is the point of
+  /// the flag rather than a limitation, and it is why it is off by default.
+  #[test]
+  fn merges_the_streams_a_terminal_cannot_keep_apart() {
+    let (_temp, spool) = spool();
+    let allowlist = terminal_command("both", &["sh", "-c", "printf out; printf err >&2"]);
+
+    spool
+      .submit("0001", &Request::new("both", Vec::new()))
+      .expect("submit");
+
+    let response = serve_one(&spool, &allowlist, Path::new("."), "0001");
+
+    assert_eq!(response.status, 0);
+    assert_eq!(
+      response.errors,
+      String::new(),
+      "a pty has no second descriptor to publish: {response:?}"
+    );
+    assert!(
+      response.output.contains("out") && response.output.contains("err"),
+      "both streams should arrive on the terminal: {response:?}"
+    );
+  }
+
+  /// Stdin forwarding has to work in both modes: the guest client is the same
+  /// script either way, so it cannot know which it is talking to.
+  ///
+  /// The command reads one line and exits on its own, because on a pty it has to.
+  /// `<id>.in.eof` closes our end of the master, and that is not an EOF to the
+  /// slave — a terminal transmits end-of-input as an EOT character, which we do
+  /// not send. So a `tty = true` command that reads to EOF hangs; only commands
+  /// that end their own input are safe under the flag today.
+  #[test]
+  fn feeds_a_terminal_command_its_input() {
+    let (_temp, spool) = spool();
+    let allowlist = terminal_command("echo-line", &["sh", "-c", "read line; printf '%s' \"$line\""]);
+
+    std::fs::write(spool.responses().join(format!("0001{INPUT_SUFFIX}")), "hello\n").expect("write input");
+    std::fs::write(spool.responses().join(format!("0001{INPUT_EOF_SUFFIX}")), "").expect("mark end");
+    spool
+      .submit("0001", &Request::new("echo-line", Vec::new()))
+      .expect("submit");
+
+    assert!(
+      serve_one(&spool, &allowlist, Path::new("."), "0001")
+        .output
+        .contains("hello"),
+      "a pty echoes the input back too, so the reply is what matters, not the whole stream"
     );
   }
 

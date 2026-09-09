@@ -10,3 +10,5 @@ pub mod image;
 pub mod manifest;
 pub mod paths;
 pub mod session;
+pub mod signals;
+pub mod workspace;

@@ -16,14 +16,23 @@ pub enum Command {
   /// Mount a path into the session
   Add {
     path: PathBuf,
+    /// Mount a path `add` would otherwise refuse as too broad or too sensitive
+    #[arg(long)]
+    force: bool,
     #[arg(long)]
     readonly: bool,
     /// Recreate the container so an out-of-root path becomes visible
     #[arg(long)]
     restart: bool,
   },
-  /// Build the base image
+  /// Build the base image, and the project's own image if the manifest adds to it
   Build,
+  /// Remove this session's transient state
+  Clean {
+    /// Also remove Claude's home, discarding the conversation `--continue` resumes
+    #[arg(long)]
+    all: bool,
+  },
   /// Check the host, the daemon, and every declared path
   Doctor,
   /// Serve host commands for a session started elsewhere
@@ -57,6 +66,7 @@ mod tests {
     assert_eq!(
       parse(&["compostbin", "add", "../libfoo", "--readonly", "--restart"]),
       Command::Add {
+        force: false,
         path: PathBuf::from("../libfoo"),
         readonly: true,
         restart: true,
@@ -65,6 +75,7 @@ mod tests {
     assert_eq!(
       parse(&["compostbin", "add", "../libfoo"]),
       Command::Add {
+        force: false,
         path: PathBuf::from("../libfoo"),
         readonly: false,
         restart: false,
@@ -85,6 +96,8 @@ mod tests {
 
   #[test]
   fn parses_bare_subcommands() {
+    assert_eq!(parse(&["compostbin", "clean"]), Command::Clean { all: false });
+    assert_eq!(parse(&["compostbin", "clean", "--all"]), Command::Clean { all: true });
     assert_eq!(parse(&["compostbin", "host-agent"]), Command::HostAgent);
     assert_eq!(parse(&["compostbin", "init"]), Command::Init);
     assert_eq!(parse(&["compostbin", "ls"]), Command::Ls);

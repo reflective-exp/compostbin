@@ -1,12 +1,15 @@
 use crate::credentials::{CREDENTIALS_FILE_NAME, CredentialSource, KEYCHAIN_SERVICE};
+use crate::paths::{Danger, danger};
 use crate::session::Session;
+use crate::workspace::WALK_LIMIT;
 use apple_container::engine::Engine;
 use apple_container::error::EngineError;
 
 /// The `container` CLI version every fact in the plan was measured against.
 pub const TESTED_CLI_VERSION: &str = "1.3.1";
 /// Roots so broad that mounting them hands the container the whole account.
-pub const BROAD_ROOTS: [&str; 5] = ["/", "~", "~/Desktop", "~/Documents", "~/Downloads"];
+/// Kept as a re-export of the list `add` refuses on, so the two cannot drift.
+pub use crate::paths::BROAD_PATHS as BROAD_ROOTS;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Status {
@@ -37,8 +40,10 @@ pub fn diagnose(
     daemon(&images),
     base_image(session, &images),
     mounted_paths(session),
+    dangling_symlinks(session),
     root_breadth(session),
     credentials_check(session, credentials, api_key_present),
+    host_allowlist(session),
   ]
 }
 
@@ -114,32 +119,112 @@ fn mounted_paths(session: &Session) -> Check {
   )
 }
 
-fn root_breadth(session: &Session) -> Check {
-  let broad: Vec<String> = session
-    .manifest
-    .workspace
-    .roots
-    .iter()
-    .map(|raw| session.resolve(raw))
-    .filter(|root| {
-      BROAD_ROOTS
-        .iter()
-        .any(|broad| session.resolve(broad) == *root)
-    })
-    .map(|root| root.display().to_string())
-    .collect();
+/// The likeliest silent failure of the whole design: a symlink that resolves
+/// on the host and dangles in the container, because its target is outside every
+/// mounted tree (F5). Nothing reports it — the file is simply not there.
+///
+/// A warning rather than a failure: the session runs, and the fix is either to
+/// mount the target or to stop relying on the link, both of which are the user's
+/// call.
+fn dangling_symlinks(session: &Session) -> Check {
+  const NAMED: usize = 5;
 
-  if broad.is_empty() {
-    return check("root breadth", Status::Ok, "no root covers a whole account");
+  let found = session.workspace().escaping_symlinks(WALK_LIMIT);
+
+  if found.escapes.is_empty() {
+    let detail = if found.exhausted {
+      format!("none in the first {WALK_LIMIT} entries; the mounted trees are too large to walk in full")
+    } else {
+      "no symlink escapes the mounted trees".to_string()
+    };
+
+    return check("dangling symlinks", Status::Ok, detail);
   }
 
+  let named: Vec<String> = found
+    .escapes
+    .iter()
+    .take(NAMED)
+    .map(|escape| format!("{} -> {}", escape.link.display(), escape.target.display()))
+    .collect();
+  let rest = found.escapes.len().saturating_sub(named.len());
+  let more = if rest > 0 {
+    format!(" (and {rest} more)")
+  } else {
+    String::new()
+  };
+
   check(
-    "root breadth",
+    "dangling symlinks",
     Status::Warn,
     format!(
-      "{} is mounted writable, so anything in the container can rewrite it",
-      broad.join(", ")
+      "dead in the container, because the target is not mounted: {}{more}",
+      named.join(", ")
     ),
+  )
+}
+
+/// Every mounted path, not only roots: a manifest can be edited by hand, so
+/// `add`'s refusal is not the only way a dangerous path gets in.
+fn root_breadth(session: &Session) -> Check {
+  let dangerous: Vec<String> = session
+    .workspace()
+    .entries()
+    .iter()
+    .filter_map(|entry| danger(&entry.host, session.resolver()).map(|danger| (entry, danger)))
+    .map(|(entry, danger)| match danger {
+      Danger::Broad(_) => format!(
+        "{} covers a whole account, so the container can read and rewrite all of it",
+        entry.host.display()
+      ),
+      Danger::Sensitive(path) => format!(
+        "{} is mounted, exposing the credentials in {}",
+        entry.host.display(),
+        path.display()
+      ),
+    })
+    .collect();
+
+  if dangerous.is_empty() {
+    return check("mount breadth", Status::Ok, "no mount covers an account or a secret");
+  }
+
+  check("mount breadth", Status::Warn, dangerous.join("; "))
+}
+
+/// Every allowlisted command runs on the host with the user's own privileges
+/// (D6), so this is where that stops being invisible.
+fn host_allowlist(session: &Session) -> Check {
+  if session.manifest.host.is_empty() {
+    return check(
+      "host commands",
+      Status::Ok,
+      "no [host.commands]: the guest has no path to the host",
+    );
+  }
+
+  let listed: Vec<String> = session
+    .manifest
+    .host
+    .commands
+    .iter()
+    .map(|(name, command)| {
+      let widened = if command.arguments { " (+ guest arguments)" } else { "" };
+      format!("{name} = {}{widened}", command.argv.join(" "))
+    })
+    .collect();
+
+  let widened = session
+    .manifest
+    .host
+    .commands
+    .values()
+    .any(|command| command.arguments);
+
+  check(
+    "host commands",
+    if widened { Status::Warn } else { Status::Ok },
+    format!("run on the host as you: {}", listed.join("; ")),
   )
 }
 
@@ -308,6 +393,29 @@ mod tests {
   }
 
   #[test]
+  fn warns_about_a_symlink_that_will_dangle_in_the_container() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+    std::fs::create_dir_all(base.join("workspace/project")).expect("create project");
+    std::fs::create_dir_all(base.join("elsewhere")).expect("create elsewhere");
+    std::os::unix::fs::symlink(base.join("elsewhere"), base.join("workspace/project/vendor")).expect("create symlink");
+
+    let checks = diagnose(
+      &session(&home, &quoted(&base, "workspace")),
+      &RecordingEngine::with_images(&["compostbin/base:latest"]),
+      &in_keychain(),
+      false,
+    );
+
+    let dangling = check(&checks, "dangling symlinks");
+    assert_eq!(dangling.status, Status::Warn);
+    assert!(
+      dangling.detail.contains("vendor") && dangling.detail.contains("elsewhere"),
+      "detail should name the link and where it points: {dangling:?}"
+    );
+  }
+
+  #[test]
   fn warns_about_a_root_covering_the_whole_home_directory() {
     let home = TempDir::new().expect("temp dir");
 
@@ -318,7 +426,7 @@ mod tests {
       false,
     );
 
-    let breadth = check(&checks, "root breadth");
+    let breadth = check(&checks, "mount breadth");
     assert_eq!(breadth.status, Status::Warn);
     assert!(
       breadth.detail.contains(
@@ -379,5 +487,76 @@ mod tests {
     );
 
     assert_eq!(check(&checks, "credentials").status, Status::Ok);
+  }
+
+  #[test]
+  fn warns_about_a_mounted_path_holding_credentials() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+    let mut session = session(&home, &quoted(&base, "workspace"));
+    session.manifest.paths.push(crate::manifest::PathEntry {
+      readonly: true,
+      source: base.join(".ssh").display().to_string(),
+      target: None,
+    });
+
+    let checks = diagnose(
+      &session,
+      &RecordingEngine::with_images(&["compostbin/base:latest"]),
+      &in_keychain(),
+      false,
+    );
+
+    let breadth = check(&checks, "mount breadth");
+    assert_eq!(breadth.status, Status::Warn);
+    assert!(
+      breadth.detail.contains(".ssh"),
+      "detail should name the secret: {breadth:?}"
+    );
+  }
+
+  #[test]
+  fn lists_every_command_the_guest_can_run_on_the_host() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+    let mut session = session(&home, &quoted(&base, "workspace"));
+    session.manifest.host = toml::from_str(
+      "[commands.test]\nargv = [\"cargo\", \"nextest\", \"run\"]\n\n[commands.test-one]\narguments = true\nargv = [\"cargo\", \"nextest\", \"run\"]\n",
+    )
+    .expect("host config should parse");
+
+    let checks = diagnose(
+      &session,
+      &RecordingEngine::with_images(&["compostbin/base:latest"]),
+      &in_keychain(),
+      false,
+    );
+
+    let allowlist = check(&checks, "host commands");
+    assert_eq!(
+      allowlist.status,
+      Status::Warn,
+      "a command the guest may append arguments to deserves a warning: {allowlist:?}"
+    );
+    assert!(allowlist.detail.contains("test = cargo nextest run"), "{allowlist:?}");
+    assert!(
+      allowlist.detail.contains("(+ guest arguments)"),
+      "the widened command must be marked: {allowlist:?}"
+    );
+  }
+
+  #[test]
+  fn reports_no_host_channel_when_none_is_declared() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+
+    let checks = diagnose(
+      &session(&home, &quoted(&base, "workspace")),
+      &RecordingEngine::with_images(&["compostbin/base:latest"]),
+      &in_keychain(),
+      false,
+    );
+
+    assert_eq!(check(&checks, "host commands").status, Status::Ok);
   }
 }
