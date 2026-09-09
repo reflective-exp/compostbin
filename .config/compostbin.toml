@@ -1,6 +1,5 @@
 [claude]
 seed_from_keychain = true
-shared = ["CLAUDE.md", "settings.json"]
 
 [container]
 cpus = 4

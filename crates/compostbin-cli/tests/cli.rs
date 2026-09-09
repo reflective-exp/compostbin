@@ -31,7 +31,6 @@ fn init_writes_a_manifest_named_after_the_directory() {
     std::fs::read_to_string(project_dir.join(".config/compostbin.toml")).expect("manifest should exist"),
     r#"[claude]
 seed_from_keychain = true
-shared = ["CLAUDE.md", "settings.json"]
 
 [container]
 cpus = 4

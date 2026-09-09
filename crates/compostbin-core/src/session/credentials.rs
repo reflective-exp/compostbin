@@ -2,9 +2,6 @@ use crate::error::{CredentialError, PathError};
 use std::path::Path;
 use std::process::Command;
 
-/// The host user's own Claude home, the source of the shared config copied into
-/// each session.
-pub const HOST_CLAUDE_HOME: &str = "~/.claude";
 /// Where Claude looks for its OAuth token inside its home directory.
 pub const CREDENTIALS_FILE_NAME: &str = ".credentials.json";
 /// The Keychain item the host's Claude Code writes its token to.
@@ -74,34 +71,6 @@ pub fn seed(claude_home: &Path, enabled: bool, source: &impl CredentialSource) -
   restrict_to_owner(&destination)?;
 
   Ok(SeedOutcome::Seeded)
-}
-
-/// Copies the named files from the host's own `~/.claude` into the session's
-/// home, overwriting what is there.
-///
-/// The host is authoritative on purpose: these are the files the user maintains
-/// once and expects in every session, so an edit on the host must reach the next
-/// session rather than being shadowed by a stale copy. Everything else in the
-/// session home — history, projects, the token the container refreshes — is
-/// session state and is never overwritten from here. Names are joined as single
-/// components, so a manifest cannot reach outside `~/.claude` with `../`.
-pub fn share(host_home: &Path, session_home: &Path, names: &[String]) -> Result<Vec<String>, CredentialError> {
-  let mut copied = Vec::new();
-
-  for name in names {
-    let source = host_home.join(name);
-    if name.contains('/') || !source.is_file() {
-      continue;
-    }
-
-    std::fs::create_dir_all(session_home)
-      .map_err(|source| CredentialError::Io(PathError::new(session_home, source)))?;
-    let destination = session_home.join(name);
-    std::fs::copy(&source, &destination).map_err(|error| CredentialError::Io(PathError::new(&destination, error)))?;
-    copied.push(name.clone());
-  }
-
-  Ok(copied)
 }
 
 #[cfg(unix)]
@@ -206,65 +175,5 @@ mod tests {
       .permissions()
       .mode();
     assert_eq!(mode & 0o777, 0o600, "a token must not be world-readable");
-  }
-
-  #[test]
-  fn copies_shared_config_from_the_host() {
-    let temp = TempDir::new().expect("temp dir");
-    let host = temp.path().join("host-claude");
-    let session = temp.path().join("session-claude");
-    std::fs::create_dir_all(&host).expect("create host home");
-    std::fs::write(host.join("CLAUDE.md"), "house style").expect("write CLAUDE.md");
-    std::fs::write(host.join("settings.json"), "{}").expect("write settings");
-    std::fs::write(host.join("history.jsonl"), "not shared").expect("write history");
-
-    let copied =
-      share(&host, &session, &["CLAUDE.md".to_string(), "settings.json".to_string()]).expect("share should succeed");
-
-    assert_eq!(copied, ["CLAUDE.md", "settings.json"]);
-    assert_eq!(
-      std::fs::read_to_string(session.join("CLAUDE.md")).expect("CLAUDE.md should be copied"),
-      "house style"
-    );
-    assert!(
-      !session.join("history.jsonl").exists(),
-      "only the named files are shared"
-    );
-  }
-
-  #[test]
-  fn shared_config_follows_the_host_on_every_run() {
-    let temp = TempDir::new().expect("temp dir");
-    let host = temp.path().join("host-claude");
-    let session = temp.path().join("session-claude");
-    std::fs::create_dir_all(&host).expect("create host home");
-    std::fs::create_dir_all(&session).expect("create session home");
-    std::fs::write(session.join("CLAUDE.md"), "stale").expect("write stale copy");
-    std::fs::write(host.join("CLAUDE.md"), "edited on the host").expect("write CLAUDE.md");
-
-    share(&host, &session, &["CLAUDE.md".to_string()]).expect("share should succeed");
-
-    assert_eq!(
-      std::fs::read_to_string(session.join("CLAUDE.md")).expect("CLAUDE.md should exist"),
-      "edited on the host"
-    );
-  }
-
-  #[test]
-  fn shares_nothing_the_host_does_not_have() {
-    let temp = TempDir::new().expect("temp dir");
-    let host = temp.path().join("host-claude");
-    let session = temp.path().join("session-claude");
-    std::fs::create_dir_all(&host).expect("create host home");
-
-    let copied = share(
-      &host,
-      &session,
-      &["CLAUDE.md".to_string(), "../.ssh/id_ed25519".to_string()],
-    )
-    .expect("share should succeed");
-
-    assert_eq!(copied, Vec::<String>::new());
-    assert!(!session.exists(), "nothing to copy means nothing to create");
   }
 }

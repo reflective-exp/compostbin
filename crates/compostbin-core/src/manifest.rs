@@ -70,9 +70,11 @@ pub struct ClaudeConfig {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub home: Option<String>,
   pub seed_from_keychain: bool,
-  /// Which of the host's own `~/.claude` files to copy in at session start.
-  /// Config the user maintains once and expects everywhere — not credentials,
-  /// which come from the Keychain, and not history, which is per session.
+  /// Extra `~/.claude` entries — files or whole directories — this project wants
+  /// beyond the host settings every session already gets. Empty in the normal
+  /// case, and skipped when empty so a manifest says nothing about sharing until
+  /// it has something of its own to add.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
   pub shared: Vec<String>,
 }
 
@@ -81,17 +83,10 @@ impl Default for ClaudeConfig {
     Self {
       home: None,
       seed_from_keychain: true,
-      shared: DEFAULT_SHARED_CLAUDE_FILES
-        .iter()
-        .map(|name| name.to_string())
-        .collect(),
+      shared: Vec::new(),
     }
   }
 }
-
-/// Copied from the host's `~/.claude` into the session home on every `run`, so
-/// an edit on the host reaches the next session.
-pub const DEFAULT_SHARED_CLAUDE_FILES: [&str; 2] = ["CLAUDE.md", "settings.json"];
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -271,7 +266,7 @@ target = "~/code/vendor/libfoo"
 
 [claude]
 seed_from_keychain = true
-shared             = ["CLAUDE.md", "settings.json"]
+shared             = ["agents"]
 
 [image]
 packages = ["direnv"]
@@ -283,7 +278,7 @@ snapshot = true
 
   const EXPECTED_RENDERING: &str = r#"[claude]
 seed_from_keychain = true
-shared = ["CLAUDE.md", "settings.json"]
+shared = ["agents"]
 
 [container]
 cpus = 4
@@ -413,12 +408,22 @@ tty = true
 
     assert_eq!(manifest.claude.home, None);
     assert_eq!(manifest.claude.seed_from_keychain, true);
-    assert_eq!(manifest.claude.shared, ["CLAUDE.md", "settings.json"]);
+    assert_eq!(manifest.claude.shared, ["agents"]);
 
     assert_eq!(manifest.image.packages, ["direnv"]);
     assert_eq!(manifest.image.run.len(), 1);
 
     assert_eq!(manifest.safety.snapshot, true);
+  }
+
+  #[test]
+  fn says_nothing_about_sharing_until_a_project_adds_something() {
+    let rendered = toml::to_string(&Manifest::default()).expect("manifest should serialize");
+
+    assert!(
+      !rendered.contains("shared"),
+      "the host's own settings are shared without being named: {rendered}"
+    );
   }
 
   #[test]
@@ -482,7 +487,11 @@ source = "~/a-first"
       "an unset home is what makes the session's home per project"
     );
     assert_eq!(manifest.claude.seed_from_keychain, true);
-    assert_eq!(manifest.claude.shared, DEFAULT_SHARED_CLAUDE_FILES);
+    assert_eq!(
+      manifest.claude.shared,
+      [] as [String; 0],
+      "a project adds to the host's own settings rather than restating them"
+    );
 
     assert!(
       manifest.image.is_empty(),

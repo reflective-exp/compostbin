@@ -9,6 +9,7 @@ use compostbin_core::host::{self, Spool};
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest};
 use compostbin_core::session::credentials::{self, Keychain, SeedOutcome};
 use compostbin_core::session::image;
+use compostbin_core::session::settings;
 use compostbin_core::session::{AddOutcome, Session};
 use compostbin_core::signals;
 use compostbin_core::workspace::Origin;
@@ -169,8 +170,8 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
         );
       }
 
-      let shared = credentials::share(
-        &session.resolve(credentials::HOST_CLAUDE_HOME),
+      let shared = settings::share(
+        &session.resolve(settings::HOST_CLAUDE_HOME),
         &session.claude_home(),
         &session.manifest.claude.shared,
       )?;
