@@ -281,8 +281,8 @@ source   = "~/.cargo/registry"
   fn session() -> Session {
     Session::new(
       toml::from_str(MANIFEST).expect("manifest should parse"),
-      PathResolver::new("/Users/sax/workspace/compostbin", "/Users/sax"),
-      "/Users/sax/workspace/compostbin",
+      PathResolver::new("/Users/user/workspace/compostbin", "/Users/user"),
+      "/Users/user/workspace/compostbin",
     )
   }
 
@@ -290,12 +290,12 @@ source   = "~/.cargo/registry"
   fn add_inside_a_root_changes_nothing() {
     let mut session = session();
 
-    let outcome = session.add("/Users/sax/workspace/other", false);
+    let outcome = session.add("/Users/user/workspace/other", false);
 
     assert_eq!(
       outcome,
       AddOutcome::AlreadyMounted {
-        root: "/Users/sax/workspace".into()
+        root: "/Users/user/workspace".into()
       }
     );
     assert_eq!(session.manifest.paths.len(), 1, "no new [[paths]] entry");
@@ -306,17 +306,17 @@ source   = "~/.cargo/registry"
   fn add_outside_every_root_records_a_path() {
     let mut session = session();
 
-    let outcome = session.add("/Users/sax/vendor/libfoo", true);
+    let outcome = session.add("/Users/user/vendor/libfoo", true);
 
     assert_eq!(outcome, AddOutcome::NeedsRestart);
-    assert_eq!(session.manifest.paths[1].source, "/Users/sax/vendor/libfoo");
+    assert_eq!(session.manifest.paths[1].source, "/Users/user/vendor/libfoo");
     assert_eq!(session.manifest.paths[1].readonly, true);
     assert_eq!(session.manifest.paths[1].target, None);
     assert!(
       session.mounts().contains(&Mount {
         readonly: true,
-        source: "/Users/sax/vendor/libfoo".into(),
-        target: "/Users/sax/vendor/libfoo".into(),
+        source: "/Users/user/vendor/libfoo".into(),
+        target: "/Users/user/vendor/libfoo".into(),
       }),
       "the added path must become a mount"
     );
@@ -389,7 +389,7 @@ source   = "~/.cargo/registry"
 
     let run = &engine.calls()[2];
     assert!(
-      run.contains(&"/Users/sax/.local/state/compostbin/claude-home:/home/claude/.claude".to_string()),
+      run.contains(&"/Users/user/.local/state/compostbin/claude-home:/home/claude/.claude".to_string()),
       "the recreated container must remount Claude's home: {run:?}"
     );
   }
@@ -409,7 +409,7 @@ source   = "~/.cargo/registry"
         "--interactive",
         "--tty",
         "--workdir",
-        "/Users/sax/workspace/compostbin",
+        "/Users/user/workspace/compostbin",
         "compostbin-cb",
         "claude",
         "--continue",
@@ -421,8 +421,8 @@ source   = "~/.cargo/registry"
   fn mounts_project_dir_when_outside_every_root() {
     let session = Session::new(
       toml::from_str("").expect("empty manifest should parse"),
-      PathResolver::new("/Users/sax/code/loose", "/Users/sax"),
-      "/Users/sax/code/loose",
+      PathResolver::new("/Users/user/code/loose", "/Users/user"),
+      "/Users/user/code/loose",
     );
 
     assert_eq!(
@@ -430,12 +430,12 @@ source   = "~/.cargo/registry"
       [
         Mount {
           readonly: false,
-          source: "/Users/sax/code/loose".into(),
-          target: "/Users/sax/code/loose".into(),
+          source: "/Users/user/code/loose".into(),
+          target: "/Users/user/code/loose".into(),
         },
         Mount {
           readonly: false,
-          source: "/Users/sax/.local/state/compostbin/claude-home".into(),
+          source: "/Users/user/.local/state/compostbin/claude-home".into(),
           target: "/home/claude/.claude".into(),
         },
       ]
@@ -453,9 +453,9 @@ source   = "~/.cargo/registry"
     assert_eq!(
       sources,
       [
-        "/Users/sax/workspace",
-        "/Users/sax/.cargo/registry",
-        "/Users/sax/.local/state/compostbin/claude-home",
+        "/Users/user/workspace",
+        "/Users/user/.cargo/registry",
+        "/Users/user/.local/state/compostbin/claude-home",
       ]
     );
   }
@@ -464,7 +464,7 @@ source   = "~/.cargo/registry"
   fn resolves_claude_home_on_the_host() {
     assert_eq!(
       session().claude_home(),
-      PathBuf::from("/Users/sax/.local/state/compostbin/claude-home")
+      PathBuf::from("/Users/user/.local/state/compostbin/claude-home")
     );
   }
 
@@ -484,13 +484,13 @@ source   = "~/.cargo/registry"
         "--name",
         "compostbin-cb",
         "--volume",
-        "/Users/sax/workspace:/Users/sax/workspace",
+        "/Users/user/workspace:/Users/user/workspace",
         "--volume",
-        "/Users/sax/.cargo/registry:/Users/sax/.cargo/registry:ro",
+        "/Users/user/.cargo/registry:/Users/user/.cargo/registry:ro",
         "--volume",
-        "/Users/sax/.local/state/compostbin/claude-home:/home/claude/.claude",
+        "/Users/user/.local/state/compostbin/claude-home:/home/claude/.claude",
         "--workdir",
-        "/Users/sax/workspace/compostbin",
+        "/Users/user/workspace/compostbin",
         "compostbin/base:latest",
         "sleep",
         "infinity",

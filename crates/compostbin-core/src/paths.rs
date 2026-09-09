@@ -73,7 +73,7 @@ mod tests {
   use tempfile::TempDir;
 
   fn resolver() -> PathResolver {
-    PathResolver::new("/Users/sax/workspace/compostbin", "/Users/sax")
+    PathResolver::new("/Users/user/workspace/compostbin", "/Users/user")
   }
 
   /// A temp tree containing `real/file.txt` and a `link` symlink pointing at `real`.
@@ -91,7 +91,7 @@ mod tests {
   #[test]
   fn canonicalizes_symlinks() {
     let (_temp, root) = linked_tree();
-    let resolver = PathResolver::new(&root, "/Users/sax");
+    let resolver = PathResolver::new(&root, "/Users/user");
 
     assert_eq!(
       resolver
@@ -122,25 +122,25 @@ mod tests {
 
   #[test]
   fn finds_containing_root() {
-    let roots = [PathBuf::from("/Users/sax/code"), PathBuf::from("/Users/sax/workspace")];
+    let roots = [PathBuf::from("/Users/user/code"), PathBuf::from("/Users/user/workspace")];
 
     assert_eq!(
-      root_containing(Path::new("/Users/sax/workspace/compostbin/src"), &roots),
-      Some(Path::new("/Users/sax/workspace"))
+      root_containing(Path::new("/Users/user/workspace/compostbin/src"), &roots),
+      Some(Path::new("/Users/user/workspace"))
     );
     assert_eq!(
-      root_containing(Path::new("/Users/sax/code"), &roots),
-      Some(Path::new("/Users/sax/code"))
+      root_containing(Path::new("/Users/user/code"), &roots),
+      Some(Path::new("/Users/user/code"))
     );
     assert_eq!(root_containing(Path::new("/opt/homebrew"), &roots), None);
   }
 
   #[test]
   fn rejects_prefix_match() {
-    let roots = [PathBuf::from("/Users/sax/workspace")];
+    let roots = [PathBuf::from("/Users/user/workspace")];
 
-    assert_eq!(root_containing(Path::new("/Users/sax/workspaces/other"), &roots), None);
-    assert_eq!(root_containing(Path::new("/Users/sax/workspace-old"), &roots), None);
+    assert_eq!(root_containing(Path::new("/Users/user/workspaces/other"), &roots), None);
+    assert_eq!(root_containing(Path::new("/Users/user/workspace-old"), &roots), None);
   }
 
   #[test]
@@ -151,7 +151,7 @@ mod tests {
     std::fs::create_dir(root.join("mounted")).expect("create mounted");
     std::os::unix::fs::symlink(&outside, root.join("mounted/escape")).expect("create symlink");
 
-    let resolver = PathResolver::new(&root, "/Users/sax");
+    let resolver = PathResolver::new(&root, "/Users/user");
     let roots = [root.join("mounted")];
 
     assert_eq!(
@@ -172,7 +172,7 @@ mod tests {
   #[test]
   fn errors_on_missing_path() {
     let (_temp, root) = linked_tree();
-    let resolver = PathResolver::new(&root, "/Users/sax");
+    let resolver = PathResolver::new(&root, "/Users/user");
 
     let error = resolver
       .canonicalize("nope/absent")
@@ -187,24 +187,24 @@ mod tests {
 
   #[test]
   fn expands_tilde() {
-    assert_eq!(resolver().resolve("~/workspace"), Path::new("/Users/sax/workspace"));
-    assert_eq!(resolver().resolve("~"), Path::new("/Users/sax"));
-    assert_eq!(resolver().resolve("~/"), Path::new("/Users/sax"));
+    assert_eq!(resolver().resolve("~/workspace"), Path::new("/Users/user/workspace"));
+    assert_eq!(resolver().resolve("~"), Path::new("/Users/user"));
+    assert_eq!(resolver().resolve("~/"), Path::new("/Users/user"));
   }
 
   #[test]
   fn makes_relative_absolute() {
     assert_eq!(
       resolver().resolve("src"),
-      Path::new("/Users/sax/workspace/compostbin/src")
+      Path::new("/Users/user/workspace/compostbin/src")
     );
     assert_eq!(
       resolver().resolve("./src"),
-      Path::new("/Users/sax/workspace/compostbin/./src")
+      Path::new("/Users/user/workspace/compostbin/./src")
     );
     assert_eq!(
       resolver().resolve("../sibling"),
-      Path::new("/Users/sax/workspace/compostbin/../sibling")
+      Path::new("/Users/user/workspace/compostbin/../sibling")
     );
     assert_eq!(resolver().resolve("/opt/homebrew"), Path::new("/opt/homebrew"));
   }
@@ -213,7 +213,7 @@ mod tests {
   fn treats_bare_tilde_prefix_as_literal() {
     assert_eq!(
       resolver().resolve("~workspace"),
-      Path::new("/Users/sax/workspace/compostbin/~workspace")
+      Path::new("/Users/user/workspace/compostbin/~workspace")
     );
   }
 }

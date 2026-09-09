@@ -167,7 +167,7 @@ mod tests {
   #[test]
   fn builds_build_argv() {
     let spec = BuildSpec {
-      context: "/Users/sax/.cache/compostbin/build".into(),
+      context: "/Users/user/.cache/compostbin/build".into(),
       memory: Some("8G".to_string()),
       tag: "compostbin/base:latest".to_string(),
     };
@@ -180,7 +180,7 @@ mod tests {
         "8G",
         "--tag",
         "compostbin/base:latest",
-        "/Users/sax/.cache/compostbin/build",
+        "/Users/user/.cache/compostbin/build",
       ]
     );
   }
@@ -207,7 +207,7 @@ mod tests {
       interactive: true,
       name: "compostbin-compostbin".to_string(),
       tty: true,
-      workdir: Some("/Users/sax/workspace/compostbin".into()),
+      workdir: Some("/Users/user/workspace/compostbin".into()),
     };
 
     assert_eq!(
@@ -219,7 +219,7 @@ mod tests {
         "--interactive",
         "--tty",
         "--workdir",
-        "/Users/sax/workspace/compostbin",
+        "/Users/user/workspace/compostbin",
         "compostbin-compostbin",
         "claude",
         "--continue",
@@ -259,17 +259,17 @@ mod tests {
       mounts: vec![
         Mount {
           readonly: false,
-          source: "/Users/sax/workspace".into(),
-          target: "/Users/sax/workspace".into(),
+          source: "/Users/user/workspace".into(),
+          target: "/Users/user/workspace".into(),
         },
         Mount {
           readonly: true,
-          source: "/Users/sax/.cargo/registry".into(),
-          target: "/Users/sax/.cargo/registry".into(),
+          source: "/Users/user/.cargo/registry".into(),
+          target: "/Users/user/.cargo/registry".into(),
         },
       ],
       name: "compostbin-compostbin".to_string(),
-      workdir: Some("/Users/sax/workspace/compostbin".into()),
+      workdir: Some("/Users/user/workspace/compostbin".into()),
     };
 
     assert_eq!(
@@ -288,11 +288,11 @@ mod tests {
         "--name",
         "compostbin-compostbin",
         "--volume",
-        "/Users/sax/workspace:/Users/sax/workspace",
+        "/Users/user/workspace:/Users/user/workspace",
         "--volume",
-        "/Users/sax/.cargo/registry:/Users/sax/.cargo/registry:ro",
+        "/Users/user/.cargo/registry:/Users/user/.cargo/registry:ro",
         "--workdir",
-        "/Users/sax/workspace/compostbin",
+        "/Users/user/workspace/compostbin",
         "compostbin/base:latest",
         "claude",
         "--continue",
