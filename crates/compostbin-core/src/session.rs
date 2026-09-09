@@ -1,10 +1,10 @@
-use crate::error::PathError;
+use crate::error::{PathError, SessionError};
 use crate::host::{GUEST_SPOOL_TARGET, Spool};
 use crate::manifest::{Manifest, PathEntry, SESSIONS_DIR};
+use crate::mounts::{RECORD_FILE, Record};
 use crate::paths::{PathResolver, root_containing};
 use crate::workspace::{Origin, Workspace};
 use apple_container::engine::Engine;
-use apple_container::error::EngineError;
 use apple_container::model::{EnvVar, ExecSpec, Mount, RunSpec};
 use std::path::PathBuf;
 
@@ -261,11 +261,40 @@ impl Session {
     Spool::new(self.host_spool()).create()
   }
 
+  /// Where this session records the mounts its container was created with, so
+  /// `doctor` can tell a manifest edited mid-session from one that took effect.
+  pub fn mount_record(&self) -> PathBuf {
+    self.state_dir().join(RECORD_FILE)
+  }
+
+  /// Creates the container and records what it was created with. The two are one
+  /// step: a container whose mounts went unrecorded is one `doctor` can say
+  /// nothing about.
+  fn create(&self, engine: &impl Engine) -> Result<(), SessionError> {
+    let spec = self.run_spec();
+
+    // Every guest client that could still be waiting on a response died with the
+    // container this one replaces, so now is the one moment their leftovers are
+    // provably nobody's.
+    if !self.manifest.host.is_empty() {
+      Spool::new(self.host_spool()).sweep()?;
+    }
+
+    engine.run(&spec)?;
+    Record::of(&spec.mounts).save(&self.mount_record())?;
+
+    Ok(())
+  }
+
   /// Makes the session's container exist and be running, doing nothing when it
   /// already is: `container run` refuses a name that is taken, so a second `run`
   /// must attach rather than recreate. A container that exists but has stopped
   /// is deleted and recreated, since its mounts may no longer match the manifest.
-  pub fn start(&self, engine: &impl Engine) -> Result<(), EngineError> {
+  ///
+  /// Attaching leaves the record alone on purpose. It describes the container
+  /// that is running, not the manifest as it reads now, and the gap between the
+  /// two is the whole point of the check.
+  pub fn start(&self, engine: &impl Engine) -> Result<(), SessionError> {
     let name = self.container_name();
 
     if engine.running_containers()?.contains(&name) {
@@ -276,18 +305,19 @@ impl Session {
       engine.delete(&name)?;
     }
 
-    engine.run(&self.run_spec()).map(|_| ())
+    self.create(engine)
   }
 
   /// Recreates the container so a new mount takes effect — mounts cannot be added
   /// to a running container — then reattaches to the same Claude conversation.
   /// Cheap because Claude's home is a bind mount that outlives the container.
-  pub fn restart(&self, engine: &impl Engine) -> Result<i32, EngineError> {
+  pub fn restart(&self, engine: &impl Engine) -> Result<i32, SessionError> {
     let name = self.container_name();
     engine.stop(&name)?;
     engine.delete(&name)?;
-    engine.run(&self.run_spec())?;
-    engine.exec(&self.exec_spec(&["claude".to_string(), "--continue".to_string()]))
+    self.create(engine)?;
+
+    Ok(engine.exec(&self.exec_spec(&["claude".to_string(), "--continue".to_string()]))?)
   }
 
   /// `IS_SANDBOX=1` is set on the process rather than the container, matching the
@@ -359,6 +389,16 @@ source   = "~/.cargo/registry"
     )
   }
 
+  /// A session whose home really exists, for the tests that create a container:
+  /// creating one writes the mount record, which needs somewhere to land.
+  fn session_under(base: &std::path::Path) -> Session {
+    Session::new(
+      toml::from_str(MANIFEST).expect("manifest should parse"),
+      PathResolver::new(base.join("workspace/compostbin"), base),
+      base.join("workspace/compostbin"),
+    )
+  }
+
   #[test]
   fn add_inside_a_root_changes_nothing() {
     let mut session = session();
@@ -410,44 +450,53 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn start_recreates_a_stopped_container() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = session_under(&base);
     let engine = RecordingEngine::with_containers(&[("compostbin-cb", false)]);
 
-    session().start(&engine).expect("start should succeed");
+    session.start(&engine).expect("start should succeed");
 
     let calls = engine.calls();
     assert_eq!(calls[0], ["ls", "--quiet"]);
     assert_eq!(calls[1], ["ls", "--all", "--quiet"]);
     assert_eq!(calls[2], ["delete", "compostbin-cb"]);
-    assert_eq!(calls[3], session().run_spec().to_argv());
+    assert_eq!(calls[3], session.run_spec().to_argv());
     assert_eq!(calls.len(), 4);
   }
 
   #[test]
   fn start_creates_a_container_that_does_not_exist() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = session_under(&base);
     let engine = RecordingEngine::with_containers(&[("compostbin-other", true)]);
 
-    session().start(&engine).expect("start should succeed");
+    session.start(&engine).expect("start should succeed");
 
     let calls = engine.calls();
     assert_eq!(calls[0], ["ls", "--quiet"]);
     assert_eq!(calls[1], ["ls", "--all", "--quiet"]);
-    assert_eq!(calls[2], session().run_spec().to_argv());
+    assert_eq!(calls[2], session.run_spec().to_argv());
     assert_eq!(calls.len(), 3, "nothing to delete: {calls:?}");
   }
 
   #[test]
   fn restarts_by_stopping_deleting_and_continuing() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = session_under(&base);
     let engine = RecordingEngine::new();
 
-    session().restart(&engine).expect("restart should succeed");
+    session.restart(&engine).expect("restart should succeed");
 
     let calls = engine.calls();
     assert_eq!(calls[0], ["stop", "compostbin-cb"]);
     assert_eq!(calls[1], ["delete", "compostbin-cb"]);
-    assert_eq!(calls[2], session().run_spec().to_argv());
+    assert_eq!(calls[2], session.run_spec().to_argv());
     assert_eq!(
       calls[3],
-      session()
+      session
         .exec_spec(&["claude".to_string(), "--continue".to_string()])
         .to_argv()
     );
@@ -456,16 +505,105 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn preserves_claude_home_across_restart() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = session_under(&base);
     let engine = RecordingEngine::new();
 
-    session().restart(&engine).expect("restart should succeed");
+    session.restart(&engine).expect("restart should succeed");
 
     let run = &engine.calls()[2];
     assert!(
-      run.contains(
-        &"/Users/user/.local/state/compostbin/sessions/compostbin-cb/claude-home:/home/claude/.claude".to_string()
-      ),
+      run.contains(&format!("{}:{CLAUDE_HOME_TARGET}", session.claude_home().display())),
       "the recreated container must remount Claude's home: {run:?}"
+    );
+  }
+
+  /// What `doctor`'s stale-mount check reads: the container's real mount set,
+  /// which the manifest stops describing the moment it is edited (F11).
+  #[test]
+  fn records_the_mounts_the_container_was_created_with() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let mut session = session_under(&base);
+    let engine = RecordingEngine::new();
+
+    session.start(&engine).expect("start should succeed");
+
+    let recorded = Record::load(&session.mount_record())
+      .expect("load should succeed")
+      .expect("start must have written a record");
+    assert_eq!(recorded, Record::of(&session.mounts()));
+
+    // Editing the manifest afterwards must not touch the record: the container
+    // still has the mounts it was created with, and saying otherwise is the
+    // silent failure this exists to catch.
+    session.manifest.paths.push(PathEntry {
+      readonly: false,
+      source: base.join("vendor").display().to_string(),
+      target: None,
+    });
+
+    assert!(
+      !recorded.drift(&session.mounts()).is_empty(),
+      "a path added mid-session is not mounted until the container is recreated"
+    );
+  }
+
+  /// §9's accumulating spool: the leftovers of a client that was killed go when
+  /// the container they belonged to is replaced, and not while it is still up.
+  #[test]
+  fn creating_a_container_sweeps_the_last_ones_leftovers() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let mut session = session_under(&base);
+    session.manifest.host =
+      toml::from_str("[commands.test]\nargv = [\"cargo\", \"nextest\", \"run\"]\n").expect("host config should parse");
+    session
+      .prepare_host_spool()
+      .expect("prepare should succeed");
+
+    let spool = Spool::new(session.host_spool());
+    let orphan = spool.responses().join("0001.out.000001");
+    std::fs::write(&orphan, "stranded\n").expect("write orphan");
+
+    session
+      .start(&RecordingEngine::with_containers(&[("compostbin-cb", true)]))
+      .expect("start should succeed");
+    assert!(
+      orphan.exists(),
+      "a running container's responses are not ours to delete"
+    );
+
+    session
+      .start(&RecordingEngine::new())
+      .expect("start should succeed");
+    assert!(!orphan.exists(), "a replaced container's are");
+  }
+
+  /// The same edit, once the container has actually been recreated.
+  #[test]
+  fn recreating_the_container_records_the_new_mounts() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let mut session = session_under(&base);
+    let engine = RecordingEngine::new();
+
+    session.start(&engine).expect("start should succeed");
+    session.manifest.paths.push(PathEntry {
+      readonly: false,
+      source: base.join("vendor").display().to_string(),
+      target: None,
+    });
+    session.restart(&engine).expect("restart should succeed");
+
+    let recorded = Record::load(&session.mount_record())
+      .expect("load should succeed")
+      .expect("restart must have rewritten the record");
+
+    assert!(
+      recorded.drift(&session.mounts()).is_empty(),
+      "the record must describe the container that is running now: {recorded:?}"
     );
   }
 

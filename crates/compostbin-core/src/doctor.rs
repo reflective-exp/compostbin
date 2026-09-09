@@ -1,4 +1,5 @@
 use crate::credentials::{CREDENTIALS_FILE_NAME, CredentialSource, KEYCHAIN_SERVICE};
+use crate::mounts::Record;
 use crate::paths::{Danger, danger};
 use crate::session::Session;
 use crate::workspace::WALK_LIMIT;
@@ -41,6 +42,7 @@ pub fn diagnose(
     base_image(session, &images),
     mounted_paths(session),
     dangling_symlinks(session),
+    live_mounts(session, engine),
     root_breadth(session),
     credentials_check(session, credentials, api_key_present),
     host_allowlist(session),
@@ -160,6 +162,70 @@ fn dangling_symlinks(session: &Session) -> Check {
     format!(
       "dead in the container, because the target is not mounted: {}{more}",
       named.join(", ")
+    ),
+  )
+}
+
+/// Whether the container that is running now has the mounts the manifest
+/// describes. `run` attaches to a live container rather than recreating it, and
+/// F11 forbids adding mounts to one, so a manifest edited mid-session takes
+/// effect at the next `stop` + `run` and not before. Nothing else says so: the
+/// path is simply missing in the guest, which reads as the feature being broken.
+///
+/// A warning, not a failure — the session works, and recreating the container is
+/// the user's call — but the *fix* is named, because it is not guessable.
+fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
+  let name = session.container_name();
+
+  let running = match engine.running_containers() {
+    Ok(running) => running,
+    Err(error) => {
+      return check(
+        "container mounts",
+        Status::Fail,
+        format!("cannot tell whether {name} is running: {error}"),
+      );
+    }
+  };
+
+  if !running.contains(&name) {
+    return check(
+      "container mounts",
+      Status::Ok,
+      format!("{name} is not running, so the next `compostbin run` mounts what the manifest says"),
+    );
+  }
+
+  let record = match Record::load(&session.mount_record()) {
+    Ok(Some(record)) => record,
+    Ok(None) => {
+      return check(
+        "container mounts",
+        Status::Warn,
+        format!(
+          "{name} is running but nothing recorded what it was started with; `compostbin stop` then `compostbin run` to be sure"
+        ),
+      );
+    }
+    Err(error) => return check("container mounts", Status::Warn, error.to_string()),
+  };
+
+  let drift = record.drift(&session.mounts());
+
+  if drift.is_empty() {
+    return check(
+      "container mounts",
+      Status::Ok,
+      format!("{name} is running with the mounts the manifest declares"),
+    );
+  }
+
+  check(
+    "container mounts",
+    Status::Warn,
+    format!(
+      "{name} was started before the manifest changed — {}; mounts cannot be added to a running container, so `compostbin stop` then `compostbin run`",
+      drift.describe()
     ),
   )
 }
@@ -542,6 +608,102 @@ mod tests {
     assert!(
       allowlist.detail.contains("(+ guest arguments)"),
       "the widened command must be marked: {allowlist:?}"
+    );
+  }
+
+  /// The silent failure dogfooding found: the session kept running with the
+  /// mount set it was created with, and nothing anywhere said the manifest had
+  /// moved on.
+  #[test]
+  fn warns_when_the_running_container_predates_a_manifest_change() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+    let mut session = session(&home, &quoted(&base, "workspace"));
+    Record::of(&session.mounts())
+      .save(&session.mount_record())
+      .expect("recording the started container should succeed");
+
+    std::fs::create_dir_all(base.join("vendor")).expect("create vendor");
+    session.manifest.paths.push(crate::manifest::PathEntry {
+      readonly: false,
+      source: base.join("vendor").display().to_string(),
+      target: None,
+    });
+
+    let checks = diagnose(
+      &session,
+      &RecordingEngine::with_containers(&[("compostbin-cb", true)]),
+      &in_keychain(),
+      false,
+    );
+
+    let mounts = check(&checks, "container mounts");
+    assert_eq!(mounts.status, Status::Warn);
+    assert!(
+      mounts.detail.contains("vendor"),
+      "detail should name the path that is not really mounted: {mounts:?}"
+    );
+    assert!(
+      mounts.detail.contains("compostbin stop"),
+      "the fix is not guessable, so it has to be printed: {mounts:?}"
+    );
+  }
+
+  #[test]
+  fn accepts_a_running_container_that_matches_the_manifest() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+    let session = session(&home, &quoted(&base, "workspace"));
+    Record::of(&session.mounts())
+      .save(&session.mount_record())
+      .expect("recording the started container should succeed");
+
+    let checks = diagnose(
+      &session,
+      &RecordingEngine::with_containers(&[("compostbin-cb", true)]),
+      &in_keychain(),
+      false,
+    );
+
+    assert_eq!(check(&checks, "container mounts").status, Status::Ok);
+  }
+
+  /// Nothing has been started, so there is no mount set to disagree with — and
+  /// a fresh checkout must not be told to stop a container that does not exist.
+  #[test]
+  fn says_nothing_is_running_rather_than_warning() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+
+    let checks = diagnose(
+      &session(&home, &quoted(&base, "workspace")),
+      &RecordingEngine::with_images(&["compostbin/base:latest"]),
+      &in_keychain(),
+      false,
+    );
+
+    let mounts = check(&checks, "container mounts");
+    assert_eq!(mounts.status, Status::Ok);
+    assert!(mounts.detail.contains("not running"), "{mounts:?}");
+  }
+
+  #[test]
+  fn warns_about_a_running_container_that_was_never_recorded() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+
+    let checks = diagnose(
+      &session(&home, &quoted(&base, "workspace")),
+      &RecordingEngine::with_containers(&[("compostbin-cb", true)]),
+      &in_keychain(),
+      false,
+    );
+
+    let mounts = check(&checks, "container mounts");
+    assert_eq!(
+      mounts.status,
+      Status::Warn,
+      "an unrecorded container is one we can say nothing about: {mounts:?}"
     );
   }
 

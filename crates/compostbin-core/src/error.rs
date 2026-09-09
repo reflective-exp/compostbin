@@ -61,8 +61,10 @@ impl From<EngineError> for ImageError {
   }
 }
 
-/// A manifest that could not be read, parsed, or written. Every variant names the
-/// file, since the CLI may be looking at a manifest the user did not expect.
+/// A TOML file compostbin owns — the project manifest, or a session's record of
+/// the mounts its container was created with — that could not be read, parsed,
+/// or written. Every variant names the file, since the CLI may be looking at a
+/// manifest the user did not expect.
 #[derive(Debug)]
 pub enum ManifestError {
   Io(PathError),
@@ -96,6 +98,54 @@ impl Error for ManifestError {
       Self::Parse { source, .. } => Some(source),
       Self::Render { source, .. } => Some(source),
     }
+  }
+}
+
+/// A container that could not be created, or whose mount record could not be
+/// written. Both belong to one step — `run` records what it started the
+/// container with — so the caller has one thing to handle rather than two.
+#[derive(Debug)]
+pub enum SessionError {
+  Engine(EngineError),
+  Io(PathError),
+  Record(ManifestError),
+}
+
+impl Display for SessionError {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+    match self {
+      Self::Engine(error) => error.fmt(formatter),
+      Self::Io(error) => error.fmt(formatter),
+      Self::Record(error) => write!(formatter, "recording the container's mounts: {error}"),
+    }
+  }
+}
+
+impl Error for SessionError {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Engine(error) => Some(error),
+      Self::Io(error) => Some(error),
+      Self::Record(error) => Some(error),
+    }
+  }
+}
+
+impl From<EngineError> for SessionError {
+  fn from(error: EngineError) -> Self {
+    Self::Engine(error)
+  }
+}
+
+impl From<PathError> for SessionError {
+  fn from(error: PathError) -> Self {
+    Self::Io(error)
+  }
+}
+
+impl From<ManifestError> for SessionError {
+  fn from(error: ManifestError) -> Self {
+    Self::Record(error)
   }
 }
 

@@ -8,6 +8,7 @@ pub mod error;
 pub mod host;
 pub mod image;
 pub mod manifest;
+pub mod mounts;
 pub mod paths;
 pub mod session;
 pub mod signals;
