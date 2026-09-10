@@ -27,11 +27,13 @@ argv = ["cargo", "fmt", "--all"]
 # Exact: no arguments, the whole suite.
 [host.commands.test]
 argv = ["cargo", "nextest", "run", "--workspace"]
+tty = true
 
 # Widened deliberately, for the iterate-on-one-failing-test loop.
 [host.commands.test-one]
 arguments = true
 argv = ["cargo", "nextest", "run"]
+tty = true
 
 [project]
 image = "compostbin/base:latest"
