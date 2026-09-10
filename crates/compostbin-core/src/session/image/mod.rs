@@ -88,7 +88,13 @@ pub fn project_dockerfile(manifest: &Manifest) -> Option<String> {
     }
   }
 
-  dockerfile.push_str("\nUSER claude\nWORKDIR /home/claude\n");
+  // Only when the run block has not already restored it: installing packages is
+  // the one thing that leaves the image sitting on root.
+  if manifest.image.run.is_empty() {
+    dockerfile.push_str("\nUSER claude");
+  }
+
+  dockerfile.push_str("\nWORKDIR /home/claude\n");
 
   Some(dockerfile)
 }
@@ -206,6 +212,26 @@ mod tests {
     assert!(
       dockerfile.trim_end().ends_with("WORKDIR /home/claude"),
       "the image must not be left sitting on root: {dockerfile}"
+    );
+    assert_eq!(
+      dockerfile.matches("USER claude").count(),
+      1,
+      "the run block already restored the user; saying it again adds a layer for nothing: {dockerfile}"
+    );
+  }
+
+  /// Packages with no run lines: nothing else restores the user, so the trailing
+  /// `USER claude` is the one that has to.
+  #[test]
+  fn leaves_a_package_only_image_as_the_session_user() {
+    let manifest: Manifest =
+      toml::from_str("[image]\npackages = [\"direnv\"]\n").expect("manifest should parse");
+
+    let dockerfile = project_dockerfile(&manifest).expect("additions should produce a Dockerfile");
+
+    assert!(
+      dockerfile.trim_end().ends_with("USER claude\nWORKDIR /home/claude"),
+      "apt left the image on root: {dockerfile}"
     );
   }
 

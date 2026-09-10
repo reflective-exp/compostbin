@@ -3,4 +3,4 @@
 cargo build --release
 ./target/release/compostbin build
 ./target/release/compostbin stop
-./target/release/compostbin run -- $@
+./target/release/compostbin run -- "$@"
