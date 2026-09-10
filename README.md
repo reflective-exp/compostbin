@@ -15,9 +15,8 @@ This project currently only runs on macOS.
 ## Install
 
 ``` sh
-brew bundle
-cargo install --path crates/compostbin-cli
-container system start
+brew install reflective-exp/tap/compostbin
+compostbin doctor
 ```
 
 ## Usage
