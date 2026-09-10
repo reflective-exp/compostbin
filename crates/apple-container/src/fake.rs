@@ -10,7 +10,6 @@ pub struct RecordingEngine {
   calls: RefCell<Vec<Vec<String>>>,
   /// Every container the posed daemon holds, and whether each one is running.
   containers: Vec<(String, bool)>,
-  exec_exit_code: i32,
   /// `None` poses a daemon that has not been started, where every plugin call
   /// fails.
   images: Option<Vec<String>>,
@@ -20,13 +19,6 @@ pub struct RecordingEngine {
 impl RecordingEngine {
   pub fn new() -> Self {
     Self::default()
-  }
-
-  pub fn with_exec_exit_code(exec_exit_code: i32) -> Self {
-    Self {
-      exec_exit_code,
-      ..Self::default()
-    }
   }
 
   /// Poses a daemon holding exactly these containers, each paired with whether
@@ -85,7 +77,7 @@ impl Engine for RecordingEngine {
 
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError> {
     self.record(spec.to_argv());
-    Ok(self.exec_exit_code)
+    Ok(0)
   }
 
   fn images(&self) -> Result<Vec<String>, EngineError> {

@@ -109,7 +109,7 @@ impl Session {
   /// What the session may delete on exit: state that means nothing once the
   /// container is gone. Not Claude's home — that holds the conversation
   /// `--continue` reattaches to.
-  pub fn transient_state(&self) -> Vec<PathBuf> {
+  fn transient_state(&self) -> Vec<PathBuf> {
     vec![self.host_spool()]
   }
 

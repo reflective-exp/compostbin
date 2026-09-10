@@ -224,13 +224,14 @@ mod tests {
   /// `USER claude` is the one that has to.
   #[test]
   fn leaves_a_package_only_image_as_the_session_user() {
-    let manifest: Manifest =
-      toml::from_str("[image]\npackages = [\"direnv\"]\n").expect("manifest should parse");
+    let manifest: Manifest = toml::from_str("[image]\npackages = [\"direnv\"]\n").expect("manifest should parse");
 
     let dockerfile = project_dockerfile(&manifest).expect("additions should produce a Dockerfile");
 
     assert!(
-      dockerfile.trim_end().ends_with("USER claude\nWORKDIR /home/claude"),
+      dockerfile
+        .trim_end()
+        .ends_with("USER claude\nWORKDIR /home/claude"),
       "apt left the image on root: {dockerfile}"
     );
   }

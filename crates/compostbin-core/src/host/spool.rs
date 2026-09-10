@@ -5,7 +5,7 @@ use crate::error::{HostError, PathError};
 use crate::host::request::Request;
 use crate::host::{PARTIAL_SUFFIX, REQUEST_SUFFIX, REQUESTS_DIR, RESPONSES_DIR, RUNNING_DIR};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct Spool {
   root: PathBuf,
@@ -14,10 +14,6 @@ pub struct Spool {
 impl Spool {
   pub fn new(root: impl Into<PathBuf>) -> Self {
     Self { root: root.into() }
-  }
-
-  pub fn root(&self) -> &Path {
-    &self.root
   }
 
   pub fn requests(&self) -> PathBuf {

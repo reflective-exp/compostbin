@@ -185,7 +185,7 @@ pub struct PathEntry {
 }
 
 impl PathEntry {
-  pub fn sort_by_source(entries: &[PathEntry]) -> Vec<&PathEntry> {
+  fn sort_by_source(entries: &[PathEntry]) -> Vec<&PathEntry> {
     let mut sorted: Vec<&PathEntry> = entries.iter().collect();
     sorted.sort_by(|left, right| left.source.cmp(&right.source));
     sorted
