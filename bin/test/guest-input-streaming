@@ -1,0 +1,66 @@
+#!/bin/sh
+# Measures guest-to-host streaming over a bind mount. Run it INSIDE a session; it
+# drives both halves.
+#
+# A file the guest opens while the host is still appending to it stays stale in
+# the guest forever, which is why command output travels as renamed chunks.
+# Guest input runs the other way — the guest appends, the host reads as it
+# arrives — and this appends on a schedule while the host-side test watches, so
+# that direction is measured rather than assumed.
+#
+# The appender goes to the background first and waits for the host to publish
+# `ready`, because the host's first look at the stream has to land while writing
+# is still in progress. A look that arrives afterwards measures whole-file
+# propagation, which already works and is not the question.
+set -eu
+
+shared="$(cd "$(dirname "$0")/../.." && pwd)/target/guest-input-streaming"
+stream="$shared/stream"
+
+# Long enough to span many host polls, short enough to wait through.
+lines=24
+interval=0.1
+
+mkdir -p "$shared"
+rm -f "$stream" "$stream.eof" "$shared/ready"
+
+append() {
+  while [ ! -f "$shared/ready" ]; do
+    sleep 0.05
+  done
+
+  : > "$stream"
+  written=0
+  sequence=1
+  while [ "$sequence" -le "$lines" ]; do
+    # Fixed width, so the running count is exact without measuring the file —
+    # which is the thing under test and cannot be asked how big it is.
+    line=$(printf 'line %04d of %04d' "$sequence" "$lines")
+    printf '%s\n' "$line" >> "$stream"
+    written=$((written + ${#line} + 1))
+    sequence=$((sequence + 1))
+    sleep "$interval"
+  done
+
+  # The marker carries what we wrote, so the host compares against the guest's
+  # own count instead of a constant kept in two places. Renamed into view, so it
+  # never appears half-written.
+  printf '%s\n' "$written" > "$shared/eof.partial"
+  mv "$shared/eof.partial" "$stream.eof"
+}
+
+append &
+appender=$!
+
+# `test-one` is the entry that accepts arguments, which is what lets the feature
+# and the filter through. --no-capture so the measurement prints whether or not
+# it passes.
+status=0
+compostbin-host test-one \
+  -p compostbin-test \
+  --features integration \
+  --no-capture \
+  -E 'test(host_sees_guest_appends_as_they_happen)' || status=$?
+
+kill "$appender" 2>/dev/null || true
+exit "$status"

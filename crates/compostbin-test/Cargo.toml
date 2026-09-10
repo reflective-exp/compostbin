@@ -13,4 +13,7 @@ tempfile.workspace = true
 toml.workspace = true
 
 [features]
+# Tests that need a live session on both sides of the mount, so they cannot run
+# in the ordinary suite.
+integration = []
 strict = []
