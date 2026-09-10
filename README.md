@@ -202,6 +202,22 @@ its exit status is yours. The guest sends the name, never a command line.
 - A project with no `[host.commands]` has no guest-to-host path at all: the
   spool is neither created nor mounted.
 
+### What the session is told
+
+From the inside a container looks like an ordinary Debian box: nothing in it
+says the toolchain is missing on purpose, or that `compostbin-host` is the way
+out. So each session is briefed on itself — where it is, and every command it
+may ask the host for, rendered from `[host.commands]` rather than written by
+hand, so the two cannot drift apart.
+
+The briefing is mounted read-only at `/etc/claude-code`, Claude's managed
+settings, and a `SessionStart` hook prints it at the top of every session.
+Managed settings outrank `~/.claude/settings.json`, which stays yours:
+compostbin copies it from the host and never writes to it.
+
+The briefing is written when the container is created, so an edited
+`[host.commands]` reaches the session by the restart that serves it.
+
 ## Development
 
 ``` sh

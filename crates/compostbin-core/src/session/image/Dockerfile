@@ -27,6 +27,12 @@ RUN npm install --global @anthropic-ai/claude-code
 COPY compostbin-host /usr/local/bin/compostbin-host
 RUN chmod +x /usr/local/bin/compostbin-host
 
+# Claude's managed settings, mounted read-only at run time: the session's own
+# briefing, saying where it is and which host commands it may ask for. The
+# mountpoint exists here because the guest cannot create one under /etc, and
+# stays root-owned because nothing in the session may edit what it is told.
+RUN mkdir -p /etc/claude-code
+
 # Everything past this point belongs to the unprivileged user the session runs
 # as. Nothing in a session needs root: the mounts are the user's own files, and a
 # container that installs packages at run time is one whose image is wrong.

@@ -4,6 +4,7 @@
 //! token, the host Claude config it starts from, and the record of what its
 //! container was created with. Mounts are built here, from the workspace.
 
+pub mod briefing;
 pub mod credentials;
 pub mod image;
 pub mod record;
@@ -12,6 +13,7 @@ pub mod settings;
 use crate::error::{PathError, SessionError};
 use crate::host::{GUEST_SPOOL_TARGET, Spool};
 use crate::manifest::{Manifest, PathEntry, SESSIONS_DIR};
+use crate::session::briefing::{MANAGED_SETTINGS_DIR, MANAGED_SETTINGS_TARGET};
 use crate::session::record::{RECORD_FILE, Record};
 use crate::workspace::paths::{PathResolver, root_containing};
 use crate::workspace::{Origin, Workspace};
@@ -110,7 +112,7 @@ impl Session {
   /// container is gone. Not Claude's home — that holds the conversation
   /// `--continue` reattaches to.
   fn transient_state(&self) -> Vec<PathBuf> {
-    vec![self.host_spool()]
+    vec![self.host_spool(), self.managed_settings()]
   }
 
   /// Removes this session's transient state, and with `everything` the session
@@ -202,6 +204,15 @@ impl Session {
       });
     }
 
+    // Unconditional, unlike the spool: a session with no host commands still
+    // needs to know it is in a container. Read-only, because the guest changing
+    // what it is told is the whole point of managed settings.
+    mounts.push(Mount {
+      readonly: true,
+      source: self.managed_settings(),
+      target: PathBuf::from(MANAGED_SETTINGS_TARGET),
+    });
+
     mounts.push(Mount {
       readonly: false,
       source: self.claude_home(),
@@ -224,6 +235,13 @@ impl Session {
   /// other's requests and `clean` takes it with the rest.
   pub fn host_spool(&self) -> PathBuf {
     self.state_dir().join(SPOOL_DIR)
+  }
+
+  /// The source side of the managed settings mount: what this session tells its
+  /// Claude about itself. Per session, because it is rendered from this
+  /// project's manifest.
+  pub fn managed_settings(&self) -> PathBuf {
+    self.state_dir().join(MANAGED_SETTINGS_DIR)
   }
 
   /// A derived image when the manifest adds packages or build steps, otherwise
@@ -279,6 +297,11 @@ impl Session {
   /// because `doctor` can say nothing about unrecorded mounts.
   fn create(&self, engine: &impl Engine) -> Result<(), SessionError> {
     let spec = self.run_spec();
+
+    // Here rather than in the CLI, so every path that creates a container —
+    // `run`, `add --restart` — mounts a briefing rendered from the manifest as
+    // it reads now.
+    briefing::write(&self.managed_settings(), &self.manifest)?;
 
     // Every guest client that could still be waiting on a response died with the
     // container this one replaces, so their leftovers are now provably nobody's.
@@ -414,7 +437,7 @@ source   = "~/.cargo/registry"
       }
     );
     assert_eq!(session.manifest.paths.len(), 1, "no new [[paths]] entry");
-    assert_eq!(session.mounts().len(), 3, "no new mount");
+    assert_eq!(session.mounts().len(), 4, "no new mount");
   }
 
   #[test]
@@ -481,6 +504,33 @@ source   = "~/.cargo/registry"
     assert_eq!(calls[1], ["ls", "--all", "--quiet"]);
     assert_eq!(calls[2], session.run_spec().to_argv());
     assert_eq!(calls.len(), 3, "nothing to delete: {calls:?}");
+  }
+
+  /// The mount source has to exist before the container does, and what it holds
+  /// is rendered from the manifest this create ran with — an edited manifest
+  /// reaches the session it creates, not the one after.
+  #[test]
+  fn creating_the_container_writes_the_briefing() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = session_under(&base);
+
+    session
+      .start(&RecordingEngine::new())
+      .expect("start should succeed");
+
+    assert_eq!(
+      std::fs::read_to_string(session.managed_settings().join(briefing::BRIEFING_FILE))
+        .expect("the briefing should exist"),
+      briefing::briefing(&session.manifest)
+    );
+    assert!(
+      session
+        .managed_settings()
+        .join(briefing::MANAGED_SETTINGS_FILE)
+        .exists(),
+      "nothing reads the briefing without the settings that name it"
+    );
   }
 
   #[test]
@@ -647,6 +697,11 @@ source   = "~/.cargo/registry"
           target: "/workspace/loose".into(),
         },
         Mount {
+          readonly: true,
+          source: "/Users/user/.local/state/compostbin/sessions/compostbin-loose/managed".into(),
+          target: "/etc/claude-code".into(),
+        },
+        Mount {
           readonly: false,
           source: "/Users/user/.local/state/compostbin/sessions/compostbin-loose/claude-home".into(),
           target: "/home/claude/.claude".into(),
@@ -669,6 +724,7 @@ source   = "~/.cargo/registry"
       [
         "/Users/user/workspace",
         "/Users/user/.cargo/registry",
+        "/Users/user/.local/state/compostbin/sessions/compostbin-cb/managed",
         "/Users/user/.local/state/compostbin/sessions/compostbin-cb/claude-home",
       ]
     );
@@ -757,6 +813,8 @@ source   = "~/.cargo/registry"
         "--volume",
         "/Users/user/.cargo/registry:/workspace/registry:ro",
         "--volume",
+        "/Users/user/.local/state/compostbin/sessions/compostbin-cb/managed:/etc/claude-code:ro",
+        "--volume",
         "/Users/user/.local/state/compostbin/sessions/compostbin-cb/claude-home:/home/claude/.claude",
         "--workdir",
         "/workspace/workspace/compostbin",
@@ -813,12 +871,17 @@ source   = "~/.cargo/registry"
       base.join("project"),
     );
     std::fs::create_dir_all(session.host_spool()).expect("create spool");
+    std::fs::create_dir_all(session.managed_settings()).expect("create managed settings");
     std::fs::create_dir_all(session.claude_home()).expect("create claude home");
 
     let removed = session.clean(false).expect("clean should succeed");
 
-    assert_eq!(removed, [session.host_spool()]);
+    assert_eq!(removed, [session.host_spool(), session.managed_settings()]);
     assert!(!session.host_spool().exists());
+    assert!(
+      !session.managed_settings().exists(),
+      "the briefing is rendered again on the next create, so keeping it only risks a stale one"
+    );
     assert!(
       session.claude_home().exists(),
       "the conversation `--continue` reattaches to must survive"
