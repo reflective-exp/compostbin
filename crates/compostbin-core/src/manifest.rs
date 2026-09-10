@@ -158,16 +158,20 @@ pub struct HostCommand {
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ImageConfig {
-  /// `apt-get install`ed as root, before `run`.
+  /// `apt-get install`ed as root, before `run_as_root` and `run`.
   pub packages: Vec<String>,
   /// Shell lines run as the `claude` user, so a command writing to `~` lands in
   /// the home the session actually uses.
   pub run: Vec<String>,
+  /// Shell lines run as root, after `packages` and before the image drops to
+  /// `claude` — for what only root can do, like writing under `/etc`. Anything
+  /// touching the session's home belongs in `run`.
+  pub run_as_root: Vec<String>,
 }
 
 impl ImageConfig {
   pub fn is_empty(&self) -> bool {
-    self.packages.is_empty() && self.run.is_empty()
+    self.packages.is_empty() && self.run.is_empty() && self.run_as_root.is_empty()
   }
 }
 
@@ -251,8 +255,9 @@ seed_from_keychain = true
 shared             = ["agents"]
 
 [image]
-packages = ["direnv"]
-run      = ["echo 'eval \"$(direnv hook bash)\"' >> ~/.bashrc"]
+packages    = ["direnv"]
+run         = ["echo 'eval \"$(direnv hook bash)\"' >> ~/.bashrc"]
+run_as_root = ["install -d -o claude /opt/vendor"]
 "#;
 
   const EXPECTED_RENDERING: &str = r#"[claude]
@@ -267,6 +272,7 @@ memory = "8G"
 [image]
 packages = ["direnv"]
 run = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
+run_as_root = ["install -d -o claude /opt/vendor"]
 
 [[paths]]
 readonly = true
@@ -387,6 +393,7 @@ tty = true
 
     assert_eq!(manifest.image.packages, ["direnv"]);
     assert_eq!(manifest.image.run.len(), 1);
+    assert_eq!(manifest.image.run_as_root, ["install -d -o claude /opt/vendor"]);
   }
 
   #[test]

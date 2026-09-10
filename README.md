@@ -153,10 +153,13 @@ roots = ["~/workspace"]
 readonly = true
 source   = "~/.cargo/registry"
 
-# Added to this project's image only, on top of the shared base.
+# Added to this project's image only, on top of the shared base. `packages`
+# install as root, then `run_as_root` lines, then the image drops to the
+# `claude` user the session runs as and `run` lines follow.
 [image]
-packages = ["direnv"]
-run      = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
+packages    = ["ca-certificates", "direnv"]
+run         = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
+run_as_root = ["update-ca-certificates"]
 ```
 
 ### Signing in

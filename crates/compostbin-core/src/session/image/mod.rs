@@ -68,9 +68,13 @@ pub fn build(session: &Session, engine: &impl Engine) -> Result<i32, ImageError>
 /// The Dockerfile for the project's own image, or `None` when the manifest adds
 /// nothing and the session can run the base itself.
 ///
-/// Packages install as root because apt needs to; `run` lines execute as
-/// `claude`, so a line appending to `~/.bashrc` writes the file the session
-/// will read.
+/// One root block then one user block, in that order: packages install as root
+/// because apt needs to, `run_as_root` lines follow them while the image is
+/// still root, and `run` lines execute as `claude`, so a line appending to
+/// `~/.bashrc` writes the file the session will read.
+///
+/// The image always ends as `claude`, whether or not anything ran as the user:
+/// a session must not run as root.
 pub fn project_dockerfile(manifest: &Manifest) -> Option<String> {
   if manifest.image.is_empty() {
     return None;
@@ -78,28 +82,28 @@ pub fn project_dockerfile(manifest: &Manifest) -> Option<String> {
 
   let mut dockerfile = format!("FROM {}\n", manifest.project.image);
 
+  if !manifest.image.packages.is_empty() || !manifest.image.run_as_root.is_empty() {
+    dockerfile.push_str("\nUSER root\n");
+  }
+
   if !manifest.image.packages.is_empty() {
-    dockerfile.push_str("\nUSER root\nRUN apt-get update \\\n && apt-get install --no-install-recommends --yes \\\n");
+    dockerfile.push_str("RUN apt-get update \\\n && apt-get install --no-install-recommends --yes \\\n");
     for package in &manifest.image.packages {
       dockerfile.push_str(&format!("      {package} \\\n"));
     }
     dockerfile.push_str(" && rm -rf /var/lib/apt/lists/*\n");
   }
 
-  if !manifest.image.run.is_empty() {
-    dockerfile.push_str("\nUSER claude\n");
-    for line in &manifest.image.run {
-      dockerfile.push_str(&format!("RUN {line}\n"));
-    }
+  for line in &manifest.image.run_as_root {
+    dockerfile.push_str(&format!("RUN {line}\n"));
   }
 
-  // Only when the run block has not already restored it: installing packages is
-  // the one thing that leaves the image sitting on root.
-  if manifest.image.run.is_empty() {
-    dockerfile.push_str("\nUSER claude");
+  dockerfile.push_str("\nUSER claude\n");
+  for line in &manifest.image.run {
+    dockerfile.push_str(&format!("RUN {line}\n"));
   }
 
-  dockerfile.push_str("\nWORKDIR /home/claude\n");
+  dockerfile.push_str("WORKDIR /home/claude\n");
 
   Some(dockerfile)
 }
@@ -241,6 +245,46 @@ mod tests {
       dockerfile.matches("USER claude").count(),
       1,
       "the run block already restored the user; saying it again adds a layer for nothing: {dockerfile}"
+    );
+  }
+
+  /// The work only root can do: after the packages it may need, and before the
+  /// image drops to the user the session runs as.
+  #[test]
+  fn runs_root_lines_between_the_packages_and_the_user() {
+    let manifest: Manifest = toml::from_str(
+      "[image]\npackages = [\"ca-certificates\"]\nrun_as_root = [\"cp /tmp/ca.crt /usr/local/share/ca-certificates/\", \"update-ca-certificates\"]\nrun = [\"echo hook >> ~/.bashrc\"]\n",
+    )
+    .expect("manifest should parse");
+
+    let dockerfile = project_dockerfile(&manifest).expect("additions should produce a Dockerfile");
+
+    assert!(
+      dockerfile.contains(
+        " && rm -rf /var/lib/apt/lists/*\nRUN cp /tmp/ca.crt /usr/local/share/ca-certificates/\nRUN update-ca-certificates\n\nUSER claude\n"
+      ),
+      "root lines must follow the packages and precede the user switch: {dockerfile}"
+    );
+    assert_eq!(
+      dockerfile.matches("USER root").count(),
+      1,
+      "packages and root lines share one root block: {dockerfile}"
+    );
+  }
+
+  /// Root lines with no packages: nothing else has raised the user, so the root
+  /// block has to open itself.
+  #[test]
+  fn raises_the_user_for_root_lines_alone() {
+    let manifest: Manifest =
+      toml::from_str("[image]\nrun_as_root = [\"install -d /opt/vendor\"]\n").expect("manifest should parse");
+
+    let dockerfile = project_dockerfile(&manifest).expect("additions should produce a Dockerfile");
+
+    assert_eq!(
+      dockerfile,
+      "FROM compostbin/base:latest\n\nUSER root\nRUN install -d /opt/vendor\n\nUSER claude\nWORKDIR /home/claude\n",
+      "{dockerfile}"
     );
   }
 
