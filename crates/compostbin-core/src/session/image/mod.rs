@@ -8,6 +8,12 @@ use std::path::PathBuf;
 /// Where the embedded Dockerfile is written before building. Kept, so a failed
 /// build can be reproduced by hand; under `.cache` because it is regenerable.
 pub const BUILD_CONTEXT: &str = "~/.cache/compostbin/build";
+/// The builder's size. A build-time constant, deliberately not the manifest's
+/// `[container] memory`: that is what the session runs with, and letting it
+/// reach the builder would make one project's runtime preference resize the
+/// builder — and drop its layer cache — for every other project sharing the
+/// base. Sized past the 2 GB default, which OOMs installing Claude Code.
+pub const BUILD_MEMORY: &str = "8G";
 pub const DOCKERFILE: &str = include_str!("Dockerfile");
 pub const DOCKERFILE_NAME: &str = "Dockerfile";
 /// The guest-side client, copied into the image by the Dockerfile.
@@ -15,8 +21,8 @@ pub const GUEST_CLIENT: &str = include_str!("compostbin-host");
 pub const GUEST_CLIENT_NAME: &str = "compostbin-host";
 
 /// Builds the base image, and then the project's own image when the manifest
-/// adds anything to it. The builder is started first, at the manifest's memory
-/// size: installing Claude Code OOMs the builder's 2 GB default.
+/// adds anything to it. The builder is started first, at `BUILD_MEMORY`:
+/// installing Claude Code OOMs the builder's 2 GB default.
 ///
 /// The base is shared by every project, so anything belonging to one project —
 /// direnv, a language toolchain, a private CA — goes in the derived image rather
@@ -31,12 +37,11 @@ pub fn build(session: &Session, engine: &impl Engine) -> Result<i32, ImageError>
     std::fs::write(&path, contents).map_err(|source| ImageError::Io(PathError::new(&path, source)))?;
   }
 
-  let memory = session.manifest.container.memory.clone();
-  engine.start_builder(Some(&memory))?;
+  engine.start_builder(Some(BUILD_MEMORY))?;
 
   let code = engine.build(&BuildSpec {
     context,
-    memory: Some(memory.clone()),
+    memory: Some(BUILD_MEMORY.to_string()),
     tag: session.manifest.project.image.clone(),
   })?;
 
@@ -55,7 +60,7 @@ pub fn build(session: &Session, engine: &impl Engine) -> Result<i32, ImageError>
 
   Ok(engine.build(&BuildSpec {
     context,
-    memory: Some(memory),
+    memory: Some(BUILD_MEMORY.to_string()),
     tag: session.image(),
   })?)
 }
@@ -185,6 +190,25 @@ mod tests {
           context(&session).display().to_string(),
         ],
       ]
+    );
+  }
+
+  /// The base is shared and byte-identical everywhere. A project asking for a
+  /// bigger session must not resize the builder, which would drop the layer
+  /// cache every other project builds against.
+  #[test]
+  fn the_session_memory_does_not_reach_the_build() {
+    let home = TempDir::new().expect("temp dir");
+    let mut session = session(&home);
+    session.manifest.container.memory = "16G".to_string();
+    let engine = RecordingEngine::new();
+
+    build(&session, &engine).expect("build should succeed");
+
+    let calls = engine.calls();
+    assert!(
+      !calls.iter().flatten().any(|word| word == "16G"),
+      "the runtime memory leaked into the build: {calls:?}"
     );
   }
 
