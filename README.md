@@ -16,6 +16,7 @@ This project currently only runs on macOS.
 
 ``` sh
 brew install reflective-exp/tap/compostbin
+compostbin init
 compostbin doctor
 ```
 
@@ -42,7 +43,7 @@ the project it configures; see [Configuration](#configuration).
 
 `compostbin build` builds the base image: debian, node, Claude Code, and the
 handful of tools a session needs. One image serves every project, so it is built
-once and rebuilt only when compostbin's own Dockerfile changes.
+rarely; a rebuild with an unchanged Dockerfile is mostly cache.
 
 When the manifest has an `[image]` table, a second image is built `FROM` the
 base with additions. Extra language toolchains, private CAs, or other project-specific
@@ -53,10 +54,14 @@ tools may be configured on top of the base image.
 `compostbin doctor` checks whether a session would work. It checks:
 
 - the `container` CLI and whether its daemon is responding
-- whether container images  have been built
+- whether the base image has been built
 - whether the session can authenticate
-- every declared path: that it exists, that it does not declare a known dangerous
-  pattern, and whether symlinks escape the mounted trees
+- every declared path: that it exists, and whether symlinks escape the mounted
+  trees
+- every mount, declared or not, for a known dangerous pattern — a hand-edited
+  manifest bypasses `add`'s refusal
+- whether a running container was started with the mounts the manifest now
+  declares
 - the host commands the guest is allowed to run
 
 ### run
@@ -69,7 +74,8 @@ compostbin run -- --continue --model opus
 ```
 
 The session's Claude home outlives the container, so `--continue` resumes the
-conversation from the last run. CLAUDE_HOME is per-project.
+conversation from the last run. That home is per-project, and the session's
+`CLAUDE_CONFIG_DIR` points at it.
 
 While Claude is attached, compostbin serves that session's host commands; both
 stop when Claude exits.
@@ -77,20 +83,21 @@ stop when Claude exits.
 ### shell
 
 `compostbin shell` opens a bash prompt in a running container, as an unprivileged
-user, in `/workspace`.
+user, in the project's directory under `/workspace`.
 
 ### add
 
-`compostbin add <path>` mounts another host path into the session and records it
-in the manifest.
+`compostbin add <path>` records another host path in the manifest as a
+`[[paths]]` entry, so the next container mounts it.
 
 ``` sh
 compostbin add ../libfoo --readonly
-compostbin add ../libfoo --restart     # recreate the container so it appears immediately
+compostbin add ../libfoo --restart     # recreate the container and reattach, so it appears immediately
 ```
 
-A path already inside a `[workspace] roots` tree is mounted as soon as it is
-added; anything else needs the container recreated, which `--restart` does.
+A path already inside a `[workspace] roots` tree is mounted already: `add` says
+so, records nothing, and ignores `--readonly`. Anything else needs the container
+recreated, which `--restart` does before reattaching Claude with `--continue`.
 
 `add` refuses a path that is obviously a mistake — `~`, `/`, `~/.ssh`, anything
 holding credentials — unless you pass `--force`. It is a guardrail against a
@@ -220,8 +227,9 @@ The briefing is written when the container is created, so an edited
 ## Development
 
 ``` sh
+brew bundle             # medic and its extensions
 bin/dev/start           # build, restart the session, attach Claude
-medic test              # the whole suite
+medic test              # the whole suite, then a strict check for warnings
 medic audit             # audit, check, clippy, format
-medic shipit            # all of the above, then push
+medic shipit            # all of the above, then a release build, then push
 ```
