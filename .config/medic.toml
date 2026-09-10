@@ -37,6 +37,7 @@ steps = [
   {audit = {}},
   {update = {}},
   {test = {}},
+  {name = "build release", shell = "bin/dev/release"},
   {step = "git", command = "push"},
 ]
 

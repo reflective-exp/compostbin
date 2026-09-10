@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+trap "exit" INT
+source "$(brew --prefix)/share/medic-bash/cecho.bash"
+
+set -e
+
+mkdir -p tmp/release
+
+medic run --name "Build: Darwin aarch64" \
+  --cmd "cargo build --target aarch64-apple-darwin --release --color always" \
+  --verbose
+
+medic run --name "Package: Darwin aarch64" \
+  --cmd "(cd target/aarch64-apple-darwin/release && tar -czf ../../../tmp/release/compostbin-darwin-arm64.tar.gz compostbin)"
+medic run --name "shasum: Darwin aarch64" \
+  --cmd "(cd tmp/release && sha256sum compostbin-darwin-arm64.tar.gz > compostbin-darwin-arm64.sha256sum)"
+
+cecho --bright-green "\nChecksums:"
+cat tmp/release/*.sha256sum
+
