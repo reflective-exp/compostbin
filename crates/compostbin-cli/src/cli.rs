@@ -37,7 +37,7 @@ pub enum Command {
   Doctor,
   /// Serve host commands for a session started elsewhere
   HostAgent,
-  /// Write a manifest with detected defaults
+  /// Write a manifest with defaults
   Init,
   /// List the session's mounts
   Ls,
