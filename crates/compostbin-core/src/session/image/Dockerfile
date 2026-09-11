@@ -28,6 +28,15 @@ RUN npm install --global @anthropic-ai/claude-code
 COPY compostbin-host /usr/local/bin/compostbin-host
 RUN chmod +x /usr/local/bin/compostbin-host
 
+# The guest's clipboard tools, one script under four names, each sending to the
+# host's pasteboard through compostbin-host. Ahead of any real one on PATH, so a
+# project image that installs xclip still copies to the host.
+COPY compostbin-clipboard /usr/local/bin/compostbin-clipboard
+RUN chmod +x /usr/local/bin/compostbin-clipboard \
+ && for tool in pbcopy wl-copy xclip xsel; do \
+      ln -s compostbin-clipboard "/usr/local/bin/$tool"; \
+    done
+
 # The guest half of host port forwarding: the container's own process when the
 # manifest declares [host] ports, relaying each from localhost to the gateway.
 COPY compostbin-ports /usr/local/bin/compostbin-ports

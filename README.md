@@ -228,6 +228,24 @@ ports = [7001, 7002]
 compostbin relays each port over the vmnet gateway, so **every container on
 this Mac can reach it while the session runs**. Changing ports takes a restart.
 
+### Clipboard
+
+Copying inside the session can reach the macOS clipboard:
+
+``` toml
+[host]
+clipboard = true
+```
+
+The image's `pbcopy`, `xclip`, `xsel` and `wl-copy` all send what they read to
+the host's `pbcopy`, through the host-command channel — so Claude's own copy
+(`/copy`, copying a response) lands on your Mac's clipboard, as does
+`some-command | pbcopy` in `compostbin shell`. The session gets a
+`WAYLAND_DISPLAY`, since that is what makes Claude look for `wl-copy` at all.
+
+It is write-only: nothing on the host clipboard reaches the guest. It is off by
+default, and requires a restart on change.
+
 ### What the session is told
 
 From the inside a container looks like an ordinary Debian box: nothing in it

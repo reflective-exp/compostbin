@@ -12,6 +12,10 @@ pub const DEFAULT_HOST_CONCURRENCY: usize = 8;
 pub const DEFAULT_IMAGE: &str = "compostbin/base:latest";
 /// Checked in beside the project it configures.
 pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
+/// The host command `[host] clipboard` serves, and what the guest's `pbcopy`,
+/// `xclip`, `xsel` and `wl-copy` send.
+pub const CLIPBOARD_COMMAND: &str = "clipboard";
+const CLIPBOARD_ARGV: &[&str] = &["pbcopy"];
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -110,6 +114,14 @@ impl Default for ContainerConfig {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HostConfig {
+  /// Lets the guest's clipboard tools write to the host's pasteboard, by serving
+  /// `clipboard` as though it were declared. Off by default: whatever the guest
+  /// copies, the user may later paste into a host terminal. Write-only, so
+  /// nothing on the host clipboard reaches the guest.
+  ///
+  /// A bare value, so before `commands` for the same reason as `concurrency`.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub clipboard: bool,
   /// How many may run at once: subagents call `compostbin-host` independently,
   /// and the bound stops a guest looping on submissions from spawning unlimited
   /// work.
@@ -128,6 +140,7 @@ pub struct HostConfig {
 impl Default for HostConfig {
   fn default() -> Self {
     Self {
+      clipboard: false,
       commands: BTreeMap::new(),
       concurrency: DEFAULT_HOST_CONCURRENCY,
       ports: Vec::new(),
@@ -139,7 +152,26 @@ impl HostConfig {
   /// No commands, no channel: the spool is neither created nor mounted, so a
   /// project that has not opted in has no way to run anything on the host.
   pub fn has_commands(&self) -> bool {
-    !self.commands.is_empty()
+    self.clipboard || !self.commands.is_empty()
+  }
+
+  /// What the agent serves: `commands`, plus `clipboard` when it is on. A
+  /// declared `clipboard` wins, so a project can point it elsewhere.
+  pub fn served_commands(&self) -> BTreeMap<String, HostCommand> {
+    let mut served = self.commands.clone();
+
+    if self.clipboard {
+      served
+        .entry(CLIPBOARD_COMMAND.to_string())
+        .or_insert_with(|| HostCommand {
+          arguments: false,
+          argv: CLIPBOARD_ARGV.iter().map(|word| word.to_string()).collect(),
+          deny: Vec::new(),
+          tty: false,
+        });
+    }
+
+    served
   }
 
   /// No ports, no listener: nothing binds on the host.
@@ -154,7 +186,7 @@ impl HostConfig {
 }
 
 /// `argv` lives only on the host; the guest sends the key, never a command line.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostCommand {
   /// Off by default, so a command is exact unless deliberately widened.
@@ -377,6 +409,47 @@ tty = true
     let reloaded = Manifest::load(&path).expect("load should succeed");
     assert_eq!(reloaded.host.ports, [7001]);
     assert_eq!(reloaded.host.commands.len(), 2);
+  }
+
+  /// The clipboard alone is a reason for the spool: it is served through it.
+  #[test]
+  fn clipboard_alone_opens_the_spool() {
+    let manifest: Manifest = toml::from_str("[host]\nclipboard = true\n").expect("should parse");
+
+    assert!(manifest.host.has_commands());
+    assert_eq!(manifest.host.served_commands()[CLIPBOARD_COMMAND].argv, ["pbcopy"]);
+
+    let rendered = toml::to_string(&manifest).expect("should serialize");
+    assert!(rendered.contains("[host]\nclipboard = true\n"), "{rendered}");
+  }
+
+  #[test]
+  fn serves_no_clipboard_unless_asked() {
+    let manifest: Manifest = toml::from_str(HOST_MANIFEST).expect("should parse");
+
+    assert!(
+      !manifest
+        .host
+        .served_commands()
+        .contains_key(CLIPBOARD_COMMAND)
+    );
+    assert!(
+      !toml::to_string(&manifest)
+        .expect("should serialize")
+        .contains("clipboard")
+    );
+  }
+
+  #[test]
+  fn a_declared_clipboard_command_wins() {
+    let manifest: Manifest =
+      toml::from_str("[host]\nclipboard = true\n[host.commands.clipboard]\nargv = [\"tee\", \"/tmp/copied\"]\n")
+        .expect("should parse");
+
+    assert_eq!(
+      manifest.host.served_commands()[CLIPBOARD_COMMAND].argv,
+      ["tee", "/tmp/copied"]
+    );
   }
 
   #[test]

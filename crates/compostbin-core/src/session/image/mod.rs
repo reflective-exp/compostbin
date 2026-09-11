@@ -19,6 +19,9 @@ pub const DOCKERFILE_NAME: &str = "Dockerfile";
 /// The guest-side client, copied into the image by the Dockerfile.
 pub const GUEST_CLIENT: &str = include_str!("compostbin-host");
 pub const GUEST_CLIENT_NAME: &str = "compostbin-host";
+/// The guest's clipboard tools, each a link to this one script.
+pub const GUEST_CLIPBOARD: &str = include_str!("compostbin-clipboard");
+pub const GUEST_CLIPBOARD_NAME: &str = "compostbin-clipboard";
 /// The guest half of host port forwarding, run as the container's process when
 /// ports are declared.
 pub const GUEST_PORTS: &str = include_str!("compostbin-ports");
@@ -35,10 +38,11 @@ pub fn build(session: &Session, engine: &impl Engine) -> Result<i32, ImageError>
   let context = context(session);
   std::fs::create_dir_all(&context).map_err(|source| ImageError::Io(PathError::new(&context, source)))?;
 
-  // The Dockerfile `COPY`s both scripts, so a context without one fails the build.
+  // The Dockerfile `COPY`s every script, so a context without one fails the build.
   for (name, contents) in [
     (DOCKERFILE_NAME, DOCKERFILE),
     (GUEST_CLIENT_NAME, GUEST_CLIENT),
+    (GUEST_CLIPBOARD_NAME, GUEST_CLIPBOARD),
     (GUEST_PORTS_NAME, GUEST_PORTS),
   ] {
     let path = context.join(name);
@@ -379,6 +383,29 @@ mod tests {
     assert!(DOCKERFILE.contains("      socat \\\n"), "{DOCKERFILE}");
     assert!(
       DOCKERFILE.contains(&format!("COPY {GUEST_PORTS_NAME} /usr/local/bin/{GUEST_PORTS_NAME}")),
+      "{DOCKERFILE}"
+    );
+  }
+
+  #[test]
+  fn installs_clipboard_tools() {
+    let home = TempDir::new().expect("temp dir");
+    let session = session(&home);
+
+    build(&session, &RecordingEngine::new()).expect("build should succeed");
+
+    assert_eq!(
+      std::fs::read_to_string(context(&session).join(GUEST_CLIPBOARD_NAME)).expect("the tools should exist"),
+      GUEST_CLIPBOARD
+    );
+    assert!(
+      DOCKERFILE.contains(&format!(
+        "COPY {GUEST_CLIPBOARD_NAME} /usr/local/bin/{GUEST_CLIPBOARD_NAME}"
+      )),
+      "{DOCKERFILE}"
+    );
+    assert!(
+      DOCKERFILE.contains("for tool in pbcopy wl-copy xclip xsel"),
       "{DOCKERFILE}"
     );
   }

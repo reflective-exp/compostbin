@@ -16,10 +16,8 @@ pub fn allowlist(session: &Session) -> Check {
     );
   }
 
-  let commands: Vec<String> = session
-    .manifest
-    .host
-    .commands
+  let served = session.manifest.host.served_commands();
+  let commands: Vec<String> = served
     .iter()
     .map(|(name, command)| {
       let widened = if command.arguments { " (+ guest arguments)" } else { "" };
@@ -27,12 +25,7 @@ pub fn allowlist(session: &Session) -> Check {
     })
     .collect();
 
-  let widened = session
-    .manifest
-    .host
-    .commands
-    .values()
-    .any(|command| command.arguments);
+  let widened = served.values().any(|command| command.arguments);
 
   listed(
     "host commands",

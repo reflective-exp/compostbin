@@ -6,11 +6,8 @@ cpus = 4
 env = []
 memory = "8G"
 
-# direnv belongs to this project, not to every project, so it is built into this
-# project's own image rather than into the base everyone shares.
-[image]
-packages = ["direnv"]
-run = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
+[host]
+clipboard = true
 
 [host.commands.audit]
 argv = ["cargo", "audit"]
@@ -35,6 +32,10 @@ arguments = true
 argv = ["cargo", "nextest", "run"]
 deny = ["--config", "--manifest-path", "-Z"]
 tty = true
+
+[image]
+packages = ["direnv"]
+run = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
 
 [project]
 image = "compostbin/base:latest"

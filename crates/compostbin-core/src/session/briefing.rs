@@ -12,7 +12,7 @@
 //! this is not.
 
 use crate::error::PathError;
-use crate::manifest::{MANIFEST_RELATIVE_PATH, Manifest};
+use crate::manifest::{CLIPBOARD_COMMAND, MANIFEST_RELATIVE_PATH, Manifest};
 use std::path::Path;
 
 /// Claude's managed settings directory on Linux. Fixed by Claude Code, not by
@@ -72,15 +72,10 @@ pub fn briefing(manifest: &Manifest) -> String {
      which is not installed.\n\nThis project declares:\n\n",
   );
 
-  let width = manifest
-    .host
-    .commands
-    .keys()
-    .map(String::len)
-    .max()
-    .unwrap_or_default();
+  let commands = manifest.host.served_commands();
+  let width = commands.keys().map(String::len).max().unwrap_or_default();
 
-  for (name, command) in &manifest.host.commands {
+  for (name, command) in &commands {
     // The argv is what actually runs, and knowing it is what makes the name
     // mean something; the notes are the two ways a command differs from exact.
     let mut notes = Vec::new();
@@ -106,6 +101,14 @@ pub fn briefing(manifest: &Manifest) -> String {
     "\nA command not on that list has no host path. Run it in the guest, or add it to \
      [host.commands] in {MANIFEST_RELATIVE_PATH} — which takes a restart to serve.\n"
   ));
+
+  if manifest.host.clipboard {
+    text.push_str(&format!(
+      "\nCopying to the clipboard reaches the user's macOS clipboard: `pbcopy`, `xclip`, `xsel` \
+       and `wl-copy` here all send what they read to `compostbin-host {CLIPBOARD_COMMAND}`. \
+       It is write-only; nothing can be pasted from the host.\n"
+    ));
+  }
 
   text
 }
@@ -197,6 +200,16 @@ mod tests {
       "there is no host channel to point at: {briefing}"
     );
     assert!(briefing.contains("no host commands"), "{briefing}");
+  }
+
+  #[test]
+  fn the_briefing_says_where_copies_go() {
+    let manifest: Manifest = toml::from_str("[host]\nclipboard = true\n").expect("manifest should parse");
+    let briefing = briefing(&manifest);
+
+    assert!(briefing.contains("compostbin-host clipboard  pbcopy"), "{briefing}");
+    assert!(briefing.contains("macOS clipboard"), "{briefing}");
+    assert!(!super::briefing(&manifest_with_commands()).contains("clipboard"));
   }
 
   #[test]

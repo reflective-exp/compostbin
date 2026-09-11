@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add `[host] clipboard` to send the guest's `pbcopy`, `xclip`, `xsel` and
+  `wl-copy` to the macOS clipboard. Needs a `compostbin build`.
+
 ## v0.4.0
 
 - Harden against container escapes.

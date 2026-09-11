@@ -33,6 +33,8 @@ pub const SPOOL_DIR: &str = "host";
 /// Keeps a detached container alive so `exec` has something to attach to.
 pub const KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
 pub const NAME_PREFIX: &str = "compostbin-";
+/// Names no real compositor: nothing in the guest draws, it only has to be set.
+pub const CLIPBOARD_DISPLAY: &str = "compostbin-clipboard";
 
 /// What `add` did, and therefore what the caller must do next.
 #[derive(Clone, Debug, PartialEq)]
@@ -405,19 +407,32 @@ impl Session {
   /// answers, the per-project trust — into the bind-mounted home. It defaults to
   /// `~/.claude.json`, outside the mount, so without this every new container
   /// starts logged out however faithfully `~/.claude` is preserved.
+  ///
+  /// `WAYLAND_DISPLAY`, with `[host] clipboard`, is what makes Claude copy at
+  /// all: on Linux it looks for `wl-copy` only when there is a display to copy
+  /// to. There is none, but the guest's `wl-copy` sends to the host's.
   pub fn exec_spec(&self, arguments: &[String]) -> ExecSpec {
+    let mut env = vec![
+      EnvVar::Set {
+        name: "CLAUDE_CONFIG_DIR".to_string(),
+        value: CLAUDE_HOME_TARGET.to_string(),
+      },
+      EnvVar::Set {
+        name: "IS_SANDBOX".to_string(),
+        value: "1".to_string(),
+      },
+    ];
+
+    if self.manifest.host.clipboard {
+      env.push(EnvVar::Set {
+        name: "WAYLAND_DISPLAY".to_string(),
+        value: CLIPBOARD_DISPLAY.to_string(),
+      });
+    }
+
     ExecSpec {
       arguments: arguments.to_vec(),
-      env: vec![
-        EnvVar::Set {
-          name: "CLAUDE_CONFIG_DIR".to_string(),
-          value: CLAUDE_HOME_TARGET.to_string(),
-        },
-        EnvVar::Set {
-          name: "IS_SANDBOX".to_string(),
-          value: "1".to_string(),
-        },
-      ],
+      env,
       interactive: true,
       name: self.container_name(),
       tty: true,
@@ -765,6 +780,27 @@ source   = "~/.cargo/registry"
         "claude",
         "--continue",
       ]
+    );
+  }
+
+  /// Claude copies through `wl-copy` only when a display says there is somewhere
+  /// to copy to.
+  #[test]
+  fn names_a_display_only_for_the_clipboard() {
+    let mut session = session();
+    let display = format!("WAYLAND_DISPLAY={CLIPBOARD_DISPLAY}");
+
+    assert!(!session.exec_spec(&[]).to_argv().contains(&display));
+
+    session.manifest.host.clipboard = true;
+
+    assert!(session.exec_spec(&[]).to_argv().contains(&display));
+    assert!(
+      session
+        .mounts()
+        .iter()
+        .any(|mount| mount.target == PathBuf::from(GUEST_SPOOL_TARGET)),
+      "the clipboard is served through the spool"
     );
   }
 

@@ -1,0 +1,74 @@
+#!/bin/sh
+# The guest's pbcopy, xclip, xsel and wl-copy, all one script named by how it
+# was called: each sends what it would have copied to `compostbin-host
+# clipboard`, which the host serves with `[host] clipboard` by running pbcopy.
+#
+# Only the flags a caller copying text would pass are understood. Pasting is
+# refused rather than faked: nothing on the host clipboard reaches the guest.
+# The primary selection has no macOS equivalent, so a copy to it is read and
+# dropped — Claude copies to both, and one host round trip is enough.
+set -eu
+
+name=$(basename "$0")
+
+paste() {
+  echo "$name: the host clipboard is write-only from a compostbin container; there is nothing to paste" >&2
+  exit 1
+}
+
+primary=0
+text=0
+input=0
+count=$#
+
+# Anything left in "$@" after this loop is a file (xclip) or text (wl-copy).
+while [ "$count" -gt 0 ]; do
+  argument=$1
+  shift
+  count=$((count - 1))
+
+  case "$name:$argument" in
+    xclip:-o | xclip:-out | xsel:-o | xsel:--output) paste ;;
+    xsel:-i | xsel:--input) input=1 ;;
+    xsel:-p | xsel:--primary | xsel:-s | xsel:--secondary) primary=1 ;;
+    wl-copy:-p | wl-copy:--primary) primary=1 ;;
+    xsel:-c | xsel:--clear | xsel:-d | xsel:--delete | wl-copy:-c | wl-copy:--clear) exit 0 ;;
+    xclip:-selection | xclip:-sel | xclip:-se | xclip:-s)
+      case "${1:-}" in
+        p* | s*) primary=1 ;;
+      esac
+      shift
+      count=$((count - 1))
+      ;;
+    xclip:-display | xclip:-d | xclip:-loops | xclip:-l | xclip:-target | xclip:-t | wl-copy:-t | wl-copy:--type)
+      shift
+      count=$((count - 1))
+      ;;
+    xclip:-* | xsel:-* | wl-copy:-* | pbcopy:-*) ;;
+    wl-copy:*)
+      text=1
+      set -- "$@" "$argument"
+      ;;
+    xclip:*) set -- "$@" "$argument" ;;
+  esac
+done
+
+# xsel with neither flag pastes when its stdin is a terminal.
+if [ "$name" = xsel ] && [ "$input" -eq 0 ] && [ -t 0 ]; then
+  paste
+fi
+
+if [ "$primary" -eq 1 ]; then
+  if [ "$text" -eq 0 ] && [ "$#" -eq 0 ]; then
+    cat > /dev/null
+  fi
+  exit 0
+fi
+
+if [ "$text" -eq 1 ]; then
+  printf '%s' "$*" | compostbin-host clipboard
+elif [ "$#" -gt 0 ]; then
+  cat -- "$@" | compostbin-host clipboard
+else
+  exec compostbin-host clipboard
+fi

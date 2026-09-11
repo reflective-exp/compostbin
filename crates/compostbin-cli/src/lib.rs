@@ -148,7 +148,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       if session.manifest.host.has_commands() {
         println!(
           "serving {} host commands from {}",
-          session.manifest.host.commands.len(),
+          session.manifest.host.served_commands().len(),
           session.host_spool().display()
         );
       }
@@ -162,7 +162,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
         let served = if session.manifest.host.has_commands() {
           host::serve(
             &Spool::new(session.host_spool()),
-            &session.manifest.host.commands,
+            &session.manifest.host.served_commands(),
             &project_dir,
             session.manifest.host.concurrency,
             stop,
@@ -279,7 +279,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
           scope.spawn(|| {
             if let Err(error) = host::serve(
               &spool,
-              &session.manifest.host.commands,
+              &session.manifest.host.served_commands(),
               &project_dir,
               session.manifest.host.concurrency,
               &stop,
