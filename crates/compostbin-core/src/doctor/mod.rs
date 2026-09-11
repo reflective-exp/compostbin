@@ -310,7 +310,7 @@ mod tests {
   }
 
   #[test]
-  fn ignores_the_keychain_when_seeding_is_off() {
+  fn ignores_keychain_when_not_seeding() {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");
     let mut session = session(&home, &quoted(&base, "workspace"));

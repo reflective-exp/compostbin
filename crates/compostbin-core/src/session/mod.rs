@@ -374,12 +374,26 @@ impl Session {
     self.create(engine)
   }
 
+  /// Stops the container if it is running and deletes it if it exists, so a
+  /// container that already stopped, or was deleted by hand, is not an error.
+  pub fn remove_container(&self, engine: &impl Engine) -> Result<(), SessionError> {
+    let name = self.container_name();
+
+    if engine.running_containers()?.contains(&name) {
+      engine.stop(&name)?;
+    }
+
+    if engine.containers()?.contains(&name) {
+      engine.delete(&name)?;
+    }
+
+    Ok(())
+  }
+
   /// Recreates the container so a new mount takes effect, then reattaches to the
   /// same conversation — cheap, because Claude's home outlives the container.
   pub fn restart(&self, engine: &impl Engine) -> Result<i32, SessionError> {
-    let name = self.container_name();
-    engine.stop(&name)?;
-    engine.delete(&name)?;
+    self.remove_container(engine)?;
     self.create(engine)?;
 
     Ok(engine.exec(&self.exec_spec(&["claude".to_string(), "--continue".to_string()]))?)
@@ -577,21 +591,56 @@ source   = "~/.cargo/registry"
     let temp = TempDir::new().expect("temp dir");
     let base = temp.path().canonicalize().expect("canonical temp");
     let session = session_under(&base);
-    let engine = RecordingEngine::new();
+    let engine = RecordingEngine::with_containers(&[("compostbin-cb", true)]);
 
     session.restart(&engine).expect("restart should succeed");
 
     let calls = engine.calls();
-    assert_eq!(calls[0], ["stop", "compostbin-cb"]);
-    assert_eq!(calls[1], ["delete", "compostbin-cb"]);
-    assert_eq!(calls[2], session.run_spec().to_argv());
+    assert_eq!(calls[0], ["ls", "--quiet"]);
+    assert_eq!(calls[1], ["stop", "compostbin-cb"]);
+    assert_eq!(calls[2], ["ls", "--all", "--quiet"]);
+    assert_eq!(calls[3], ["delete", "compostbin-cb"]);
+    assert_eq!(calls[4], session.run_spec().to_argv());
     assert_eq!(
-      calls[3],
+      calls[5],
       session
         .exec_spec(&["claude".to_string(), "--continue".to_string()])
         .to_argv()
     );
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 6);
+  }
+
+  #[test]
+  fn removes_stopped_container() {
+    let engine = RecordingEngine::with_containers(&[("compostbin-cb", false)]);
+
+    session()
+      .remove_container(&engine)
+      .expect("remove should succeed");
+
+    assert_eq!(
+      engine.calls(),
+      [
+        vec!["ls", "--quiet"],
+        vec!["ls", "--all", "--quiet"],
+        vec!["delete", "compostbin-cb"]
+      ]
+    );
+  }
+
+  #[test]
+  fn removes_missing_container() {
+    let engine = RecordingEngine::with_containers(&[("compostbin-other", true)]);
+
+    session()
+      .remove_container(&engine)
+      .expect("remove should succeed");
+
+    assert_eq!(
+      engine.calls(),
+      [vec!["ls", "--quiet"], vec!["ls", "--all", "--quiet"]],
+      "another session's container must be left alone"
+    );
   }
 
   #[test]
@@ -949,7 +998,7 @@ source   = "~/.cargo/registry"
   }
 
   #[test]
-  fn cleaning_after_exit_keeps_what_the_running_container_mounts() {
+  fn exit_cleanup_keeps_managed_settings() {
     let temp = TempDir::new().expect("temp dir");
     let base = temp.path().canonicalize().expect("canonical temp");
     let session = Session::new(

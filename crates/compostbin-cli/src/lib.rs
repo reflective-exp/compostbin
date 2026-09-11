@@ -324,8 +324,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
       let engine = CliEngine::new();
       let name = session.container_name();
-      engine.stop(&name)?;
-      engine.delete(&name)?;
+      session.remove_container(&engine)?;
       session.clean(false)?;
       println!("stopped {name}");
       Ok(0)

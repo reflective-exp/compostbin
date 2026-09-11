@@ -168,7 +168,7 @@ mod tests {
   /// Nothing is denied that the manifest did not name: `-Z` means something else
   /// to another toolchain.
   #[test]
-  fn denies_only_what_the_command_declares() {
+  fn denies_only_declared_arguments() {
     let commands = fixtures::commands(&[("run", &["tool"], true)]);
 
     assert_eq!(
@@ -180,7 +180,7 @@ mod tests {
   /// `--` is two characters but not a single-letter flag, so denying it must not
   /// deny every long flag.
   #[test]
-  fn denying_the_separator_denies_only_the_separator() {
+  fn denying_separator_allows_long_flags() {
     let mut commands = fixtures::commands(&[("run", &["tool"], true)]);
     commands
       .get_mut("run")
