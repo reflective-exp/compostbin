@@ -14,6 +14,7 @@ use crate::error::{PathError, SessionError};
 use crate::host::{Forward, GUEST_SPOOL_TARGET, Spool};
 use crate::manifest::{Manifest, PathEntry, SESSIONS_DIR};
 use crate::session::briefing::{MANAGED_SETTINGS_DIR, MANAGED_SETTINGS_TARGET};
+use crate::session::image::GUEST_PORTS_NAME;
 use crate::session::record::{RECORD_FILE, Record};
 use crate::workspace::paths::{PathResolver, root_containing};
 use crate::workspace::{Origin, Workspace};
@@ -267,12 +268,25 @@ impl Session {
       .collect()
   }
 
-  pub fn run_spec(&self) -> RunSpec {
-    RunSpec {
-      arguments: KEEPALIVE_COMMAND
+  /// The container's own process: the port relay when ports are declared —
+  /// which fixes them at creation, like the mounts — and otherwise only
+  /// something to keep it alive for `exec`.
+  fn process(&self) -> Vec<String> {
+    if !self.manifest.host.has_ports() {
+      return KEEPALIVE_COMMAND
         .iter()
         .map(|word| word.to_string())
-        .collect(),
+        .collect();
+    }
+
+    std::iter::once(GUEST_PORTS_NAME.to_string())
+      .chain(self.manifest.host.ports.iter().map(u16::to_string))
+      .collect()
+  }
+
+  pub fn run_spec(&self) -> RunSpec {
+    RunSpec {
+      arguments: self.process(),
       cpus: Some(self.manifest.container.cpus),
       detach: true,
       env: self
@@ -872,6 +886,27 @@ source   = "~/.cargo/registry"
         .contains(&"compostbin/compostbin-cb:latest".to_string()),
       "the session must run the image it built"
     );
+  }
+
+  /// The relay is the container's process, so its ports are fixed at creation
+  /// like the mounts; with none, the container only has to stay alive.
+  #[test]
+  fn runs_port_relay() {
+    let mut session = session();
+    session.manifest.host.ports = vec![7001, 7002];
+
+    let argv = session.run_spec().to_argv();
+
+    assert_eq!(argv[argv.len() - 3..], ["compostbin-ports", "7001", "7002"]);
+  }
+
+  #[test]
+  fn forwards_from_gateway() {
+    let mut session = session();
+    session.manifest.host.ports = vec![7001];
+    let gateway = "192.168.64.1".parse().expect("an address");
+
+    assert_eq!(session.forwards(gateway), [Forward::to_loopback(gateway, 7001)]);
   }
 
   #[test]

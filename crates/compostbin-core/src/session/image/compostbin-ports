@@ -1,0 +1,30 @@
+#!/bin/sh
+# The guest half of host port forwarding, and the container's own process when
+# the manifest declares [host] ports: each one on this guest's localhost is
+# relayed to the same port on the vmnet gateway, where compostbin listens on the
+# host's behalf. A shell script for the same reason as compostbin-host.
+#
+# The gateway comes from the default route rather than an argument, so a
+# changed subnet needs nothing from the host.
+set -eu
+
+# The default route's destination is 00000000, and its gateway is an IPv4
+# address in little-endian hex: 0140A8C0 is 192.168.64.1.
+hex=$(awk '$2 == "00000000" { print $3; exit }' /proc/net/route)
+
+octet() {
+  echo $((0x$(echo "$hex" | cut -c"$1")))
+}
+
+if [ -z "$hex" ]; then
+  echo "compostbin-ports: no default route, so no gateway; host ports are not forwarded" >&2
+else
+  gateway="$(octet 7-8).$(octet 5-6).$(octet 3-4).$(octet 1-2)"
+
+  for port in "$@"; do
+    socat "TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr" "TCP:$gateway:$port" &
+  done
+fi
+
+# The container lives as long as this does, whether or not a relay survives.
+exec sleep infinity

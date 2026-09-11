@@ -1,5 +1,7 @@
 # Changelog
 
+- Add `[host] ports` to relay host ports into containers.
+
 ## v0.2.0
 
 - Add `[image] run_as_root` for arbitrary privileged `RUN`

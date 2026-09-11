@@ -11,6 +11,7 @@ RUN apt-get update \
       openssh-client \
       procps \
       ripgrep \
+      socat \
       unzip \
  && rm -rf /var/lib/apt/lists/*
 
@@ -26,6 +27,11 @@ RUN npm install --global @anthropic-ai/claude-code
 # Linux while compostbin itself is a macOS binary.
 COPY compostbin-host /usr/local/bin/compostbin-host
 RUN chmod +x /usr/local/bin/compostbin-host
+
+# The guest half of host port forwarding: the container's own process when the
+# manifest declares [host] ports, relaying each from localhost to the gateway.
+COPY compostbin-ports /usr/local/bin/compostbin-ports
+RUN chmod +x /usr/local/bin/compostbin-ports
 
 # Claude's managed settings, mounted read-only at run time: the session's own
 # briefing, saying where it is and which host commands it may ask for. The
