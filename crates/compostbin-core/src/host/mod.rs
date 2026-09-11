@@ -5,8 +5,11 @@
 //! owns: the guest client (a shell script), the spool carrying the files, and the
 //! agent serving them. `request` is what may run, `spool` is where the files go,
 //! `agent` runs them, `pty` is the terminal a command can ask for.
+//!
+//! `ports` is the one path that is not files: declared ports, relayed over vmnet.
 
 mod agent;
+mod ports;
 mod pty;
 mod request;
 mod spool;
@@ -15,6 +18,7 @@ mod spool;
 mod fixtures;
 
 pub use crate::host::agent::{POLL_INTERVAL, serve, serve_once};
+pub use crate::host::ports::{Forward, PortEvent, relay};
 pub use crate::host::request::{DENIED_ARGUMENT_PREFIXES, Request, resolve};
 pub use crate::host::spool::Spool;
 

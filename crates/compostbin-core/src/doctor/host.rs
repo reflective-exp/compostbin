@@ -8,7 +8,7 @@ use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialSource, KEYCH
 /// Every allowlisted command runs on the host with the user's own privileges,
 /// so this is where that stops being invisible.
 pub fn allowlist(session: &Session) -> Check {
-  if session.manifest.host.is_empty() {
+  if !session.manifest.host.has_commands() {
     return check(
       "host commands",
       Status::Ok,

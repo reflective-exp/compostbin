@@ -208,8 +208,20 @@ its exit status is yours. The guest sends the name, never a command line.
   command is exact unless deliberately widened.
 - `tty` runs the command under a pty, so colour and progress work. A terminal is
   one device, so this merges stdout and stderr.
-- A project with no `[host.commands]` has no guest-to-host path at all: the
-  spool is neither created nor mounted.
+- The spool is only created/mounted when `[host.commands]` is present.
+
+### Host ports
+
+Host services on fixed ports, such as MCP servers, reach the guest at its own
+`localhost`:
+
+``` toml
+[host]
+ports = [7001, 7002]
+```
+
+compostbin relays each port over the vmnet gateway, so **every container on
+this Mac can reach it while the session runs**. Changing ports takes a restart.
 
 ### What the session is told
 

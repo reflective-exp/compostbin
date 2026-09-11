@@ -55,7 +55,7 @@ pub fn briefing(manifest: &Manifest) -> String {
      are visible, and edits to them land directly on the host.\n\n",
   );
 
-  if manifest.host.is_empty() {
+  if !manifest.host.has_commands() {
     text.push_str(&format!(
       "This project declares no host commands, so there is no path out to the host \
        at all. Anything that has to run, runs in the guest — or gets a [host.commands] \

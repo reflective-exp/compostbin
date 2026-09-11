@@ -117,6 +117,11 @@ pub struct HostConfig {
   /// Declared before `commands`, against this table's alphabetical order, and it
   /// must stay there: TOML cannot express a bare value after a table.
   pub concurrency: usize,
+  /// Host loopback ports the guest reaches at its own `localhost`, relayed over
+  /// vmnet — where every other container can reach them too. A bare value, so
+  /// before `commands` for the same reason as `concurrency`.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub ports: Vec<u16>,
   pub commands: BTreeMap<String, HostCommand>,
 }
 
@@ -125,15 +130,26 @@ impl Default for HostConfig {
     Self {
       commands: BTreeMap::new(),
       concurrency: DEFAULT_HOST_CONCURRENCY,
+      ports: Vec::new(),
     }
   }
 }
 
 impl HostConfig {
   /// No commands, no channel: the spool is neither created nor mounted, so a
-  /// project that has not opted in has no guest-to-host path.
+  /// project that has not opted in has no way to run anything on the host.
+  pub fn has_commands(&self) -> bool {
+    !self.commands.is_empty()
+  }
+
+  /// No ports, no listener: nothing binds on the host.
+  pub fn has_ports(&self) -> bool {
+    !self.ports.is_empty()
+  }
+
+  /// Neither commands nor ports: the guest has no path to the host at all.
   pub fn is_empty(&self) -> bool {
-    self.commands.is_empty()
+    !self.has_commands() && !self.has_ports()
   }
 }
 
@@ -314,6 +330,56 @@ tty = true
     assert!(widened.arguments);
     assert!(widened.tty);
     assert_eq!(manifest.host.concurrency, DEFAULT_HOST_CONCURRENCY);
+  }
+
+  #[test]
+  fn ports_default_empty() {
+    let manifest: Manifest = toml::from_str(HOST_MANIFEST).expect("should parse");
+
+    assert!(manifest.host.ports.is_empty());
+    assert!(manifest.host.has_commands());
+    assert!(!manifest.host.has_ports());
+  }
+
+  /// Ports alone are a path out to the host, but not a reason for a spool.
+  #[test]
+  fn ports_alone_open_no_spool() {
+    let manifest: Manifest = toml::from_str("[host]\nports = [7001, 7002]\n").expect("should parse");
+
+    assert_eq!(manifest.host.ports, [7001, 7002]);
+    assert!(manifest.host.has_ports());
+    assert!(!manifest.host.has_commands(), "ports must not open the spool");
+
+    let rendered = toml::to_string(&manifest).expect("should serialize");
+    assert!(
+      rendered.contains("[host]\nconcurrency = 8\nports = [7001, 7002]\n"),
+      "a table declaring only ports must still render: {rendered}"
+    );
+  }
+
+  /// Like `concurrency`, `ports` is a bare value and has to render before the
+  /// `commands` tables; this save fails if it does not.
+  #[test]
+  fn saves_ports_and_commands() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join("compostbin.toml");
+    let mut manifest: Manifest = toml::from_str(HOST_MANIFEST).expect("should parse");
+    manifest.host.ports = vec![7001];
+
+    manifest.save(&path).expect("save should succeed");
+
+    let reloaded = Manifest::load(&path).expect("load should succeed");
+    assert_eq!(reloaded.host.ports, [7001]);
+    assert_eq!(reloaded.host.commands.len(), 2);
+  }
+
+  #[test]
+  fn omits_empty_ports() {
+    let manifest: Manifest = toml::from_str(HOST_MANIFEST).expect("should parse");
+
+    let rendered = toml::to_string(&manifest).expect("should serialize");
+
+    assert!(!rendered.contains("ports"), "{rendered}");
   }
 
   /// TOML cannot express a bare value after a table, so `concurrency` has to

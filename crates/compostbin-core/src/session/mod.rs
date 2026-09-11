@@ -196,7 +196,7 @@ impl Session {
       .collect();
 
     // With no allowlist there is no channel at all, rather than an empty one.
-    if !self.manifest.host.is_empty() {
+    if self.manifest.host.has_commands() {
       mounts.push(Mount {
         readonly: false,
         source: self.host_spool(),
@@ -280,7 +280,7 @@ impl Session {
   /// The mount source must exist before the container starts, and the guest
   /// cannot create it. A no-op with no commands declared.
   pub fn prepare_host_spool(&self) -> Result<(), PathError> {
-    if self.manifest.host.is_empty() {
+    if !self.manifest.host.has_commands() {
       return Ok(());
     }
 
@@ -305,7 +305,7 @@ impl Session {
 
     // Every guest client that could still be waiting on a response died with the
     // container this one replaces, so their leftovers are now provably nobody's.
-    if !self.manifest.host.is_empty() {
+    if self.manifest.host.has_commands() {
       Spool::new(self.host_spool()).sweep()?;
     }
 

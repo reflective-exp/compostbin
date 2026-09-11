@@ -86,7 +86,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
       session.prepare_host_spool()?;
 
-      if session.manifest.host.is_empty() {
+      if !session.manifest.host.has_commands() {
         eprintln!(
           "no [host.commands] in {}; there is nothing to serve",
           manifest_path.display()
@@ -192,7 +192,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       let spool = Spool::new(session.host_spool());
 
       let code = std::thread::scope(|scope| {
-        if !session.manifest.host.is_empty() {
+        if session.manifest.host.has_commands() {
           scope.spawn(|| {
             if let Err(error) = host::serve(
               &spool,
