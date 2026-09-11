@@ -197,6 +197,7 @@ argv = ["cargo", "nextest", "run", "--workspace"]
 [host.commands.test-one]
 arguments = true
 argv      = ["cargo", "nextest", "run"]
+deny      = ["--config", "--manifest-path", "-Z"]
 tty       = true
 ```
 
@@ -206,6 +207,10 @@ its exit status is yours. The guest sends the name, never a command line.
 
 - `arguments` lets the guest append its own arguments; off by default, so a
   command is exact unless deliberately widened.
+- `deny` refuses guest arguments that would point a widened command at other
+  code or configuration. Nothing is denied by default, because which flags do
+  that depends on the toolchain. `--config` also refuses `--config=x`; a
+  single-letter `-Z` also refuses the joined `-Zx`.
 - `tty` runs the command under a pty, so colour and progress work. A terminal is
   one device, so this merges stdout and stderr.
 - The spool is only created/mounted when `[host.commands]` is present.

@@ -161,6 +161,12 @@ pub struct HostCommand {
   #[serde(default)]
   pub arguments: bool,
   pub argv: Vec<String>,
+  /// Guest arguments refused even when `arguments` is on — flags that point the
+  /// command at other code or configuration, which only the project knows for
+  /// its toolchain. `--config` also refuses `--config=x`; a single-letter `-Z`
+  /// also refuses the joined `-Zx`.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub deny: Vec<String>,
   /// Run under a pty, so colour, progress and prompts work. A terminal is one
   /// device, so this merges stdout and stderr — hence off by default, keeping
   /// them separate for anything read by a machine.

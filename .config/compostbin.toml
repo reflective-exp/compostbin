@@ -33,6 +33,7 @@ tty = true
 [host.commands.test-one]
 arguments = true
 argv = ["cargo", "nextest", "run"]
+deny = ["--config", "--manifest-path", "-Z"]
 tty = true
 
 [project]

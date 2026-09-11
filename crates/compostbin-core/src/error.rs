@@ -205,7 +205,7 @@ impl Display for Refusal {
       ),
       Self::DeniedArgument(argument) => write!(
         formatter,
-        "the argument \"{argument}\" is refused: it can point the command at other code or configuration"
+        "the argument \"{argument}\" is refused by this command's `deny` list"
       ),
       Self::EmptyCommand(name) => write!(formatter, "\"{name}\" has an empty argv, so it names nothing to run"),
       Self::EmptyRequest => write!(formatter, "the request names no command"),

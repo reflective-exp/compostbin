@@ -19,7 +19,7 @@ mod fixtures;
 
 pub use crate::host::agent::{POLL_INTERVAL, serve, serve_once};
 pub use crate::host::ports::{Forward, PortEvent, relay};
-pub use crate::host::request::{DENIED_ARGUMENT_PREFIXES, Request, resolve};
+pub use crate::host::request::{Request, resolve};
 pub use crate::host::spool::Spool;
 
 /// Fixed, not configurable: the guest client is a shell script and cannot read

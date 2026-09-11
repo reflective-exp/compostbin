@@ -1,6 +1,8 @@
 # Changelog
 
 - Harden against container escapes.
+- Add `deny` to `[host.commands.*]`, replacing the built-in cargo deny list
+  (`--config`, `--manifest-path`, `-Z`). Nothing is denied by default.
 
 ## v0.3.0
 

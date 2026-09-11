@@ -15,6 +15,7 @@ pub fn commands(entries: &[(&str, &[&str], bool)]) -> BTreeMap<String, HostComma
         HostCommand {
           arguments: *arguments,
           argv: argv.iter().map(|word| word.to_string()).collect(),
+          deny: Vec::new(),
           // The pipe path, where the streams stay separate and can be asserted
           // on independently.
           tty: false,
@@ -34,11 +35,20 @@ pub fn terminal_command(name: &str, argv: &[&str]) -> BTreeMap<String, HostComma
   commands
 }
 
+/// `test-one` denies what a cargo project would.
 pub fn allowlist() -> BTreeMap<String, HostCommand> {
-  commands(&[
+  let mut commands = commands(&[
     ("test", &["cargo", "nextest", "run", "--workspace"], false),
     ("test-one", &["cargo", "nextest", "run"], true),
-  ])
+  ]);
+  commands
+    .get_mut("test-one")
+    .expect("the command was just inserted")
+    .deny = ["--config", "--manifest-path", "-Z"]
+    .iter()
+    .map(|flag| flag.to_string())
+    .collect();
+  commands
 }
 
 /// A spool with its directories already created, as the host makes it.
