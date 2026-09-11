@@ -50,7 +50,7 @@ pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<
   let mut opened: Option<OwnedFd> = None;
 
   for name in names {
-    if name.contains('/') || name == "." || name == ".." {
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
       continue;
     }
 
@@ -361,6 +361,25 @@ mod tests {
         .next()
         .is_none(),
       "nothing may land where the link points"
+    );
+  }
+
+  /// An empty name joins to the host home itself, which would make the whole
+  /// session home the destination — and `remove` would wipe it.
+  #[test]
+  fn ignores_an_empty_name() {
+    let temp = TempDir::new().expect("temp dir");
+    let host = host_home(&temp);
+    let session = temp.path().join("session-claude");
+    std::fs::create_dir_all(&session).expect("create session home");
+    std::fs::write(session.join("history.jsonl"), "session state").expect("write history");
+
+    let copied = share(&host, &session, &[String::new()]).expect("share should succeed");
+
+    assert_eq!(copied, HOST_CLAUDE_SETTINGS);
+    assert_eq!(
+      std::fs::read_to_string(session.join("history.jsonl")).expect("history should survive"),
+      "session state"
     );
   }
 
