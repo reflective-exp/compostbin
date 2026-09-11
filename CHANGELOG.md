@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.5.0
+
 - Add `[host] clipboard` to send the guest's `pbcopy`, `xclip`, `xsel` and
   `wl-copy` to the macOS clipboard. Needs a `compostbin build`.
 

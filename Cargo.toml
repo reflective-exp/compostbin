@@ -7,7 +7,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/reflective-dev/compostbin"
 rust-version = "1.98"
-version = "0.4.0"
+version = "0.5.0"
 
 [workspace.dependencies]
 apple-container = { path = "crates/apple-container" }
