@@ -117,11 +117,7 @@ impl Workspace {
   pub fn escaping_symlinks(&self, limit: usize) -> Escapes {
     let mut found = Escapes::default();
     let mut budget = limit;
-    let mut pending: VecDeque<PathBuf> = self
-      .entries
-      .iter()
-      .map(|entry| entry.host.clone())
-      .collect();
+    let mut pending: VecDeque<PathBuf> = self.outermost().into_iter().collect();
 
     while let Some(directory) = pending.pop_front() {
       let Ok(children) = std::fs::read_dir(&directory) else {
@@ -154,6 +150,23 @@ impl Workspace {
     }
 
     found
+  }
+
+  /// Each mounted tree once: an entry inside another, or repeating one, is
+  /// already covered by the walk of the outer tree.
+  fn outermost(&self) -> BTreeSet<PathBuf> {
+    self
+      .entries
+      .iter()
+      .map(|entry| &entry.host)
+      .filter(|host| {
+        !self
+          .entries
+          .iter()
+          .any(|other| other.host != **host && host.starts_with(&other.host))
+      })
+      .cloned()
+      .collect()
   }
 
   /// `<basename>`, or `<basename>-2`, `-3`, … if taken. A path with no basename
@@ -265,6 +278,29 @@ mod tests {
       workspace.escaping_symlinks(WALK_LIMIT),
       Escapes::default(),
       "a link back into the tree is fine, and descending it would never terminate"
+    );
+  }
+
+  /// The project directory usually sits inside a root, and a hand-edited
+  /// `[[paths]]` entry can too: its links are still one set of links.
+  #[test]
+  fn walks_a_nested_entry_once() {
+    let (_temp, root) = temp_root();
+    std::fs::create_dir_all(root.join("workspace/project")).expect("create project");
+    std::fs::create_dir(root.join("elsewhere")).expect("create elsewhere");
+    std::os::unix::fs::symlink(root.join("elsewhere"), root.join("workspace/project/vendor")).expect("create symlink");
+
+    let mut workspace = Workspace::new();
+    workspace.push(root.join("workspace/project"), None, Origin::Project, false);
+    workspace.push(root.join("workspace"), None, Origin::Root, false);
+    workspace.push(root.join("workspace/project"), None, Origin::Explicit, true);
+
+    assert_eq!(
+      workspace.escaping_symlinks(WALK_LIMIT).escapes,
+      [Escape {
+        link: root.join("workspace/project/vendor"),
+        target: root.join("elsewhere"),
+      }]
     );
   }
 
