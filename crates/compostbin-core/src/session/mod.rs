@@ -110,7 +110,7 @@ impl Session {
       .join(self.container_name())
   }
 
-  /// What the session may delete on exit: state that means nothing once the
+  /// What `stop` and `clean` may delete: state that means nothing once the
   /// container is gone. Not Claude's home — that holds the conversation
   /// `--continue` reattaches to.
   fn transient_state(&self) -> Vec<PathBuf> {
@@ -137,6 +137,18 @@ impl Session {
     }
 
     Ok(removed)
+  }
+
+  /// What `run` may delete when Claude exits. Narrower than `clean`: the
+  /// container is still running, with the managed settings mounted, and the next
+  /// `run` attaches to it without writing them again.
+  pub fn clean_after_exit(&self) -> Result<Vec<PathBuf>, PathError> {
+    let spool = self.host_spool();
+    if !spool.exists() {
+      return Ok(Vec::new());
+    }
+    std::fs::remove_dir_all(&spool).map_err(|source| PathError::new(&spool, source))?;
+    Ok(vec![spool])
   }
 
   pub fn container_name(&self) -> String {
@@ -933,6 +945,27 @@ source   = "~/.cargo/registry"
     assert!(
       session.claude_home().exists(),
       "the conversation `--continue` reattaches to must survive"
+    );
+  }
+
+  #[test]
+  fn cleaning_after_exit_keeps_what_the_running_container_mounts() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = Session::new(
+      toml::from_str(MANIFEST).expect("manifest should parse"),
+      PathResolver::new(base.join("project"), &base),
+      base.join("project"),
+    );
+    std::fs::create_dir_all(session.host_spool()).expect("create spool");
+    std::fs::create_dir_all(session.managed_settings()).expect("create managed settings");
+
+    let removed = session.clean_after_exit().expect("clean should succeed");
+
+    assert_eq!(removed, [session.host_spool()]);
+    assert!(
+      session.managed_settings().exists(),
+      "the container outlives the exit, and the next `run` attaches without rewriting the briefing"
     );
   }
 

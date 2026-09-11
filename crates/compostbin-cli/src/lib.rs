@@ -308,7 +308,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 
       // Best effort: a killed session leaves the spool behind, which is what
       // `compostbin clean` is for.
-      if let Err(error) = session.clean(false) {
+      if let Err(error) = session.clean_after_exit() {
         eprintln!("compostbin: could not clean up after the session: {error}");
       }
 
