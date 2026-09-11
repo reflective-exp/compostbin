@@ -11,7 +11,7 @@ pub mod record;
 pub mod settings;
 
 use crate::error::{PathError, SessionError};
-use crate::host::{GUEST_SPOOL_TARGET, Spool};
+use crate::host::{Forward, GUEST_SPOOL_TARGET, Spool};
 use crate::manifest::{Manifest, PathEntry, SESSIONS_DIR};
 use crate::session::briefing::{MANAGED_SETTINGS_DIR, MANAGED_SETTINGS_TARGET};
 use crate::session::record::{RECORD_FILE, Record};
@@ -19,6 +19,7 @@ use crate::workspace::paths::{PathResolver, root_containing};
 use crate::workspace::{Origin, Workspace};
 use apple_container::engine::Engine;
 use apple_container::model::{EnvVar, ExecSpec, Mount, RunSpec};
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 /// Where Claude's home is mounted inside the container, which runs as `claude`.
@@ -252,6 +253,18 @@ impl Session {
     } else {
       format!("compostbin/{}:latest", self.container_name())
     }
+  }
+
+  /// Each declared port, relayed from the container's `gateway` to the host's
+  /// loopback.
+  pub fn forwards(&self, gateway: IpAddr) -> Vec<Forward> {
+    self
+      .manifest
+      .host
+      .ports
+      .iter()
+      .map(|&port| Forward::to_loopback(gateway, port))
+      .collect()
   }
 
   pub fn run_spec(&self) -> RunSpec {

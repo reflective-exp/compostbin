@@ -1,6 +1,7 @@
 use crate::error::EngineError;
 use crate::model::{BuildSpec, ExecSpec, RunSpec};
 use crate::parse;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -16,6 +17,11 @@ pub trait Engine {
   /// Runs a command in a live container, inheriting our stdio so an interactive
   /// session keeps the real terminal.
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError>;
+
+  /// The vmnet gateway a container reaches the host at: the container's own,
+  /// so a non-default network gets its own bridge, else the default network's.
+  /// `None` when neither says.
+  fn gateway(&self, container: &str) -> Result<Option<IpAddr>, EngineError>;
 
   /// Every image the daemon holds, as `name:tag`. Fails when the daemon is not
   /// running — plugins are unavailable until `container system start`.
@@ -120,6 +126,23 @@ impl Engine for CliEngine {
     self.passthrough(spec.to_argv())
   }
 
+  fn gateway(&self, container: &str) -> Result<Option<IpAddr>, EngineError> {
+    let inspected = self.capture(vec!["inspect".to_string(), container.to_string()])?;
+
+    if let Some(gateway) = parse::container_gateway(&inspected) {
+      return Ok(Some(gateway));
+    }
+
+    let network = self.capture(
+      ["network", "inspect", "default"]
+        .iter()
+        .map(|word| word.to_string())
+        .collect(),
+    )?;
+
+    Ok(parse::network_gateway(&network))
+  }
+
   fn images(&self) -> Result<Vec<String>, EngineError> {
     let stdout = self.capture(
       ["image", "ls", "--quiet"]
@@ -215,6 +238,14 @@ mod tests {
     let engine = CliEngine::with_program("/bin/echo");
 
     assert_eq!(engine.version().expect("echo should succeed"), None);
+  }
+
+  /// Neither inspection parses, so both were asked and neither answered.
+  #[test]
+  fn finds_no_gateway_in_unexpected_output() {
+    let engine = CliEngine::with_program("/bin/echo");
+
+    assert_eq!(engine.gateway("cb-test").expect("echo should succeed"), None);
   }
 
   #[test]
