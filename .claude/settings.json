@@ -31,6 +31,11 @@
           },
           {
             "type": "command",
+            "command": "jq -r '.tool_input.command' | grep -qE 'compostbin-host +(test|test-one)\\b[^|;&]*(-p|--package)[ =]' && { echo 'BLOCKED: do not run tests per-crate. Run the whole suite: cargo nextest run. Per-crate runs miss the shared build cache and are SLOWER, not faster.' >&2; exit 2; } || exit 0",
+            "statusMessage": "Checking cargo test scope"
+          },
+          {
+            "type": "command",
             "command": "jq -r '.tool_input.command' | grep -qE 'git +(checkout|commit|rebase|stash)' && { echo 'BLOCKED: do not run destructive git operations. Let the human do that.' >&2; exit 2; } || exit 0",
             "statusMessage": "Checking destructive git ops"
           },
