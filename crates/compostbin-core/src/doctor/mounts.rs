@@ -150,7 +150,15 @@ pub fn root_breadth(session: &Session) -> Check {
     .workspace()
     .entries()
     .iter()
-    .filter_map(|entry| danger(&entry.host, session.resolver()).map(|danger| (entry, danger)))
+    .filter_map(|entry| {
+      // Judged as `add` judges it: `~/code/../.ssh`, or a link to `~/.ssh`, is
+      // still `~/.ssh`. A missing path has nothing to resolve, so is judged as written.
+      let judged = entry
+        .host
+        .canonicalize()
+        .unwrap_or_else(|_| entry.host.clone());
+      danger(&judged, session.resolver()).map(|danger| (entry, danger))
+    })
     .map(|(entry, danger)| match danger {
       Danger::Broad(_) => format!(
         "{} covers a whole account, so the container can read and rewrite all of it",

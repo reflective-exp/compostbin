@@ -1,5 +1,7 @@
 # Changelog
 
+- Harden against container escapes.
+
 ## v0.3.0
 
 - Add `[host] ports` to relay host ports into containers.

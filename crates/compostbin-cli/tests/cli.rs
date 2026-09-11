@@ -157,6 +157,10 @@ fn add_inside_a_root_records_no_path_entry() {
     .canonicalize()
     .expect("canonical temp")
     .join("workspace/inside");
+  let manifest_path = project_dir.join(".config/compostbin.toml");
+  let mut before = std::fs::read_to_string(&manifest_path).expect("manifest");
+  before.insert_str(0, "# the user's own comment\n");
+  std::fs::write(&manifest_path, &before).expect("write manifest");
 
   let output = compostbin(&project_dir, &["add", &inside.display().to_string()]);
 
@@ -170,11 +174,8 @@ fn add_inside_a_root_records_no_path_entry() {
     "stdout: {}",
     String::from_utf8_lossy(&output.stdout)
   );
-  let manifest = std::fs::read_to_string(project_dir.join(".config/compostbin.toml")).expect("manifest");
-  assert!(
-    !manifest.contains("[[paths]]"),
-    "an in-root path must not be recorded: {manifest}"
-  );
+  let manifest = std::fs::read_to_string(&manifest_path).expect("manifest");
+  assert_eq!(manifest, before, "an in-root path must leave the manifest untouched");
 }
 
 #[test]

@@ -353,6 +353,37 @@ mod tests {
   }
 
   #[test]
+  fn warns_about_an_indirect_credential_path() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+    std::fs::create_dir_all(base.join("workspace")).expect("create workspace");
+    std::fs::create_dir_all(base.join(".ssh")).expect("create .ssh");
+    std::os::unix::fs::symlink(base.join(".ssh"), base.join("keys")).expect("create symlink");
+    let mut session = session(&home, &quoted(&base, "workspace"));
+    for source in [base.join("workspace/../.ssh"), base.join("keys")] {
+      session.manifest.paths.push(crate::manifest::PathEntry {
+        readonly: true,
+        source: source.display().to_string(),
+        target: None,
+      });
+    }
+
+    let checks = diagnose(
+      &session,
+      &RecordingEngine::with_images(&["compostbin/base:latest"]),
+      &in_keychain(),
+      false,
+    );
+
+    let breadth = check(&checks, "mount breadth");
+    assert_eq!(breadth.status, Status::Warn);
+    assert!(
+      findings(breadth).contains("workspace/../.ssh") && findings(breadth).contains("keys"),
+      "both routes to .ssh should be named: {breadth:?}"
+    );
+  }
+
+  #[test]
   fn lists_every_command_the_guest_can_run_on_the_host() {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");

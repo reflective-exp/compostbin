@@ -92,7 +92,6 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 
       match session.add(&canonical, readonly) {
         AddOutcome::AlreadyMounted { root } => {
-          session.manifest.save(&manifest_path)?;
           println!("{} is already mounted under {}", canonical.display(), root.display());
           Ok(0)
         }

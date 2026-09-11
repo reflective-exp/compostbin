@@ -5,6 +5,12 @@
 //! expects to find in every container.
 
 use crate::error::PathError;
+use std::ffi::{CString, OsStr};
+use std::fs::{File, Metadata, OpenOptions};
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 /// The host user's own Claude home, the source of everything copied in here.
@@ -41,6 +47,7 @@ pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<
   }
 
   let mut copied = Vec::new();
+  let mut opened: Option<OwnedFd> = None;
 
   for name in names {
     if name.contains('/') || name == "." || name == ".." {
@@ -54,16 +61,27 @@ pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<
       continue;
     };
 
-    std::fs::create_dir_all(session_home).map_err(|error| PathError::new(session_home, error))?;
+    if !metadata.is_dir() && !metadata.is_file() {
+      continue;
+    }
+
+    if opened.is_none() {
+      std::fs::create_dir_all(session_home).map_err(|error| PathError::new(session_home, error))?;
+      opened = Some(open_directory(session_home).map_err(|error| PathError::new(session_home, error))?);
+    }
+    let home = opened.as_ref().expect("opened above");
     let destination = session_home.join(&name);
 
+    // The guest can write here while this runs, and a symlink it plants would
+    // carry a path-based copy out onto the host. So everything below is created
+    // through `home`'s descriptor, exclusively and without following links: a
+    // link planted at any moment ends the copy with an error instead.
+    remove(&destination)?;
+
     if metadata.is_dir() {
-      remove(&destination)?;
-      copy_tree(&source, &destination, MAX_DEPTH)?;
-    } else if metadata.is_file() {
-      std::fs::copy(&source, &destination).map_err(|error| PathError::new(&destination, error))?;
+      copy_tree(&source, home, OsStr::new(&name), &destination, MAX_DEPTH)?;
     } else {
-      continue;
+      copy_file(&source, &metadata, home, OsStr::new(&name), &destination)?;
     }
 
     copied.push(name);
@@ -87,31 +105,112 @@ fn remove(path: &Path) -> Result<(), PathError> {
   removed.map_err(|error| PathError::new(path, error))
 }
 
-fn copy_tree(source: &Path, destination: &Path, depth: usize) -> Result<(), PathError> {
+/// Creates `name` inside `parent`. `destination` only names it in errors: a path
+/// is resolved afresh on every call, and the guest can rearrange it in between.
+fn copy_tree(source: &Path, parent: &OwnedFd, name: &OsStr, destination: &Path, depth: usize) -> Result<(), PathError> {
   if depth == 0 {
     return Ok(());
   }
 
-  std::fs::create_dir_all(destination).map_err(|error| PathError::new(destination, error))?;
+  let directory = make_directory(parent, name).map_err(|error| PathError::new(destination, error))?;
 
   let entries = std::fs::read_dir(source).map_err(|error| PathError::new(source, error))?;
   for entry in entries {
     let entry = entry.map_err(|error| PathError::new(source, error))?;
     let child = entry.path();
-    let target = destination.join(entry.file_name());
+    let name = entry.file_name();
+    let target = destination.join(&name);
 
     let Ok(metadata) = std::fs::metadata(&child) else {
       continue;
     };
 
     if metadata.is_dir() {
-      copy_tree(&child, &target, depth - 1)?;
+      copy_tree(&child, &directory, &name, &target, depth - 1)?;
     } else if metadata.is_file() {
-      std::fs::copy(&child, &target).map_err(|error| PathError::new(&target, error))?;
+      copy_file(&child, &metadata, &directory, &name, &target)?;
     }
   }
 
   Ok(())
+}
+
+fn copy_file(
+  source: &Path,
+  metadata: &Metadata,
+  parent: &OwnedFd,
+  name: &OsStr,
+  destination: &Path,
+) -> Result<(), PathError> {
+  let mut from = File::open(source).map_err(|error| PathError::new(source, error))?;
+  let mut to =
+    create_file(parent, name, metadata.permissions().mode()).map_err(|error| PathError::new(destination, error))?;
+  io::copy(&mut from, &mut to).map_err(|error| PathError::new(destination, error))?;
+  Ok(())
+}
+
+/// The session home itself, refused if it is a link. Everything `share` writes
+/// is created relative to this descriptor.
+fn open_directory(path: &Path) -> io::Result<OwnedFd> {
+  let file = OpenOptions::new()
+    .read(true)
+    .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+    .open(path)?;
+  Ok(file.into())
+}
+
+/// Creates `name` in `parent` and opens it. Fails, rather than following, when
+/// something is already there or is swapped for a link between the two calls.
+fn make_directory(parent: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
+  let name = c_name(name)?;
+
+  // SAFETY: `parent` is an open descriptor and `name` is NUL-terminated.
+  if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o777) } < 0 {
+    return Err(io::Error::last_os_error());
+  }
+
+  // SAFETY: as above.
+  let opened = unsafe {
+    libc::openat(
+      parent.as_raw_fd(),
+      name.as_ptr(),
+      libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+    )
+  };
+
+  if opened < 0 {
+    return Err(io::Error::last_os_error());
+  }
+
+  // SAFETY: freshly opened and owned by us alone.
+  Ok(unsafe { OwnedFd::from_raw_fd(opened) })
+}
+
+/// A new file in `parent`. `O_EXCL` refuses whatever is already at `name`, a
+/// link included, so nothing is ever written through one.
+fn create_file(parent: &OwnedFd, name: &OsStr, mode: u32) -> io::Result<File> {
+  let name = c_name(name)?;
+
+  // SAFETY: `parent` is an open descriptor and `name` is NUL-terminated.
+  let opened = unsafe {
+    libc::openat(
+      parent.as_raw_fd(),
+      name.as_ptr(),
+      libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+      (mode & 0o7777) as libc::c_uint,
+    )
+  };
+
+  if opened < 0 {
+    return Err(io::Error::last_os_error());
+  }
+
+  // SAFETY: freshly opened and owned by us alone.
+  Ok(File::from(unsafe { OwnedFd::from_raw_fd(opened) }))
+}
+
+fn c_name(name: &OsStr) -> io::Result<CString> {
+  CString::new(name.as_bytes()).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
 }
 
 #[cfg(test)]
@@ -173,6 +272,95 @@ mod tests {
     assert_eq!(
       std::fs::read_to_string(session.join("CLAUDE.md")).expect("CLAUDE.md should exist"),
       "edited on the host"
+    );
+  }
+
+  #[test]
+  fn replaces_a_planted_symlink() {
+    let temp = TempDir::new().expect("temp dir");
+    let host = host_home(&temp);
+    let session = temp.path().join("session-claude");
+    let victim = temp.path().join("zshrc");
+    std::fs::create_dir_all(&session).expect("create session home");
+    std::fs::write(&victim, "the host's own file").expect("write victim");
+    std::os::unix::fs::symlink(&victim, session.join("CLAUDE.md")).expect("plant symlink");
+
+    share(&host, &session, &[]).expect("share should succeed");
+
+    assert_eq!(
+      std::fs::read_to_string(&victim).expect("victim should exist"),
+      "the host's own file",
+      "a copy must never land outside the session home"
+    );
+    assert!(
+      !std::fs::symlink_metadata(session.join("CLAUDE.md"))
+        .expect("CLAUDE.md should exist")
+        .file_type()
+        .is_symlink()
+    );
+    assert_eq!(
+      std::fs::read_to_string(session.join("CLAUDE.md")).expect("CLAUDE.md should exist"),
+      "house style"
+    );
+  }
+
+  /// What a guest racing `share` would do: plant a link after `remove` has
+  /// cleared the name.
+  #[test]
+  fn refuses_a_file_link_planted_mid_copy() {
+    let temp = TempDir::new().expect("temp dir");
+    let host = host_home(&temp);
+    let session = temp.path().join("session-claude");
+    let victim = temp.path().join("zshrc");
+    std::fs::create_dir_all(&session).expect("create session home");
+    std::fs::write(&victim, "the host's own file").expect("write victim");
+    std::os::unix::fs::symlink(&victim, session.join("CLAUDE.md")).expect("plant symlink");
+    let home = open_directory(&session).expect("open session home");
+    let source = host.join("CLAUDE.md");
+    let metadata = std::fs::metadata(&source).expect("metadata");
+
+    let copied = copy_file(
+      &source,
+      &metadata,
+      &home,
+      OsStr::new("CLAUDE.md"),
+      &session.join("CLAUDE.md"),
+    );
+
+    assert!(copied.is_err(), "a link in the way must stop the copy");
+    assert_eq!(
+      std::fs::read_to_string(&victim).expect("victim should exist"),
+      "the host's own file"
+    );
+  }
+
+  #[test]
+  fn refuses_a_directory_link_planted_mid_copy() {
+    let temp = TempDir::new().expect("temp dir");
+    let host = host_home(&temp);
+    let session = temp.path().join("session-claude");
+    let victim = temp.path().join("elsewhere");
+    std::fs::create_dir_all(&session).expect("create session home");
+    std::fs::create_dir_all(&victim).expect("create victim");
+    std::fs::write(host.join("skills").join("SKILL.md"), "how to deploy").expect("write skill");
+    std::os::unix::fs::symlink(&victim, session.join("skills")).expect("plant symlink");
+    let home = open_directory(&session).expect("open session home");
+
+    let copied = copy_tree(
+      &host.join("skills"),
+      &home,
+      OsStr::new("skills"),
+      &session.join("skills"),
+      MAX_DEPTH,
+    );
+
+    assert!(copied.is_err(), "a link in the way must stop the copy");
+    assert!(
+      std::fs::read_dir(&victim)
+        .expect("victim should exist")
+        .next()
+        .is_none(),
+      "nothing may land where the link points"
     );
   }
 
