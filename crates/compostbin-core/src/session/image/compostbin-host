@@ -28,6 +28,7 @@ id="$(date +%s)-$$-$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
 responses="$spool/responses"
 input="$responses/$id.in"
 status="$responses/$id.status"
+tty="$responses/$id.tty"
 
 # Emits one stream's chunks in sequence order, removing each once written. The
 # glob sorts lexicographically, hence fixed-width sequence numbers.
@@ -51,6 +52,12 @@ drain() {
 exec 3<&0
 ( cat <&3 >> "$input" 2>/dev/null || true; : > "$input.eof" ) &
 forwarder=$!
+
+# A `tty = true` command gets a terminal only if we have one to show it on;
+# output captured by a pipe or a file gets plain pipes instead.
+if [ -t 1 ]; then
+  : > "$tty"
+fi
 
 # One field per line, command first. Nothing quotes or escapes, so there is no
 # quoting bug to have; the host rejects a newline in an argument.
@@ -78,5 +85,5 @@ done
 
 code=$(cat "$status")
 kill "$forwarder" 2>/dev/null || true
-rm -f "$input" "$input.eof" "$status"
+rm -f "$input" "$input.eof" "$status" "$tty"
 exit "$code"

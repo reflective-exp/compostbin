@@ -57,5 +57,9 @@ const CHUNK_SIZE: usize = 64 * 1024;
 /// A file has no EOF of its own, so the guest marks the end with `<id>.in.eof`.
 pub const INPUT_SUFFIX: &str = ".in";
 pub const INPUT_EOF_SUFFIX: &str = ".in.eof";
+/// Written by the guest before its request when its own stdout is a terminal. A
+/// `tty = true` command only gets a pty when this is present: a caller capturing
+/// output would otherwise get colour codes and progress redraws meant for a screen.
+pub const TTY_SUFFIX: &str = ".tty";
 /// Written last, by rename: its appearance means the request is complete.
 pub const STATUS_SUFFIX: &str = ".status";

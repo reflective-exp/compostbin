@@ -4,6 +4,8 @@
 - Add `deny` to `[host.commands.*]`, replacing the built-in cargo deny list
   (`--config`, `--manifest-path`, `-Z`). Nothing is denied by default.
 - Avoid redundant symlink walks for nested workspace entries.
+- Run `tty = true` host commands under a pty only when the caller's stdout is a
+  terminal, so captured output has no escape codes.
 
 ## v0.3.0
 

@@ -10,7 +10,7 @@ use crate::host::request::{Request, resolve};
 use crate::host::spool::Spool;
 use crate::host::{
   CHUNK_SIZE, ERROR_STREAM, INPUT_EOF_SUFFIX, INPUT_SUFFIX, OUTPUT_STREAM, PARTIAL_SUFFIX, REJECTED_EXIT_CODE,
-  REQUEST_SUFFIX, SEQUENCE_WIDTH, SIGNALLED_EXIT_CODE, STATUS_SUFFIX,
+  REQUEST_SUFFIX, SEQUENCE_WIDTH, SIGNALLED_EXIT_CODE, STATUS_SUFFIX, TTY_SUFFIX,
 };
 use crate::manifest::HostCommand;
 use std::collections::BTreeMap;
@@ -82,9 +82,11 @@ fn run_claimed(
   let argv = match Request::parse(&text).and_then(|request| resolve(commands, &request).map(|argv| (argv, request))) {
     Ok((argv, request)) => {
       // Separate, so `resolve` decides what may run and not how it is wired up.
+      // Both sides must want a terminal: the command, and a caller that has one.
       let tty = commands
         .get(&request.command)
-        .is_some_and(|command| command.tty);
+        .is_some_and(|command| command.tty)
+        && spool.responses().join(format!("{id}{TTY_SUFFIX}")).exists();
       (argv, tty)
     }
     Err(refusal) => {
@@ -356,6 +358,11 @@ mod tests {
       .collect()
   }
 
+  /// What the guest client does when its own stdout is a terminal.
+  fn caller_has_terminal(spool: &Spool, id: &str) {
+    std::fs::write(spool.responses().join(format!("{id}{TTY_SUFFIX}")), "").expect("write tty marker");
+  }
+
   #[derive(Debug, PartialEq)]
   struct Response {
     errors: String,
@@ -497,6 +504,7 @@ mod tests {
     let (_temp, spool) = spool();
     let allowlist = terminal_command("interactive", &["sh", "-c", "test -t 1 && test -t 0"]);
 
+    caller_has_terminal(&spool, "0001");
     spool
       .submit("0001", &Request::new("interactive", Vec::new()))
       .expect("submit");
@@ -505,6 +513,28 @@ mod tests {
       serve_one(&spool, &allowlist, Path::new("."), "0001").status,
       0,
       "both the command's input and its output should be the terminal"
+    );
+  }
+
+  /// A caller capturing output — a pipe, a file, an agent's tool call — must get
+  /// plain output, not colour codes and progress redraws meant for a screen.
+  #[test]
+  fn gives_pipes_to_a_terminal_command_whose_caller_has_none() {
+    let (_temp, spool) = spool();
+    let allowlist = terminal_command("interactive", &["sh", "-c", "echo out; echo err >&2; test -t 1"]);
+
+    spool
+      .submit("0001", &Request::new("interactive", Vec::new()))
+      .expect("submit");
+
+    assert_eq!(
+      serve_one(&spool, &allowlist, Path::new("."), "0001"),
+      Response {
+        errors: "err\n".to_string(),
+        output: "out\n".to_string(),
+        status: 1,
+      },
+      "no terminal, and the streams kept apart"
     );
   }
 
@@ -528,6 +558,7 @@ mod tests {
     let (_temp, spool) = spool();
     let allowlist = terminal_command("both", &["sh", "-c", "printf out; printf err >&2"]);
 
+    caller_has_terminal(&spool, "0001");
     spool
       .submit("0001", &Request::new("both", Vec::new()))
       .expect("submit");
@@ -559,6 +590,7 @@ mod tests {
 
     std::fs::write(spool.responses().join(format!("0001{INPUT_SUFFIX}")), "hello\n").expect("write input");
     std::fs::write(spool.responses().join(format!("0001{INPUT_EOF_SUFFIX}")), "").expect("mark end");
+    caller_has_terminal(&spool, "0001");
     spool
       .submit("0001", &Request::new("echo-line", Vec::new()))
       .expect("submit");

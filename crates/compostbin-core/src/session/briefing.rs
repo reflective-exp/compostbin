@@ -88,7 +88,7 @@ pub fn briefing(manifest: &Manifest) -> String {
       notes.push("takes further arguments");
     }
     if command.tty {
-      notes.push("runs under a tty, so stderr arrives merged into stdout");
+      notes.push("runs under a tty when your stdout is a terminal, merging stderr into stdout");
     }
     let notes = if notes.is_empty() {
       String::new()
@@ -183,7 +183,7 @@ mod tests {
       briefing.contains("takes further arguments"),
       "a guest told nothing appends arguments to a command that refuses them: {briefing}"
     );
-    assert!(briefing.contains("merged into stdout"), "{briefing}");
+    assert!(briefing.contains("when your stdout is a terminal"), "{briefing}");
   }
 
   /// The default manifest declares no commands, and telling a session to use a
