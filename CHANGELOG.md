@@ -1,5 +1,7 @@
 # Changelog
 
+## v0.3.0
+
 - Add `[host] ports` to relay host ports into containers.
 
 ## v0.2.0
