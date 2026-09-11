@@ -310,6 +310,30 @@ mod tests {
   }
 
   #[test]
+  fn ignores_the_keychain_when_seeding_is_off() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+    let mut session = session(&home, &quoted(&base, "workspace"));
+    session.manifest.claude.seed_from_keychain = false;
+
+    let checks = diagnose(
+      &session,
+      &RecordingEngine::with_images(&["compostbin/base:latest"]),
+      &in_keychain(),
+      false,
+    );
+
+    assert_eq!(check(&checks, "credentials").status, Status::Fail);
+    assert!(
+      check(&checks, "credentials")
+        .detail
+        .contains("seed_from_keychain"),
+      "detail should name the setting: {:?}",
+      check(&checks, "credentials")
+    );
+  }
+
+  #[test]
   fn accepts_a_token_already_seeded_into_claude_home() {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");

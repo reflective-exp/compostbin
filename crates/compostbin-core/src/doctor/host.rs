@@ -49,6 +49,18 @@ pub fn credentials(session: &Session, source: &impl CredentialSource, api_key_pr
     return check("credentials", Status::Ok, seeded.display().to_string());
   }
 
+  // A Keychain token only counts if `run` will copy it in.
+  if !session.manifest.claude.seed_from_keychain {
+    if api_key_present {
+      return check("credentials", Status::Ok, "ANTHROPIC_API_KEY is set");
+    }
+    return check(
+      "credentials",
+      Status::Fail,
+      "seed_from_keychain is off and no ANTHROPIC_API_KEY; the session cannot authenticate",
+    );
+  }
+
   match source.read() {
     Ok(Some(_)) => check("credentials", Status::Ok, format!("{KEYCHAIN_SERVICE} in the Keychain")),
     Ok(None) | Err(_) if api_key_present => check("credentials", Status::Ok, "ANTHROPIC_API_KEY is set"),
