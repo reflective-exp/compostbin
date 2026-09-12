@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Install native claude into `/usr/local/bin/claude` and remove node from the
+  base container.
+
 ## v0.5.0
 
 - Add `[host] clipboard` to send the guest's `pbcopy`, `xclip`, `xsel` and
