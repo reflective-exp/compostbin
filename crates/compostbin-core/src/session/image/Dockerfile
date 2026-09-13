@@ -15,8 +15,8 @@ RUN apt-get update \
       unzip \
  && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL https://claude.ai/install.sh | bash
-RUN mv /root/.local/share/claude/versions/* /usr/local/bin/claude
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+ && mv /root/.local/share/claude/versions/* /usr/local/bin/claude
 
 # The guest half of the host-command channel. It speaks the spool protocol in
 # compostbin-core's `host` module, and is a shell script because the container is
