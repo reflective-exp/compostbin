@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.6.0
+
 - Relay `[host] ports` through a unix socket per port instead of the vmnet
   gateway, so a forwarded port reaches the session's container and nothing else.
   Needs a `compostbin build`.
