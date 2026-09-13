@@ -4,6 +4,7 @@
 
 - Install native claude into `/usr/local/bin/claude` and remove node from the
   base container.
+- Remove build-essential from base docker file.
 
 ## v0.5.0
 
