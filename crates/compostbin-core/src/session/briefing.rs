@@ -61,6 +61,7 @@ pub fn briefing(manifest: &Manifest) -> String {
        at all. Anything that has to run, runs in the guest — or gets a [host.commands] \
        entry in {MANIFEST_RELATIVE_PATH}.\n"
     ));
+    text.push_str(&ports(manifest));
 
     return text;
   }
@@ -110,7 +111,33 @@ pub fn briefing(manifest: &Manifest) -> String {
     ));
   }
 
+  text.push_str(&ports(manifest));
+
   text
+}
+
+/// The host services this session can reach, which a guest would otherwise have
+/// no way to know are there: nothing in the container says why `localhost:7001`
+/// answers when nothing in the container is listening on it.
+fn ports(manifest: &Manifest) -> String {
+  if !manifest.host.has_ports() {
+    return String::new();
+  }
+
+  let listed: Vec<String> = manifest
+    .host
+    .ports
+    .iter()
+    .map(|port| format!("localhost:{port}"))
+    .collect();
+
+  format!(
+    "\nSome of the host's own services answer here, at the same address they have on \
+     the host: {}. They are the host's, not this container's, and they are fixed when \
+     the container is created — changing [host] ports in {MANIFEST_RELATIVE_PATH} takes \
+     a restart.\n",
+    listed.join(", ")
+  )
 }
 
 /// Writes both files into `dir`, creating it. Called before the container

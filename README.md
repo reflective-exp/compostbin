@@ -225,8 +225,16 @@ Host services on fixed ports, such as MCP servers, reach the guest at its own
 ports = [7001, 7002]
 ```
 
-compostbin relays each port over the vmnet gateway, so **every container on
-this Mac can reach it while the session runs**. Changing ports takes a restart.
+Each port is relayed through a unix socket in the session's own directory, which
+`container` carries into this container and no other: nothing listens on a
+network address, and **no other container on this Mac can reach a forwarded
+port**. Changing ports takes a restart.
+
+The sockets are held by a small relay process that starts with the container and
+ends with it, rather than by whoever is attached; leaving a session and
+starting another one keeps the ports up. `compostbin stop` ends it; if it is
+killed some other way, `doctor` says so, and the ports come back with a
+`stop` and a `run`.
 
 ### Clipboard
 

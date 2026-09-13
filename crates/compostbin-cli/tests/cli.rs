@@ -76,7 +76,7 @@ fn ls_shows_where_each_path_lands_in_the_container() {
 }
 
 #[test]
-fn clean_removes_the_spool_and_keeps_the_conversation() {
+fn clean_empties_the_spool_and_keeps_the_conversation() {
   let temp = TempDir::new().expect("temp dir");
   let project_dir = temp
     .path()
@@ -89,6 +89,7 @@ fn clean_removes_the_spool_and_keeps_the_conversation() {
   let home = std::env::var("HOME").expect("HOME");
   let state = std::path::Path::new(&home).join(".local/state/compostbin/sessions/compostbin-my-project");
   std::fs::create_dir_all(state.join("host/requests")).expect("create spool");
+  std::fs::write(state.join("host/requests/0001.request"), "run\n").expect("write a request");
   std::fs::create_dir_all(state.join("claude-home")).expect("create claude home");
 
   let output = compostbin(&project_dir, &["clean"]);
@@ -98,7 +99,14 @@ fn clean_removes_the_spool_and_keeps_the_conversation() {
     "clean failed: {}",
     String::from_utf8_lossy(&output.stderr)
   );
-  assert!(!state.join("host").exists(), "the spool is transient");
+  assert!(
+    !state.join("host/requests/0001.request").exists(),
+    "what was in flight is transient"
+  );
+  assert!(
+    state.join("host/requests").exists(),
+    "the spool is a mount source: a container holding it cannot be given a new directory"
+  );
   assert!(
     state.join("claude-home").exists(),
     "`clean` must not discard the conversation `--continue` resumes"

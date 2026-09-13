@@ -41,6 +41,10 @@ pub enum Command {
   Init,
   /// List the session's mounts
   Ls,
+  /// Hold this session's host-port sockets for as long as its container lives.
+  /// Started by `run`; it outlives the terminal on purpose, so that leaving and
+  /// re-entering a session does not take its ports down.
+  PortRelay,
   /// Start the session and attach Claude
   Run {
     /// Arguments passed through to `claude`
@@ -101,6 +105,7 @@ mod tests {
     assert_eq!(parse(&["compostbin", "host-agent"]), Command::HostAgent);
     assert_eq!(parse(&["compostbin", "init"]), Command::Init);
     assert_eq!(parse(&["compostbin", "ls"]), Command::Ls);
+    assert_eq!(parse(&["compostbin", "port-relay"]), Command::PortRelay);
     assert_eq!(parse(&["compostbin", "shell"]), Command::Shell);
     assert_eq!(parse(&["compostbin", "stop"]), Command::Stop);
   }

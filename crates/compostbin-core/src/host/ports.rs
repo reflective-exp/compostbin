@@ -1,34 +1,79 @@
-//! Relaying declared host ports to the guest over vmnet (D10).
+//! Relaying declared host ports to the guest, one unix socket per port (D11).
 //!
-//! The guest's own relay turns `localhost:<port>` into `<gateway>:<port>`; this
-//! is the other half, turning `<gateway>:<port>` into the host's `127.0.0.1`.
-//! The gateway is on the shared vmnet bridge, so every container can reach what
-//! is listening here — the cost D10 accepts.
+//! The guest's own relay turns `localhost:<port>` into a connection to
+//! `/run/compostbin/ports/<port>.sock`; this is the other half, accepting there
+//! and connecting to the host's `127.0.0.1:<port>`. `container` relays the
+//! socket into the guest itself — a socket passed as `--volume` becomes a vsock
+//! relay rather than a mount — so nothing listens on a network address and no
+//! other container can reach a forwarded port.
 
 use crate::host::POLL_INTERVAL;
+use apple_container::engine::Engine;
+use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Loopback refuses at once; this only bounds a service that accepts nothing.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const BUFFER_SIZE: usize = 16 * 1024;
+/// Asking the daemon what is running costs a subprocess, so this is far slower
+/// than the relay's own poll. Nothing waits on it: it only decides when a relay
+/// nobody needs any more gives up.
+const WATCH_INTERVAL: Duration = Duration::from_secs(2);
+/// How long the relay waits for the container to be created after it binds.
+pub const APPEAR_GRACE: Duration = Duration::from_secs(120);
+/// How long a container may be absent before the relay takes it as gone for
+/// good rather than restarting.
+pub const VANISH_GRACE: Duration = Duration::from_secs(30);
 
-/// One declared port: where the guest connects, and where the service is.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// The guest end of the relay is `root:root` with this socket's mode copied
+/// verbatim, and the session runs as `claude`: anything short of
+/// world-accessible is refused inside the container. The session directory is
+/// what confines these, not the socket mode.
+pub const SOCKET_MODE: u32 = 0o666;
+pub const SOCKET_SUFFIX: &str = ".sock";
+
+/// One declared port: the socket the guest reaches through, and the host
+/// service behind it.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Forward {
-  pub listen: SocketAddr,
+  pub listen: PathBuf,
   pub upstream: SocketAddr,
 }
 
 impl Forward {
-  /// The same port on both sides, which is all the manifest can say.
-  pub fn to_loopback(gateway: IpAddr, port: u16) -> Self {
+  /// The same port on both sides, which is all the manifest can say. The socket
+  /// is named after the port so the guest can find it without being told.
+  pub fn to_loopback(directory: &Path, port: u16) -> Self {
     Self {
-      listen: SocketAddr::new(gateway, port),
+      listen: directory.join(format!("{port}{SOCKET_SUFFIX}")),
       upstream: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
     }
+  }
+
+  pub fn port(&self) -> u16 {
+    self.upstream.port()
+  }
+}
+
+/// A bound listener. It must outlive the container created with it: the relay
+/// is attached to the inode that existed at creation, so a socket unlinked and
+/// rebound at the same path leaves the guest with a dead socket that only
+/// recreating the container heals.
+#[derive(Debug)]
+pub struct Bound {
+  forward: Forward,
+  listener: UnixListener,
+}
+
+impl Bound {
+  pub fn forward(&self) -> &Forward {
+    &self.forward
   }
 }
 
@@ -36,40 +81,104 @@ impl Forward {
 /// the terminal.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PortEvent {
-  /// Bound, whether at once or by taking over from another session.
+  /// Bound, and so ready to be mounted into a container.
   Listening(Forward),
-  /// Another session holds the address and, the bridge being shared, already
-  /// serves this one too. Retried every poll, so its exit hands the port over.
-  Deferred(Forward),
-  /// Any other bind failure. Reported once, and retried like a deferral.
-  Unbindable(Forward, String),
   /// Nothing answers upstream. Once per run of failures, since a client
   /// retrying against a server that is not up yet would flood the terminal.
   UpstreamRefused(Forward, String),
 }
 
-/// Relays every forward until `stop` is set, then returns once every
+/// Whether something is already accepting on this socket — another agent
+/// serving the same session. A refused connection means a socket left behind by
+/// one that died, and a missing one means nothing has bound it yet; neither is
+/// anybody's.
+pub fn served(forward: &Forward) -> bool {
+  UnixStream::connect(&forward.listen).is_ok()
+}
+
+/// Binds every forward, reporting each as it comes up. All or nothing: a
+/// container started with only some of its sockets would forward only some of
+/// its ports, and no restart short of recreating it would fix that.
+pub fn bind_all(forwards: &[Forward], report: &(dyn Fn(PortEvent) + Sync)) -> io::Result<Vec<Bound>> {
+  let mut bound = Vec::with_capacity(forwards.len());
+
+  for forward in forwards {
+    bound.push(bind(forward)?);
+    report(PortEvent::Listening(forward.clone()));
+  }
+
+  Ok(bound)
+}
+
+/// Binds one forward, replacing whatever sits at the path first — a socket left
+/// by a session that died, or a symlink where the mount source belongs, which
+/// would take the container down at start rather than degrade.
+fn bind(forward: &Forward) -> io::Result<Bound> {
+  if let Some(parent) = forward.listen.parent() {
+    fs::create_dir_all(parent)?;
+  }
+
+  match fs::remove_file(&forward.listen) {
+    Ok(()) => {}
+    Err(error) if error.kind() == ErrorKind::NotFound => {}
+    Err(error) => return Err(error),
+  }
+
+  let listener = UnixListener::bind(&forward.listen)?;
+  listener.set_nonblocking(true)?;
+  fs::set_permissions(&forward.listen, fs::Permissions::from_mode(SOCKET_MODE))?;
+
+  Ok(Bound {
+    forward: forward.clone(),
+    listener,
+  })
+}
+
+/// Sets `stop` when the container these sockets serve is gone for good, so the
+/// relay outlives the `run` that started it and nothing else.
+///
+/// Two graces, because neither edge is instant: the container does not exist
+/// yet when the relay binds — it cannot, the sockets have to be there first —
+/// and `add --restart` takes it away and puts it back, which must not be read
+/// as the session ending.
+pub fn watch(container: &str, engine: &impl Engine, stop: &AtomicBool, appear: Duration, vanish: Duration) {
+  let mut appeared = false;
+  let mut waiting_since = Instant::now();
+
+  while !stop.load(Ordering::Relaxed) {
+    let running = engine
+      .containers()
+      .map(|containers| containers.iter().any(|name| name == container))
+      .unwrap_or(true);
+
+    if running {
+      appeared = true;
+      waiting_since = Instant::now();
+    } else {
+      let grace = if appeared { vanish } else { appear };
+
+      if waiting_since.elapsed() > grace {
+        stop.store(true, Ordering::Relaxed);
+        return;
+      }
+    }
+
+    std::thread::sleep(WATCH_INTERVAL);
+  }
+}
+
+/// Relays every bound socket until `stop` is set, then returns once every
 /// connection has closed.
-pub fn relay(forwards: &[Forward], stop: &AtomicBool, report: &(dyn Fn(PortEvent) + Sync)) {
-  // Outside the scope, so connection threads can borrow them while `slots`
-  // stays the polling loop's alone.
-  let refused: Vec<AtomicBool> = forwards.iter().map(|_| AtomicBool::new(false)).collect();
-  let mut slots: Vec<Slot> = forwards.iter().copied().map(Slot::new).collect();
+pub fn relay(bound: &[Bound], stop: &AtomicBool, report: &(dyn Fn(PortEvent) + Sync)) {
+  // Outside the scope, so connection threads can borrow them.
+  let refused: Vec<AtomicBool> = bound.iter().map(|_| AtomicBool::new(false)).collect();
 
   std::thread::scope(|scope| {
     while !stop.load(Ordering::Relaxed) {
-      for (slot, refused) in slots.iter_mut().zip(&refused) {
-        if slot.listener.is_none() {
-          slot.bind(report);
-        }
-
-        let Some(listener) = &slot.listener else {
-          continue;
-        };
-
+      for (bound, refused) in bound.iter().zip(&refused) {
         // Every connection waiting, not one per poll.
-        while let Ok((guest, _)) = listener.accept() {
-          let forward = slot.forward;
+        while let Ok((guest, _)) = bound.listener.accept() {
+          let forward = bound.forward.clone();
           scope.spawn(move || connect(guest, forward, refused, stop, report));
         }
       }
@@ -79,63 +188,15 @@ pub fn relay(forwards: &[Forward], stop: &AtomicBool, report: &(dyn Fn(PortEvent
   });
 }
 
-/// A forward's listener once it has one, and what has already been said about
-/// it, so a retry every poll is not a report every poll.
-struct Slot {
-  forward: Forward,
-  listener: Option<TcpListener>,
-  deferred: bool,
-  unbindable: bool,
-}
-
-impl Slot {
-  fn new(forward: Forward) -> Self {
-    Self {
-      forward,
-      listener: None,
-      deferred: false,
-      unbindable: false,
-    }
-  }
-
-  /// `std` sets `SO_REUSEADDR`, so only an exact-address collision fails here —
-  /// a wildcard service on the same port is shadowed rather than refused (F18).
-  fn bind(&mut self, report: &(dyn Fn(PortEvent) + Sync)) {
-    let bound = TcpListener::bind(self.forward.listen).and_then(|listener| {
-      listener.set_nonblocking(true)?;
-      Ok(listener)
-    });
-
-    match bound {
-      Ok(listener) => {
-        self.listener = Some(listener);
-        report(PortEvent::Listening(self.forward));
-      }
-      Err(error) if error.kind() == ErrorKind::AddrInUse => {
-        if !self.deferred {
-          self.deferred = true;
-          report(PortEvent::Deferred(self.forward));
-        }
-      }
-      Err(error) => {
-        if !self.unbindable {
-          self.unbindable = true;
-          report(PortEvent::Unbindable(self.forward, error.to_string()));
-        }
-      }
-    }
-  }
-}
-
 /// One guest connection, relayed until both directions have ended.
 fn connect(
-  guest: TcpStream,
+  guest: UnixStream,
   forward: Forward,
   refused: &AtomicBool,
   stop: &AtomicBool,
   report: &(dyn Fn(PortEvent) + Sync),
 ) {
-  if configure(&guest).is_err() {
+  if guest.configure().is_err() {
     return;
   }
 
@@ -153,7 +214,7 @@ fn connect(
     }
   };
 
-  if configure(&upstream).is_err() {
+  if upstream.configure().is_err() {
     return;
   }
 
@@ -163,22 +224,66 @@ fn connect(
   });
 }
 
-/// Blocking, since accepted sockets inherit the listener's non-blocking mode on
-/// macOS, but never for longer than a poll: every wait re-checks `stop`.
-fn configure(stream: &TcpStream) -> io::Result<()> {
-  stream.set_nonblocking(false)?;
-  stream.set_read_timeout(Some(POLL_INTERVAL))?;
-  stream.set_write_timeout(Some(POLL_INTERVAL))
+/// The two ends of a relayed connection: a unix socket to the guest, a TCP
+/// stream to the service. Only four operations differ between them, and the
+/// copying below is the same either way.
+trait Stream: Sync {
+  fn read_some(&self, buffer: &mut [u8]) -> io::Result<usize>;
+  fn write_some(&self, data: &[u8]) -> io::Result<usize>;
+  fn shutdown_write(&self) -> io::Result<()>;
+
+  /// Blocking, since accepted sockets inherit the listener's non-blocking mode
+  /// on macOS, but never for longer than a poll: every wait re-checks `stop`.
+  fn configure(&self) -> io::Result<()>;
+}
+
+impl Stream for UnixStream {
+  fn read_some(&self, buffer: &mut [u8]) -> io::Result<usize> {
+    (&mut &*self).read(buffer)
+  }
+
+  fn write_some(&self, data: &[u8]) -> io::Result<usize> {
+    (&mut &*self).write(data)
+  }
+
+  fn shutdown_write(&self) -> io::Result<()> {
+    self.shutdown(Shutdown::Write)
+  }
+
+  fn configure(&self) -> io::Result<()> {
+    self.set_nonblocking(false)?;
+    self.set_read_timeout(Some(POLL_INTERVAL))?;
+    self.set_write_timeout(Some(POLL_INTERVAL))
+  }
+}
+
+impl Stream for TcpStream {
+  fn read_some(&self, buffer: &mut [u8]) -> io::Result<usize> {
+    (&mut &*self).read(buffer)
+  }
+
+  fn write_some(&self, data: &[u8]) -> io::Result<usize> {
+    (&mut &*self).write(data)
+  }
+
+  fn shutdown_write(&self) -> io::Result<()> {
+    self.shutdown(Shutdown::Write)
+  }
+
+  fn configure(&self) -> io::Result<()> {
+    self.set_nonblocking(false)?;
+    self.set_read_timeout(Some(POLL_INTERVAL))?;
+    self.set_write_timeout(Some(POLL_INTERVAL))
+  }
 }
 
 /// An EOF for the guest, then whatever it already sent is read and dropped:
 /// closing with unread data would reset the connection instead.
-fn close_cleanly(guest: &TcpStream) {
-  let _ = guest.shutdown(Shutdown::Write);
+fn close_cleanly(guest: &impl Stream) {
+  let _ = guest.shutdown_write();
 
-  let mut reader = guest;
   let mut discard = [0; BUFFER_SIZE];
-  while let Ok(read) = reader.read(&mut discard) {
+  while let Ok(read) = guest.read_some(&mut discard) {
     if read == 0 {
       break;
     }
@@ -187,12 +292,11 @@ fn close_cleanly(guest: &TcpStream) {
 
 /// One direction, until EOF, an error, or `stop` — then the EOF is passed on,
 /// so a half-close reaches the other side.
-fn splice(from: &TcpStream, to: &TcpStream, stop: &AtomicBool) {
-  let mut reader = from;
+fn splice(from: &impl Stream, to: &impl Stream, stop: &AtomicBool) {
   let mut buffer = [0; BUFFER_SIZE];
 
   while !stop.load(Ordering::Relaxed) {
-    match reader.read(&mut buffer) {
+    match from.read_some(&mut buffer) {
       Ok(0) => break,
       Ok(read) => {
         if !send(to, &buffer[..read], stop) {
@@ -204,16 +308,14 @@ fn splice(from: &TcpStream, to: &TcpStream, stop: &AtomicBool) {
     }
   }
 
-  let _ = to.shutdown(Shutdown::Write);
+  let _ = to.shutdown_write();
 }
 
 /// `write_all`, except that a stalled peer is waited on a poll at a time, so
 /// `stop` still ends it.
-fn send(to: &TcpStream, mut data: &[u8], stop: &AtomicBool) -> bool {
-  let mut writer = to;
-
+fn send(to: &impl Stream, mut data: &[u8], stop: &AtomicBool) -> bool {
   while !data.is_empty() {
-    match writer.write(data) {
+    match to.write_some(data) {
       Ok(0) => return false,
       Ok(written) => data = &data[written..],
       Err(error) if waiting(&error) => {
@@ -239,11 +341,10 @@ fn waiting(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::io::{Read, Write};
-  use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+  use std::net::TcpListener;
   use std::sync::Mutex;
-  use std::sync::atomic::Ordering;
-  use std::time::{Duration, Instant};
+  use std::time::Instant;
+  use tempfile::TempDir;
 
   const DEADLINE: Duration = Duration::from_secs(5);
 
@@ -252,14 +353,6 @@ mod tests {
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
       .and_then(|listener| listener.local_addr())
       .expect("an ephemeral port")
-  }
-
-  fn wait_for(what: &str, condition: impl Fn() -> bool) {
-    let started = Instant::now();
-    while !condition() {
-      assert!(started.elapsed() < DEADLINE, "timed out waiting for {what}");
-      std::thread::sleep(Duration::from_millis(10));
-    }
   }
 
   /// A failing test must fail, not hang: a blocking `accept` would wait forever
@@ -274,7 +367,7 @@ mod tests {
           stream.set_nonblocking(false).expect("blocking");
           return stream;
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+        Err(error) if error.kind() == ErrorKind::WouldBlock => {
           assert!(
             started.elapsed() < DEADLINE,
             "timed out waiting for a relayed connection"
@@ -313,8 +406,8 @@ mod tests {
     stream.write_all(&received).expect("echo");
   }
 
-  fn round_trip(listen: SocketAddr, message: &str) -> String {
-    let mut guest = TcpStream::connect(listen).expect("connect to the relay");
+  fn round_trip(socket: &Path, message: &str) -> String {
+    let mut guest = UnixStream::connect(socket).expect("connect to the relay");
     guest.write_all(message.as_bytes()).expect("send");
     guest.shutdown(Shutdown::Write).expect("half-close");
     let mut reply = String::new();
@@ -322,43 +415,99 @@ mod tests {
     reply
   }
 
-  fn listening(events: &Mutex<Vec<PortEvent>>, forward: Forward) -> bool {
-    events
-      .lock()
-      .expect("events")
-      .contains(&PortEvent::Listening(forward))
+  /// A forward whose socket lives in `directory` and whose upstream is a real
+  /// address, so only the guest side is under test.
+  fn forward(directory: &TempDir, upstream: SocketAddr) -> Forward {
+    Forward {
+      listen: directory.path().join(format!("{}.sock", upstream.port())),
+      upstream,
+    }
+  }
+
+  fn record(events: &Mutex<Vec<PortEvent>>) -> impl Fn(PortEvent) + Sync {
+    |event| events.lock().expect("events").push(event)
   }
 
   #[test]
-  fn forwards_to_loopback() {
-    let gateway: IpAddr = "192.168.64.1".parse().expect("an address");
+  fn names_a_socket_after_its_port() {
+    let forward = Forward::to_loopback(Path::new("/state/ports"), 7001);
 
+    assert_eq!(forward.listen, PathBuf::from("/state/ports/7001.sock"));
     assert_eq!(
-      Forward::to_loopback(gateway, 7001),
-      Forward {
-        listen: "192.168.64.1:7001".parse().expect("an address"),
-        upstream: "127.0.0.1:7001".parse().expect("an address"),
-      }
+      forward.upstream,
+      "127.0.0.1:7001".parse::<SocketAddr>().expect("an address")
     );
+    assert_eq!(forward.port(), 7001);
+  }
+
+  /// The guest end is root-owned with this mode copied, and the session is not
+  /// root: anything narrower is unreachable from inside the container.
+  #[test]
+  fn binds_world_accessible() {
+    let directory = TempDir::new().expect("temp dir");
+    let forward = forward(&directory, free_port());
+    let events = Mutex::new(Vec::new());
+
+    let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
+
+    let mode = fs::metadata(&forward.listen)
+      .expect("the socket")
+      .permissions()
+      .mode();
+    assert_eq!(mode & 0o777, SOCKET_MODE, "{mode:o}");
+    assert_eq!(bound.len(), 1);
+    assert_eq!(events.into_inner().expect("events"), [PortEvent::Listening(forward)]);
+  }
+
+  /// A session that died leaves its socket behind; the next one owns the path.
+  #[test]
+  fn binding_replaces_a_stale_socket() {
+    let directory = TempDir::new().expect("temp dir");
+    let forward = forward(&directory, free_port());
+    let events = Mutex::new(Vec::new());
+
+    let stale = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
+    drop(stale);
+    assert!(forward.listen.exists(), "the path outlives the listener");
+    assert!(!served(&forward), "nothing is accepting on it");
+
+    // Bound, not dropped: the listener is what makes the socket answer.
+    let _rebound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("rebind");
+    assert!(served(&forward));
+  }
+
+  /// The socket another agent is still serving: this is what keeps a second
+  /// `run` from unbinding the session's live relay.
+  #[test]
+  fn served_is_true_only_while_something_accepts() {
+    let directory = TempDir::new().expect("temp dir");
+    let forward = forward(&directory, free_port());
+    let events = Mutex::new(Vec::new());
+
+    assert!(!served(&forward), "nothing is bound yet");
+
+    let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
+    assert!(served(&forward));
+
+    drop(bound);
+    assert!(!served(&forward));
   }
 
   #[test]
   fn relays_after_half_close() {
+    let directory = TempDir::new().expect("temp dir");
     let (upstream, address) = echo_once();
-    let forward = Forward {
-      listen: free_port(),
-      upstream: address,
-    };
+    let forward = forward(&directory, address);
     let stop = AtomicBool::new(false);
     let events = Mutex::new(Vec::new());
+    let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
 
     std::thread::scope(|scope| {
       let _stop = StopOnDrop(&stop);
-      scope.spawn(|| relay(&[forward], &stop, &|event| events.lock().expect("events").push(event)));
+      scope.spawn(|| relay(&bound, &stop, &record(&events)));
       scope.spawn(|| serve_echo(&upstream));
 
-      wait_for("the relay to bind", || listening(&events, forward));
-      assert_eq!(round_trip(forward.listen, "hello"), "hello");
+      assert_eq!(round_trip(&forward.listen, "hello"), "hello");
 
       stop.store(true, Ordering::Relaxed);
     });
@@ -366,21 +515,19 @@ mod tests {
 
   #[test]
   fn refused_upstream_reports_once() {
-    let forward = Forward {
-      listen: free_port(),
-      upstream: free_port(),
-    };
+    let directory = TempDir::new().expect("temp dir");
+    let forward = forward(&directory, free_port());
     let stop = AtomicBool::new(false);
     let events = Mutex::new(Vec::new());
+    let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
 
     std::thread::scope(|scope| {
       let _stop = StopOnDrop(&stop);
-      scope.spawn(|| relay(&[forward], &stop, &|event| events.lock().expect("events").push(event)));
-      wait_for("the relay to bind", || listening(&events, forward));
+      scope.spawn(|| relay(&bound, &stop, &record(&events)));
 
       for _ in 0..2 {
         assert_eq!(
-          round_trip(forward.listen, "hello"),
+          round_trip(&forward.listen, "hello"),
           "",
           "a refused upstream closes the guest"
         );
@@ -398,65 +545,21 @@ mod tests {
     assert_eq!(refusals, 1);
   }
 
-  /// Another session's listener on the same address: this one waits, and
-  /// takes the port once that one lets go.
-  #[test]
-  fn defers_then_takes_over() {
-    let (upstream, address) = echo_once();
-    let listen = free_port();
-    let holder = TcpListener::bind(listen).expect("the other session's listener");
-    let forward = Forward {
-      listen,
-      upstream: address,
-    };
-    let stop = AtomicBool::new(false);
-    let events = Mutex::new(Vec::new());
-
-    std::thread::scope(|scope| {
-      let _stop = StopOnDrop(&stop);
-      scope.spawn(|| relay(&[forward], &stop, &|event| events.lock().expect("events").push(event)));
-      scope.spawn(|| serve_echo(&upstream));
-
-      wait_for("the relay to defer", || {
-        events
-          .lock()
-          .expect("events")
-          .contains(&PortEvent::Deferred(forward))
-      });
-      drop(holder);
-
-      wait_for("the relay to take over", || listening(&events, forward));
-      assert_eq!(round_trip(listen, "hello"), "hello");
-
-      stop.store(true, Ordering::Relaxed);
-    });
-
-    let deferrals = events
-      .lock()
-      .expect("events")
-      .iter()
-      .filter(|event| matches!(event, PortEvent::Deferred(..)))
-      .count();
-    assert_eq!(deferrals, 1, "a deferral is reported once, not every poll");
-  }
-
   /// An idle connection must not keep the session's exit waiting.
   #[test]
   fn stops_with_a_connection_open() {
+    let directory = TempDir::new().expect("temp dir");
     let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
-    let forward = Forward {
-      listen: free_port(),
-      upstream: upstream.local_addr().expect("upstream address"),
-    };
+    let forward = forward(&directory, upstream.local_addr().expect("upstream address"));
     let stop = AtomicBool::new(false);
     let events = Mutex::new(Vec::new());
+    let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
 
     std::thread::scope(|scope| {
       let _stop = StopOnDrop(&stop);
-      let relaying = scope.spawn(|| relay(&[forward], &stop, &|event| events.lock().expect("events").push(event)));
-      wait_for("the relay to bind", || listening(&events, forward));
+      let relaying = scope.spawn(|| relay(&bound, &stop, &record(&events)));
 
-      let _guest = TcpStream::connect(forward.listen).expect("connect to the relay");
+      let _guest = UnixStream::connect(&forward.listen).expect("connect to the relay");
       let _held = accept_within(&upstream);
 
       stop.store(true, Ordering::Relaxed);
@@ -468,5 +571,32 @@ mod tests {
         stopped.elapsed()
       );
     });
+  }
+
+  /// Every socket or none: a container created with half its ports bound would
+  /// forward half of them until it was recreated.
+  #[test]
+  fn binding_fails_whole() {
+    let directory = TempDir::new().expect("temp dir");
+    let good = forward(&directory, free_port());
+    let unbindable = Forward {
+      listen: directory
+        .path()
+        .join("missing")
+        .join("nested")
+        .join("7002.sock"),
+      upstream: free_port(),
+    };
+    fs::write(directory.path().join("missing"), "not a directory").expect("a file in the way");
+    let events = Mutex::new(Vec::new());
+
+    let error = bind_all(&[good.clone(), unbindable], &record(&events)).expect_err("should fail");
+
+    assert!(!matches!(error.kind(), ErrorKind::NotFound), "{error}");
+    assert_eq!(
+      events.into_inner().expect("events"),
+      [PortEvent::Listening(good)],
+      "the forwards before the failure were reported, and the caller gives up"
+    );
   }
 }

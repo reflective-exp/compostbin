@@ -2,7 +2,6 @@ use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::model::{BuildSpec, ExecSpec, RunSpec};
 use std::cell::RefCell;
-use std::net::IpAddr;
 
 /// An `Engine` that records the argv of every call instead of running anything,
 /// so callers can assert what was invoked and that nothing else was.
@@ -11,8 +10,6 @@ pub struct RecordingEngine {
   calls: RefCell<Vec<Vec<String>>>,
   /// Every container the posed daemon holds, and whether each one is running.
   containers: Vec<(String, bool)>,
-  /// What `container inspect` would report as the gateway.
-  gateway: Option<IpAddr>,
   /// `None` poses a daemon that has not been started, where every plugin call
   /// fails.
   images: Option<Vec<String>>,
@@ -43,12 +40,6 @@ impl RecordingEngine {
       version: Some("1.3.1".to_string()),
       ..Self::default()
     }
-  }
-
-  /// Poses containers attached to a network with this gateway.
-  pub fn with_gateway(mut self, gateway: IpAddr) -> Self {
-    self.gateway = Some(gateway);
-    self
   }
 
   /// Every recorded argv, in call order.
@@ -87,11 +78,6 @@ impl Engine for RecordingEngine {
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError> {
     self.record(spec.to_argv());
     Ok(0)
-  }
-
-  fn gateway(&self, container: &str) -> Result<Option<IpAddr>, EngineError> {
-    self.record(vec!["inspect".to_string(), container.to_string()]);
-    Ok(self.gateway)
   }
 
   fn images(&self) -> Result<Vec<String>, EngineError> {

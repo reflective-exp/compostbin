@@ -5,7 +5,7 @@ use apple_container::engine::{CliEngine, Engine};
 use clap::Parser;
 use cli::{Arguments, Command};
 use compostbin_core::doctor::{self, Status};
-use compostbin_core::host::{self, Forward, PortEvent, Spool};
+use compostbin_core::host::{self, PortEvent, Spool};
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest};
 use compostbin_core::session::credentials::{self, Keychain, SeedOutcome};
 use compostbin_core::session::image;
@@ -16,46 +16,109 @@ use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
 use std::error::Error;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-/// The session's declared ports, relayed from its container's gateway. Empty,
-/// after saying why, when there is no gateway to listen on: the session still
-/// runs, it just forwards nothing.
-fn port_forwards(session: &Session, engine: &impl Engine) -> Vec<Forward> {
-  if !session.manifest.host.has_ports() {
-    return Vec::new();
+/// How long `run` waits for the relay it started to have its sockets up. They
+/// must be sockets before the container is created — `container` relays a
+/// source that is already one, and mounts anything else as a plain file.
+const RELAY_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const RELAY_READY_POLL: Duration = Duration::from_millis(25);
+
+/// Starts the relay that holds this session's port sockets, unless one is
+/// already holding them.
+///
+/// It is a separate process, detached from this terminal, because its sockets
+/// belong to the container rather than to whoever is attached: the relay
+/// `container` sets up is bound to the socket that existed when the container
+/// was created, so a socket dropped and rebound mid-life is not reattached.
+/// Leaving a session and starting another one must not cost the session its
+/// ports, so the thing holding them outlives the attach and ends with the
+/// container.
+fn start_port_relay(session: &Session, project_dir: &std::path::Path) -> Result<(), Box<dyn Error>> {
+  let forwards = session.forwards();
+
+  if forwards.is_empty() || forwards.iter().all(host::served) {
+    return Ok(());
   }
 
-  match engine.gateway(&session.container_name()) {
-    Ok(Some(gateway)) => session.forwards(gateway),
-    Ok(None) => {
-      eprintln!(
-        "compostbin: `container` reports no gateway for {}; host ports are not forwarded",
-        session.container_name()
+  let log = std::fs::File::options()
+    .append(true)
+    .create(true)
+    .open(session.ports_log())?;
+
+  let mut relay = std::process::Command::new(std::env::current_exe()?);
+  relay
+    .arg("port-relay")
+    .current_dir(project_dir)
+    .stdin(std::process::Stdio::null())
+    .stdout(log.try_clone()?)
+    .stderr(log)
+    // Its own process group, so the Ctrl-C that interrupts Claude does not
+    // reach the relay: the container is still there, and so are its ports.
+    .process_group(0);
+  relay.spawn()?;
+
+  let deadline = Instant::now() + RELAY_READY_TIMEOUT;
+  while !forwards.iter().all(host::served) {
+    if Instant::now() > deadline {
+      return Err(
+        format!(
+          "the port relay did not come up within {RELAY_READY_TIMEOUT:?}; see {}",
+          session.ports_log().display()
+        )
+        .into(),
       );
-      Vec::new()
     }
-    Err(error) => {
-      eprintln!("compostbin: finding the gateway: {error}; host ports are not forwarded");
-      Vec::new()
-    }
+    std::thread::sleep(RELAY_READY_POLL);
   }
+
+  Ok(())
+}
+
+/// What a session attaching to a container someone else started can say about
+/// its ports. Normally the relay is right there, holding them; if it is not,
+/// nothing this process does would reach the guest — the container's end is
+/// bound to the socket that existed when it was created — so the fix is to
+/// recreate the container, and saying so is all that is left.
+fn report_adopted_ports(session: &Session) {
+  let forwards = session.forwards();
+  if forwards.is_empty() {
+    return;
+  }
+
+  if forwards.iter().all(host::served) {
+    println!("forwarding host ports {}", port_list(session));
+    return;
+  }
+
+  eprintln!(
+    "compostbin: host ports {} are declared but their relay is gone; `compostbin stop` then `compostbin run` restores them",
+    port_list(session)
+  );
+}
+
+fn port_list(session: &Session) -> String {
+  session
+    .manifest
+    .host
+    .ports
+    .iter()
+    .map(u16::to_string)
+    .collect::<Vec<String>>()
+    .join(", ")
 }
 
 /// What the relay says, in the terms a user would look for.
 fn report_port(event: PortEvent) {
   match event {
-    PortEvent::Listening(forward) => {
-      eprintln!("compostbin: forwarding {} to {}", forward.listen, forward.upstream)
-    }
-    PortEvent::Deferred(forward) => eprintln!(
-      "compostbin: another session already forwards {}, which serves this one too; taking over when it exits",
-      forward.listen
+    PortEvent::Listening(forward) => eprintln!(
+      "compostbin: forwarding localhost:{} to {}",
+      forward.port(),
+      forward.upstream
     ),
-    PortEvent::Unbindable(forward, error) => {
-      eprintln!("compostbin: cannot listen on {}: {error}; retrying", forward.listen)
-    }
     PortEvent::UpstreamRefused(forward, error) => {
       eprintln!("compostbin: nothing answers at {}: {error}", forward.upstream)
     }
@@ -114,9 +177,11 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 
     Command::Clean { all } => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
+      let cleaned = session.clean(all)?;
+      let verb = if all { "removed" } else { "cleared" };
 
-      for removed in session.clean(all)? {
-        println!("removed {}", removed.display());
+      for path in cleaned {
+        println!("{verb} {}", path.display());
       }
 
       Ok(0)
@@ -136,8 +201,12 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
         return Ok(1);
       }
 
-      let forwards = port_forwards(&session, &CliEngine::new());
-      if forwards.is_empty() && !session.manifest.host.has_commands() {
+      // The ports belong to whatever created the container: their sockets were
+      // bound before it started, and nothing bound afterwards reaches it. So
+      // this says how they stand and serves the spool.
+      report_adopted_ports(&session);
+
+      if !session.manifest.host.has_commands() {
         return Ok(1);
       }
 
@@ -145,39 +214,20 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       // than killing a claimed request.
       let stop = signals::stop_on_termination()?;
 
-      if session.manifest.host.has_commands() {
-        println!(
-          "serving {} host commands from {}",
-          session.manifest.host.served_commands().len(),
-          session.host_spool().display()
-        );
-      }
+      println!(
+        "serving {} host commands from {}",
+        session.manifest.host.served_commands().len(),
+        session.host_spool().display()
+      );
       println!("SIGINT or SIGTERM stops it, a second one kills it");
 
-      std::thread::scope(|scope| {
-        if !forwards.is_empty() {
-          scope.spawn(|| host::relay(&forwards, stop, &report_port));
-        }
-
-        let served = if session.manifest.host.has_commands() {
-          host::serve(
-            &Spool::new(session.host_spool()),
-            &session.manifest.host.served_commands(),
-            &project_dir,
-            session.manifest.host.concurrency,
-            stop,
-          )
-        } else {
-          while !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(host::POLL_INTERVAL);
-          }
-          Ok(())
-        };
-
-        // A failed agent must not leave the relay holding the scope open.
-        stop.store(true, Ordering::Relaxed);
-        served
-      })?;
+      host::serve(
+        &Spool::new(session.host_spool()),
+        &session.manifest.host.served_commands(),
+        &project_dir,
+        session.manifest.host.concurrency,
+        stop,
+      )?;
 
       println!("stopped");
 
@@ -248,23 +298,17 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 
       let engine = CliEngine::new();
       session.prepare_host_spool()?;
-      session.start(&engine)?;
 
-      let forwards = port_forwards(&session, &engine);
-      if let Some(forward) = forwards.first() {
-        let ports: Vec<String> = session
-          .manifest
-          .host
-          .ports
-          .iter()
-          .map(u16::to_string)
-          .collect();
-        println!(
-          "forwarding host ports {} via {}, where every container on vmnet can reach them",
-          ports.join(", "),
-          forward.listen.ip()
-        );
+      // Before the container is created, since the sockets have to be sockets
+      // by the time `container run` reads them — and only when this run is the
+      // one creating it. Attaching to a container that already has a relay
+      // leaves that relay exactly where it is.
+      if !session.is_running(&engine)? {
+        start_port_relay(&session, &project_dir)?;
       }
+
+      session.start(&engine)?;
+      report_adopted_ports(&session);
 
       let mut claude = vec!["claude".to_string()];
       claude.extend(arguments);
@@ -289,18 +333,6 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
           });
         }
 
-        if !forwards.is_empty() {
-          // `Listening` was said before Claude took the terminal; anything
-          // printed now draws over it, so only what needs attention is.
-          scope.spawn(|| {
-            host::relay(&forwards, &stop, &|event| {
-              if !matches!(event, PortEvent::Listening(_)) {
-                report_port(event);
-              }
-            })
-          });
-        }
-
         let code = engine.exec(&session.exec_spec(&claude));
         stop.store(true, Ordering::Relaxed);
         code
@@ -313,6 +345,55 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       }
 
       Ok(code)
+    }
+
+    Command::PortRelay => {
+      let session = load_session(&manifest_path, resolver, &project_dir)?;
+      let forwards = session.forwards();
+
+      if forwards.is_empty() {
+        eprintln!("no [host] ports in {}; nothing to relay", manifest_path.display());
+        return Ok(1);
+      }
+
+      // Another relay already holds them, which is the whole point of this
+      // being a process of its own: it survived whatever started it.
+      if forwards.iter().all(host::served) {
+        eprintln!("the ports are already held by another relay");
+        return Ok(0);
+      }
+
+      // Before binding, so a signal arriving immediately still unlinks the
+      // sockets rather than leaving them for the next session to adopt.
+      let stop = signals::stop_on_termination()?;
+      let bound = host::bind_all(&forwards, &report_port)?;
+      std::fs::write(session.ports_pid(), std::process::id().to_string())?;
+
+      let engine = CliEngine::new();
+      std::thread::scope(|scope| {
+        scope.spawn(|| {
+          host::watch(
+            &session.container_name(),
+            &engine,
+            stop,
+            host::APPEAR_GRACE,
+            host::VANISH_GRACE,
+          );
+        });
+
+        host::relay(&bound, stop, &report_port);
+      });
+
+      // The sockets are this process's: nothing else can tell a live one from
+      // one left by a relay that died, so leaving them would make the next
+      // session read a dead relay as a working one.
+      drop(bound);
+      let _ = std::fs::remove_dir_all(session.port_sockets());
+      let _ = std::fs::remove_file(session.ports_pid());
+
+      eprintln!("the container is gone; the relay is stopping");
+
+      Ok(0)
     }
 
     Command::Shell => {

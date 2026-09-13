@@ -37,6 +37,31 @@ impl Spool {
     Ok(())
   }
 
+  /// Empties the spool without unlinking it, and recreates whatever is missing.
+  ///
+  /// The directories themselves have to survive: a running container's mount is
+  /// attached to the inode, so a spool removed and recreated at the same path
+  /// leaves the guest holding a directory nothing writes to any more — a
+  /// channel that is present, empty, and dead for as long as the container
+  /// lives. Emptying is the only kind of cleaning a live mount survives.
+  pub fn empty(&self) -> Result<(), PathError> {
+    self.create()?;
+
+    for directory in [self.requests(), self.running(), self.responses()] {
+      let entries = std::fs::read_dir(&directory).map_err(|source| PathError::new(&directory, source))?;
+
+      for entry in entries {
+        let path = entry
+          .map_err(|source| PathError::new(&directory, source))?
+          .path();
+
+        std::fs::remove_file(&path).map_err(|source| PathError::new(&path, source))?;
+      }
+    }
+
+    Ok(())
+  }
+
   /// Clears whatever the last container left in flight, returning what it
   /// removed.
   ///

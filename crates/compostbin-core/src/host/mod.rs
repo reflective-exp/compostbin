@@ -6,7 +6,8 @@
 //! agent serving them. `request` is what may run, `spool` is where the files go,
 //! `agent` runs them, `pty` is the terminal a command can ask for.
 //!
-//! `ports` is the one path that is not files: declared ports, relayed over vmnet.
+//! `ports` is the one path that is not files: declared ports, each relayed
+//! through a unix socket `container` carries into the guest.
 
 mod agent;
 mod ports;
@@ -18,13 +19,18 @@ mod spool;
 mod fixtures;
 
 pub use crate::host::agent::{POLL_INTERVAL, serve, serve_once};
-pub use crate::host::ports::{Forward, PortEvent, relay};
+pub use crate::host::ports::{
+  APPEAR_GRACE, Bound, Forward, PortEvent, SOCKET_SUFFIX, VANISH_GRACE, bind_all, relay, served, watch,
+};
 pub use crate::host::request::{Request, resolve};
 pub use crate::host::spool::Spool;
 
 /// Fixed, not configurable: the guest client is a shell script and cannot read
 /// the manifest.
 pub const GUEST_SPOOL_TARGET: &str = "/run/compostbin/host";
+/// Where each port's socket is relayed to, for the same reason: the guest's
+/// relay finds `<port>.sock` here without being told where to look.
+pub const GUEST_PORTS_TARGET: &str = "/run/compostbin/ports";
 
 /// Requests land here, one file per request.
 pub const REQUESTS_DIR: &str = "requests";

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Relay `[host] ports` through a unix socket per port instead of the vmnet
+  gateway, so a forwarded port reaches the session's container and nothing else.
+  Needs a `compostbin build`.
+- Hold the port sockets in a relay that lives as long as the container rather
+  than as long as the attached session, so a second `compostbin run` keeps its
+  ports.
+- Add a `host ports` check to `doctor`, which names a port nothing is listening
+  on and a relay that has died.
+- Fix a host channel that went silently dead: `clean` and the cleanup after
+  Claude exits unlinked the spool directory the running container was mounting,
+  so every later `shell` and `host-agent` for that container wrote to a
+  directory the guest could no longer reach. Both now empty it in place.
 - Install native claude into `/usr/local/bin/claude` and remove node from the
   base container.
 - Remove build-essential from base docker file.

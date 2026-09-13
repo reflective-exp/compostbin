@@ -11,7 +11,7 @@ pub mod record;
 pub mod settings;
 
 use crate::error::{PathError, SessionError};
-use crate::host::{Forward, GUEST_SPOOL_TARGET, Spool};
+use crate::host::{Forward, GUEST_PORTS_TARGET, GUEST_SPOOL_TARGET, Spool};
 use crate::manifest::{Manifest, PathEntry, SESSIONS_DIR};
 use crate::session::briefing::{MANAGED_SETTINGS_DIR, MANAGED_SETTINGS_TARGET};
 use crate::session::image::GUEST_PORTS_NAME;
@@ -20,21 +20,69 @@ use crate::workspace::paths::{PathResolver, root_containing};
 use crate::workspace::{Origin, Workspace};
 use apple_container::engine::Engine;
 use apple_container::model::{EnvVar, ExecSpec, Mount, RunSpec};
-use std::net::IpAddr;
 use std::path::PathBuf;
 
 /// Where Claude's home is mounted inside the container, which runs as `claude`.
 pub const CLAUDE_HOME_TARGET: &str = "/home/claude/.claude";
 /// Under the session state directory: kept, because `claude --continue` reads it.
 pub const CLAUDE_HOME_DIR: &str = "claude-home";
-/// Under the session state directory: removed by `clean`, holding only requests
-/// in flight.
+/// Under the session state directory: emptied by `clean`, holding only requests
+/// in flight. Emptied and not removed — the container mounts it.
 pub const SPOOL_DIR: &str = "host";
+/// Under the session state directory: one bound socket per declared port, which
+/// live exactly as long as the container created with them — and so outlive the
+/// `run` that created it.
+pub const PORTS_DIR: &str = "ports";
+/// Where the relay writes, having outlived the terminal that started it.
+pub const PORTS_LOG: &str = "ports.log";
+/// The relay's own pid, so `stop` can end it.
+pub const PORTS_PID: &str = "ports.pid";
 /// Keeps a detached container alive so `exec` has something to attach to.
 pub const KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
 pub const NAME_PREFIX: &str = "compostbin-";
 /// Names no real compositor: nothing in the guest draws, it only has to be set.
 pub const CLIPBOARD_DISPLAY: &str = "compostbin-clipboard";
+
+/// Empties a directory without unlinking it, or removes a plain file.
+///
+/// Every transient path a session keeps is also a mount source, and a running
+/// container's mount is attached to the inode it was created with: a directory
+/// removed and recreated at the same path is never reattached, so the guest is
+/// left holding one that nothing writes to any more. Emptying is the only kind
+/// of cleaning a live mount survives.
+///
+/// A symlink is removed rather than followed, so a link planted where a mount
+/// source belongs cannot make this clear something else.
+fn clear(target: &PathBuf) -> Result<(), PathError> {
+  let kind = std::fs::symlink_metadata(target)
+    .map_err(|source| PathError::new(target, source))?
+    .file_type();
+
+  if !kind.is_dir() {
+    return std::fs::remove_file(target).map_err(|source| PathError::new(target, source));
+  }
+
+  let entries = std::fs::read_dir(target).map_err(|source| PathError::new(target, source))?;
+
+  for entry in entries {
+    let entry = entry.map_err(|source| PathError::new(target, source))?;
+    let path = entry.path();
+
+    let outcome = if entry
+      .file_type()
+      .map_err(|source| PathError::new(&path, source))?
+      .is_dir()
+    {
+      std::fs::remove_dir_all(&path)
+    } else {
+      std::fs::remove_file(&path)
+    };
+
+    outcome.map_err(|source| PathError::new(&path, source))?;
+  }
+
+  Ok(())
+}
 
 /// What `add` did, and therefore what the caller must do next.
 #[derive(Clone, Debug, PartialEq)]
@@ -116,40 +164,74 @@ impl Session {
   /// container is gone. Not Claude's home — that holds the conversation
   /// `--continue` reattaches to.
   fn transient_state(&self) -> Vec<PathBuf> {
-    vec![self.host_spool(), self.managed_settings()]
+    vec![
+      self.host_spool(),
+      self.port_sockets(),
+      self.ports_log(),
+      self.managed_settings(),
+    ]
   }
 
-  /// Removes this session's transient state, and with `everything` the session
-  /// directory whole. Missing paths are not an error: `clean` exists because an
-  /// earlier exit may not have run.
+  /// Empties this session's transient state, and with `everything` removes the
+  /// session directory whole. Missing paths are not an error: `clean` exists
+  /// because an earlier exit may not have run.
+  ///
+  /// Emptied rather than removed, because the container may still be running
+  /// and every one of these paths is a mount source (§`clear`). `--all` is the
+  /// exception: it discards the conversation too, so the session it belonged to
+  /// is over by definition.
   pub fn clean(&self, everything: bool) -> Result<Vec<PathBuf>, PathError> {
-    let targets = if everything {
-      vec![self.state_dir()]
-    } else {
-      self.transient_state()
-    };
+    // Before the sockets go: a relay left holding unlinked sockets would look
+    // alive to the next session and serve nothing.
+    self.stop_port_relay();
 
-    let mut removed = Vec::new();
-    for target in targets {
+    if everything {
+      let state = self.state_dir();
+      if !state.exists() {
+        return Ok(Vec::new());
+      }
+      std::fs::remove_dir_all(&state).map_err(|source| PathError::new(&state, source))?;
+      return Ok(vec![state]);
+    }
+
+    let spool = self.host_spool();
+    let mut cleared = Vec::new();
+
+    for target in self.transient_state() {
       if !target.exists() {
         continue;
       }
-      std::fs::remove_dir_all(&target).map_err(|source| PathError::new(&target, source))?;
-      removed.push(target);
+
+      if target == spool {
+        Spool::new(&target).empty()?;
+      } else {
+        clear(&target)?;
+      }
+
+      cleared.push(target);
     }
 
-    Ok(removed)
+    Ok(cleared)
   }
 
   /// What `run` may delete when Claude exits. Narrower than `clean`: the
   /// container is still running, with the managed settings mounted, and the next
   /// `run` attaches to it without writing them again.
+  ///
+  /// The port sockets stay: they belong to the container, which is still
+  /// running, and to the relay holding them — which outlives this process for
+  /// exactly that reason. The spool is emptied rather than removed, for the
+  /// same reason in a different shape: the container is holding that mount, and
+  /// unlinking the directory would leave every later `shell` and `host-agent`
+  /// for this container talking to an inode nothing can reach.
   pub fn clean_after_exit(&self) -> Result<Vec<PathBuf>, PathError> {
     let spool = self.host_spool();
     if !spool.exists() {
       return Ok(Vec::new());
     }
-    std::fs::remove_dir_all(&spool).map_err(|source| PathError::new(&spool, source))?;
+
+    Spool::new(&spool).empty()?;
+
     Ok(vec![spool])
   }
 
@@ -220,6 +302,23 @@ impl Session {
       });
     }
 
+    // One socket per declared port, each of which `container` turns into a
+    // relay rather than a mount — but only if it is already a socket when the
+    // container is created, which is why these are bound before it starts.
+    for forward in self.forwards() {
+      mounts.push(Mount {
+        readonly: false,
+        target: PathBuf::from(GUEST_PORTS_TARGET).join(
+          forward
+            .listen
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_default(),
+        ),
+        source: forward.listen,
+      });
+    }
+
     // Unconditional, unlike the spool: a session with no host commands still
     // needs to know it is in a container. Read-only, because the guest changing
     // what it is told is the whole point of managed settings.
@@ -253,6 +352,46 @@ impl Session {
     self.state_dir().join(SPOOL_DIR)
   }
 
+  /// Where this session's port sockets are bound. Inside the session directory
+  /// for the same reason as the spool: the directory is what confines them, the
+  /// socket mode cannot be (the guest end is root-owned, and the session is
+  /// not).
+  pub fn port_sockets(&self) -> PathBuf {
+    self.state_dir().join(PORTS_DIR)
+  }
+
+  /// Where the relay says what it could not: it outlives the terminal that
+  /// started it, so it has nowhere else to put a refused upstream.
+  pub fn ports_log(&self) -> PathBuf {
+    self.state_dir().join(PORTS_LOG)
+  }
+
+  /// Written by the relay once its sockets are up, so `stop` can end it at once
+  /// rather than leaving it to notice the container is gone.
+  pub fn ports_pid(&self) -> PathBuf {
+    self.state_dir().join(PORTS_PID)
+  }
+
+  /// Ends the port relay, if one is running. Best effort by construction: the
+  /// pid file outlives a killed relay, and the relay ends itself anyway once
+  /// the container has been gone a while.
+  pub fn stop_port_relay(&self) {
+    let path = self.ports_pid();
+
+    if let Ok(contents) = std::fs::read_to_string(&path)
+      && let Ok(pid) = contents.trim().parse::<i32>()
+    {
+      // SAFETY: `kill` takes two integers and touches nothing of ours. A pid
+      // that has been reused is the reason this is best effort; the file is
+      // written by the relay and lives under the session directory.
+      unsafe {
+        libc::kill(pid, libc::SIGTERM);
+      }
+    }
+
+    let _ = std::fs::remove_file(&path);
+  }
+
   /// The source side of the managed settings mount: what this session tells its
   /// Claude about itself. Per session, because it is rendered from this
   /// project's manifest.
@@ -270,15 +409,15 @@ impl Session {
     }
   }
 
-  /// Each declared port, relayed from the container's `gateway` to the host's
-  /// loopback.
-  pub fn forwards(&self, gateway: IpAddr) -> Vec<Forward> {
+  /// Each declared port, as a socket in this session's directory relayed to the
+  /// host's loopback.
+  pub fn forwards(&self) -> Vec<Forward> {
     self
       .manifest
       .host
       .ports
       .iter()
-      .map(|&port| Forward::to_loopback(gateway, port))
+      .map(|&port| Forward::to_loopback(&self.port_sockets(), port))
       .collect()
   }
 
@@ -362,10 +501,21 @@ impl Session {
   ///
   /// Attaching leaves the record alone: it describes the running container, not
   /// the manifest as it reads now, and `doctor` checks the gap between them.
+  /// Whether the container is already up, and so whether `start` will attach to
+  /// it rather than create it. Asked before starting by anything whose work
+  /// belongs to the container's creation — binding the port sockets, above all.
+  pub fn is_running(&self, engine: &impl Engine) -> Result<bool, SessionError> {
+    Ok(
+      engine
+        .running_containers()?
+        .contains(&self.container_name()),
+    )
+  }
+
   pub fn start(&self, engine: &impl Engine) -> Result<(), SessionError> {
     let name = self.container_name();
 
-    if engine.running_containers()?.contains(&name) {
+    if self.is_running(engine)? {
       return Ok(());
     }
 
@@ -455,6 +605,7 @@ impl Session {
 mod tests {
   use super::*;
   use apple_container::fake::RecordingEngine;
+  use std::os::unix::fs::MetadataExt;
   use tempfile::TempDir;
 
   const MANIFEST: &str = r#"
@@ -998,12 +1149,59 @@ source   = "~/.cargo/registry"
   }
 
   #[test]
-  fn forwards_from_gateway() {
+  fn forwards_through_a_socket_in_the_session_directory() {
     let mut session = session();
     session.manifest.host.ports = vec![7001];
-    let gateway = "192.168.64.1".parse().expect("an address");
 
-    assert_eq!(session.forwards(gateway), [Forward::to_loopback(gateway, 7001)]);
+    assert_eq!(
+      session.forwards(),
+      [Forward::to_loopback(&session.port_sockets(), 7001)]
+    );
+    assert_eq!(
+      session.forwards()[0].listen,
+      session.state_dir().join("ports").join("7001.sock")
+    );
+  }
+
+  /// The socket is what `container` turns into a relay, so it has to be mounted
+  /// like any other source — and named after the port, since the guest's relay
+  /// finds it by name.
+  #[test]
+  fn mounts_a_socket_per_declared_port() {
+    let mut session = session();
+    session.manifest.host.ports = vec![7001, 7002];
+
+    let mounts = session.mounts();
+
+    for port in [7001, 7002] {
+      let source = session
+        .state_dir()
+        .join("ports")
+        .join(format!("{port}.sock"));
+      let mount = mounts
+        .iter()
+        .find(|mount| mount.source == source)
+        .unwrap_or_else(|| panic!("port {port} should be mounted: {mounts:?}"));
+
+      assert_eq!(
+        mount.target,
+        PathBuf::from(format!("/run/compostbin/ports/{port}.sock"))
+      );
+      assert!(!mount.readonly, "the relay is bidirectional");
+    }
+  }
+
+  #[test]
+  fn mounts_no_sockets_without_ports() {
+    let session = session();
+
+    assert!(
+      !session
+        .mounts()
+        .iter()
+        .any(|mount| mount.source.starts_with(session.port_sockets())),
+      "a session declaring no ports mounts nothing under ports/"
+    );
   }
 
   #[test]
@@ -1015,22 +1213,74 @@ source   = "~/.cargo/registry"
       PathResolver::new(base.join("project"), &base),
       base.join("project"),
     );
-    std::fs::create_dir_all(session.host_spool()).expect("create spool");
+    Spool::new(session.host_spool())
+      .create()
+      .expect("create spool");
+    std::fs::write(session.host_spool().join("requests").join("0001.request"), "run\n").expect("write a request");
     std::fs::create_dir_all(session.managed_settings()).expect("create managed settings");
+    std::fs::write(session.managed_settings().join("session-context.txt"), "briefing").expect("write a briefing");
     std::fs::create_dir_all(session.claude_home()).expect("create claude home");
 
-    let removed = session.clean(false).expect("clean should succeed");
+    let cleared = session.clean(false).expect("clean should succeed");
 
-    assert_eq!(removed, [session.host_spool(), session.managed_settings()]);
-    assert!(!session.host_spool().exists());
+    assert_eq!(cleared, [session.host_spool(), session.managed_settings()]);
     assert!(
-      !session.managed_settings().exists(),
-      "the briefing is rendered again on the next create, so keeping it only risks a stale one"
+      session.host_spool().join("requests").exists(),
+      "the container may still hold this mount, and a directory it lost cannot be given back"
+    );
+    assert_eq!(
+      std::fs::read_dir(session.host_spool().join("requests"))
+        .expect("read requests")
+        .count(),
+      0,
+      "what was in flight is gone"
+    );
+    assert!(
+      session.managed_settings().exists(),
+      "the same mount argument: the briefing is rewritten on the next create"
+    );
+    assert_eq!(
+      std::fs::read_dir(session.managed_settings())
+        .expect("read managed settings")
+        .count(),
+      0,
+      "keeping a stale briefing would be worse than an empty directory"
     );
     assert!(
       session.claude_home().exists(),
       "the conversation `--continue` reattaches to must survive"
     );
+  }
+
+  /// The bug this is here to prevent: a spool unlinked while the container held
+  /// it left every later `shell` and `host-agent` writing to an inode the guest
+  /// could no longer reach, so the session had a host channel that was present
+  /// and permanently empty.
+  #[test]
+  fn cleaning_keeps_the_inode_a_running_container_mounts() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = Session::new(
+      toml::from_str(MANIFEST).expect("manifest should parse"),
+      PathResolver::new(base.join("project"), &base),
+      base.join("project"),
+    );
+    Spool::new(session.host_spool())
+      .create()
+      .expect("create spool");
+
+    let before = std::fs::metadata(session.host_spool())
+      .expect("the spool")
+      .ino();
+    session.clean(false).expect("clean should succeed");
+    session
+      .clean_after_exit()
+      .expect("exit cleanup should succeed");
+    let after = std::fs::metadata(session.host_spool())
+      .expect("the spool")
+      .ino();
+
+    assert_eq!(before, after, "the mount source must be the same directory throughout");
   }
 
   #[test]
@@ -1042,12 +1292,26 @@ source   = "~/.cargo/registry"
       PathResolver::new(base.join("project"), &base),
       base.join("project"),
     );
-    std::fs::create_dir_all(session.host_spool()).expect("create spool");
+    Spool::new(session.host_spool())
+      .create()
+      .expect("create spool");
+    std::fs::write(session.host_spool().join("running").join("0001"), "claimed").expect("write a claim");
     std::fs::create_dir_all(session.managed_settings()).expect("create managed settings");
 
-    let removed = session.clean_after_exit().expect("clean should succeed");
+    let cleared = session.clean_after_exit().expect("clean should succeed");
 
-    assert_eq!(removed, [session.host_spool()]);
+    assert_eq!(cleared, [session.host_spool()]);
+    assert_eq!(
+      std::fs::read_dir(session.host_spool().join("running"))
+        .expect("read running")
+        .count(),
+      0,
+      "nothing claimed can outlive the session that claimed it"
+    );
+    assert!(
+      session.host_spool().join("requests").exists(),
+      "the container is still holding this mount"
+    );
     assert!(
       session.managed_settings().exists(),
       "the container outlives the exit, and the next `run` attaches without rewriting the briefing"

@@ -53,6 +53,7 @@ pub fn diagnose(
     mounts::root_breadth(session),
     host::credentials(session, credentials, api_key_present),
     host::allowlist(session),
+    host::ports(session, engine),
   ]
 }
 
