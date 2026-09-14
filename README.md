@@ -291,6 +291,21 @@ compostbin copies it from the host and never writes to it.
 The briefing is written when the container is created, so an edited
 `[host.commands]` reaches the session by the restart that serves it.
 
+## Rosetta
+
+As of the time of writing this, Apple's `container` CLI requires that Rosetta 2
+be installed. This can be disabled by configuring `~/.config/container/config.toml`
+
+``` toml
+[build]
+rosetta = false
+```
+
+``` shell
+container system stop
+container system start
+```
+
 ## Development
 
 ``` sh
