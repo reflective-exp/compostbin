@@ -39,6 +39,9 @@ Everything a session can see lands under `/workspace` in the guest.
 `compostbin init` writes a default `.config/compostbin.toml`. It is checked into
 the project it configures; see [Configuration](#configuration).
 
+Additional configuration may be written into `.config/compostbin.local.toml`--this
+file may be added to `.gitignore` to ensure the configuration is local-only.
+
 ### build
 
 `compostbin build` builds the base image: debian, node, Claude Code, and the
@@ -99,6 +102,8 @@ A path already inside a `[workspace] roots` tree is mounted already: `add` says
 so, records nothing, and ignores `--readonly`. Anything else needs the container
 recreated, which `--restart` does before reattaching Claude with `--continue`.
 
+`--local` records the entry in `.config/compostbin.local.toml`.
+
 `add` refuses a path that is obviously a mistake — `~`, `/`, `~/.ssh`, anything
 holding credentials — unless you pass `--force`. It is a guardrail against a
 slip rather than a boundary: the container runs with your own privileges either
@@ -107,8 +112,8 @@ way.
 ### ls
 
 `compostbin ls` lists what the session mounts: each host path, where it appears
-in the guest, and why it is there — the project directory, a workspace root, or
-an explicit `[[paths]]` entry.
+in the guest, and why it is there — the project directory, a workspace root, an
+explicit `[[paths]]` entry, or a local one.
 
 ### stop
 
@@ -161,6 +166,22 @@ packages    = ["ca-certificates", "direnv"]
 run         = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
 run_as_root = ["update-ca-certificates"]
 ```
+
+### Local configuration
+
+`.config/compostbin.local.toml` holds local uncommitted configuration. This
+file is intended to be added to `.gitignore`.
+
+``` toml
+[[paths]]
+source = "~/code/vendor/libfoo"
+
+[[paths]]
+readonly = true
+source   = "~/notes"
+```
+
+Local configuration currently only supports `[[paths]]`.
 
 ### Signing in
 

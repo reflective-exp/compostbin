@@ -1,7 +1,7 @@
 use crate::error::{ManifestError, PathError};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Session state, keyed by container name: Claude's home, which persists so
 /// `--continue` works, beside the spool, which `clean` removes.
@@ -12,6 +12,9 @@ pub const DEFAULT_HOST_CONCURRENCY: usize = 8;
 pub const DEFAULT_IMAGE: &str = "compostbin/base:latest";
 /// Checked in beside the project it configures.
 pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
+/// Beside the manifest, and deliberately not checked in: one developer's own
+/// `[[paths]]`, which the rest of the project has no reason to mount.
+pub const LOCAL_MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.local.toml";
 /// The host command `[host] clipboard` serves, and what the guest's `pbcopy`,
 /// `xclip`, `xsel` and `wl-copy` send.
 pub const CLIPBOARD_COMMAND: &str = "clipboard";
@@ -30,9 +33,11 @@ pub struct Manifest {
   /// that needs nothing renders no table.
   #[serde(skip_serializing_if = "ImageConfig::is_empty")]
   pub image: ImageConfig,
+  /// Both files' entries, each knowing which one it came from; rendering keeps
+  /// only the ones that belong to the file being written.
   #[serde(
-    serialize_with = "PathEntry::serialize_sorted_by_source",
-    skip_serializing_if = "Vec::is_empty"
+    serialize_with = "PathEntry::serialize_shared",
+    skip_serializing_if = "PathEntry::none_shared"
   )]
   pub paths: Vec<PathEntry>,
   pub project: ProjectConfig,
@@ -40,13 +45,79 @@ pub struct Manifest {
 }
 
 impl Manifest {
+  /// The committed manifest, plus the local one beside it when there is one.
   pub fn load(path: &Path) -> Result<Self, ManifestError> {
+    let mut manifest = Self::parse(path)?;
+    manifest.paths.extend(Self::parse_local(&local_path(path))?);
+
+    Ok(manifest)
+  }
+
+  fn parse(path: &Path) -> Result<Self, ManifestError> {
     let text = std::fs::read_to_string(path).map_err(|source| ManifestError::Io(PathError::new(path, source)))?;
 
     toml::from_str(&text).map_err(|source| ManifestError::Parse {
       path: path.to_path_buf(),
       source,
     })
+  }
+
+  /// Missing is the normal case — most checkouts have no local manifest — so
+  /// only a file that exists and does not parse is an error.
+  fn parse_local(path: &Path) -> Result<Vec<PathEntry>, ManifestError> {
+    let text = match std::fs::read_to_string(path) {
+      Ok(text) => text,
+      Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+      Err(source) => return Err(ManifestError::Io(PathError::new(path, source))),
+    };
+
+    let local: LocalManifest = toml::from_str(&text).map_err(|source| ManifestError::Parse {
+      path: path.to_path_buf(),
+      source,
+    })?;
+
+    Ok(
+      local
+        .paths
+        .into_iter()
+        .map(|entry| PathEntry { local: true, ..entry })
+        .collect(),
+    )
+  }
+
+  /// Writes the local `[[paths]]` beside the manifest, leaving the committed
+  /// file alone. Removes the file when nothing local is left, so an emptied
+  /// overlay does not linger as an empty one.
+  pub fn save_local(&self, manifest_path: &Path) -> Result<(), ManifestError> {
+    let path = local_path(manifest_path);
+    let local = LocalManifest {
+      paths: self
+        .paths
+        .iter()
+        .filter(|entry| entry.local)
+        .cloned()
+        .collect(),
+    };
+
+    if local.paths.is_empty() {
+      return match std::fs::remove_file(&path) {
+        Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
+          Err(ManifestError::Io(PathError::new(&path, source)))
+        }
+        _ => Ok(()),
+      };
+    }
+
+    let rendered = toml::to_string(&local).map_err(|source| ManifestError::Render {
+      path: path.clone(),
+      source,
+    })?;
+
+    if let Some(parent) = path.parent() {
+      std::fs::create_dir_all(parent).map_err(|source| ManifestError::Io(PathError::new(parent, source)))?;
+    }
+
+    std::fs::write(&path, rendered).map_err(|source| ManifestError::Io(PathError::new(&path, source)))
   }
 
   /// Creates the parent directory, so `init` works in a project with no `.config`.
@@ -62,6 +133,22 @@ impl Manifest {
 
     std::fs::write(path, rendered).map_err(|source| ManifestError::Io(PathError::new(path, source)))
   }
+}
+
+/// The uncommitted manifest beside a committed one: `[[paths]]` and nothing
+/// else, since everything else in a manifest describes the project rather than
+/// the developer.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LocalManifest {
+  #[serde(serialize_with = "PathEntry::serialize_sorted_by_source")]
+  pub paths: Vec<PathEntry>,
+}
+
+/// `…/compostbin.toml` becomes `…/compostbin.local.toml`, so a manifest found
+/// anywhere — a test's temporary directory included — has its overlay beside it.
+fn local_path(manifest_path: &Path) -> PathBuf {
+  manifest_path.with_extension("local.toml")
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -229,9 +316,14 @@ impl ImageConfig {
   }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathEntry {
+  /// Which file the entry came from, never written: an entry belongs to the
+  /// local manifest or the committed one, and the file it is written back to is
+  /// what says so.
+  #[serde(skip)]
+  pub local: bool,
   #[serde(default)]
   pub readonly: bool,
   pub source: String,
@@ -243,14 +335,24 @@ pub struct PathEntry {
 }
 
 impl PathEntry {
-  fn sort_by_source(entries: &[PathEntry]) -> Vec<&PathEntry> {
-    let mut sorted: Vec<&PathEntry> = entries.iter().collect();
-    sorted.sort_by(|left, right| left.source.cmp(&right.source));
-    sorted
+  fn sort_by_source(mut entries: Vec<&PathEntry>) -> Vec<&PathEntry> {
+    entries.sort_by(|left, right| left.source.cmp(&right.source));
+    entries
   }
 
   fn serialize_sorted_by_source<S: Serializer>(entries: &[PathEntry], serializer: S) -> Result<S::Ok, S::Error> {
-    Self::sort_by_source(entries).serialize(serializer)
+    Self::sort_by_source(entries.iter().collect()).serialize(serializer)
+  }
+
+  /// The committed manifest's own entries. Local ones are dropped rather than
+  /// rendered, so saving a manifest loaded with an overlay writes back what it
+  /// read.
+  fn serialize_shared<S: Serializer>(entries: &[PathEntry], serializer: S) -> Result<S::Ok, S::Error> {
+    Self::sort_by_source(entries.iter().filter(|entry| !entry.local).collect()).serialize(serializer)
+  }
+
+  fn none_shared(entries: &[PathEntry]) -> bool {
+    entries.iter().all(|entry| entry.local)
   }
 }
 
@@ -495,6 +597,101 @@ tty = true
         .name
         .as_deref(),
       Some("compostbin")
+    );
+  }
+
+  /// The whole point of the overlay: what one developer mounts is loaded beside
+  /// the project's own paths, and is not written back into the shared file.
+  #[test]
+  fn loads_local_paths_beside_the_manifest() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
+    let manifest: Manifest = toml::from_str(FULL_MANIFEST).expect("manifest should parse");
+    manifest.save(&path).expect("save should succeed");
+    std::fs::write(
+      local_path(&path),
+      "[[paths]]\nreadonly = true\nsource = \"~/scratch\"\n",
+    )
+    .expect("local manifest should write");
+
+    let loaded = Manifest::load(&path).expect("load should succeed");
+
+    assert_eq!(loaded.paths.len(), 3);
+    let local: Vec<&PathEntry> = loaded.paths.iter().filter(|entry| entry.local).collect();
+    assert_eq!(local.len(), 1);
+    assert_eq!(local[0].source, "~/scratch");
+    assert!(local[0].readonly);
+
+    loaded.save(&path).expect("save should succeed");
+    let rendered = std::fs::read_to_string(&path).expect("manifest should exist");
+    assert!(
+      !rendered.contains("~/scratch"),
+      "a local path must not reach the committed manifest: {rendered}"
+    );
+    assert_eq!(rendered, EXPECTED_RENDERING);
+  }
+
+  /// A manifest whose only paths are local must render no `[[paths]]` at all,
+  /// rather than an empty array of tables.
+  #[test]
+  fn renders_no_paths_when_every_one_is_local() {
+    let mut manifest = Manifest::default();
+    manifest.paths.push(PathEntry {
+      local: true,
+      readonly: false,
+      source: "~/scratch".to_string(),
+      target: None,
+    });
+
+    let rendered = toml::to_string(&manifest).expect("should serialize");
+
+    assert!(!rendered.contains("paths"), "{rendered}");
+  }
+
+  #[test]
+  fn saves_local_paths_to_their_own_file() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
+    let mut manifest: Manifest = toml::from_str(FULL_MANIFEST).expect("manifest should parse");
+    manifest.save(&path).expect("save should succeed");
+    manifest.paths.push(PathEntry {
+      local: true,
+      readonly: false,
+      source: "~/scratch".to_string(),
+      target: None,
+    });
+
+    manifest.save_local(&path).expect("save should succeed");
+
+    let reloaded = Manifest::load(&path).expect("load should succeed");
+    assert_eq!(reloaded.paths.len(), 3);
+    assert!(
+      reloaded
+        .paths
+        .iter()
+        .any(|entry| entry.local && entry.source == "~/scratch")
+    );
+
+    // Emptied, the file goes: nothing local is left for it to record.
+    manifest.paths.retain(|entry| !entry.local);
+    manifest.save_local(&path).expect("save should succeed");
+    assert!(!local_path(&path).exists());
+  }
+
+  #[test]
+  fn a_local_manifest_takes_paths_only() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
+    Manifest::default()
+      .save(&path)
+      .expect("save should succeed");
+    std::fs::write(local_path(&path), "[container]\ncpus = 8\n").expect("local manifest should write");
+
+    let error = Manifest::load(&path).expect_err("anything but paths should be refused");
+
+    assert!(
+      error.to_string().contains("compostbin.local.toml"),
+      "error should name the local manifest: {error}"
     );
   }
 

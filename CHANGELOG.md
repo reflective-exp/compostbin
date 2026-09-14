@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Also read `[[paths]]` from `.config/compostbin.local.toml`, which may be
+  ignored from git. Adds `--local` option to `compostbin add`.
+
 ## v0.6.0
 
 - Relay `[host] ports` through a unix socket per port instead of the vmnet

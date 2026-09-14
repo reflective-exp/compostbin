@@ -135,6 +135,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
   match arguments.command {
     Command::Add {
       force,
+      local,
       path,
       readonly,
       restart,
@@ -153,17 +154,17 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 
       let mut session = load_session(&manifest_path, resolver, &project_dir)?;
 
-      match session.add(&canonical, readonly) {
+      match session.add(&canonical, readonly, local) {
         AddOutcome::AlreadyMounted { root } => {
           println!("{} is already mounted under {}", canonical.display(), root.display());
           Ok(0)
         }
         AddOutcome::NeedsRestart if restart => {
-          session.manifest.save(&manifest_path)?;
+          save_manifest(&session, &manifest_path, local)?;
           Ok(session.restart(&CliEngine::new())?)
         }
         AddOutcome::NeedsRestart => {
-          session.manifest.save(&manifest_path)?;
+          save_manifest(&session, &manifest_path, local)?;
           println!(
             "{} recorded; run `compostbin add --restart` or restart the session to mount it",
             canonical.display()
@@ -252,6 +253,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       for entry in session.workspace().entries() {
         let origin = match entry.origin {
           Origin::Explicit => "explicit",
+          Origin::Local => "local",
           Origin::Project => "project",
           Origin::Root => "in-root",
         };
@@ -443,6 +445,18 @@ fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
   print!("{}", report::Diagnosis(&checks));
 
   Ok(i32::from(checks.iter().any(|check| check.status == Status::Fail)))
+}
+
+/// Writes back whichever file the new entry belongs to, leaving the other
+/// untouched.
+fn save_manifest(session: &Session, manifest_path: &std::path::Path, local: bool) -> Result<(), Box<dyn Error>> {
+  if local {
+    session.manifest.save_local(manifest_path)?;
+  } else {
+    session.manifest.save(manifest_path)?;
+  }
+
+  Ok(())
 }
 
 fn load_session(

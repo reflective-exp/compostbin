@@ -110,8 +110,9 @@ impl Session {
 
   /// Records a path in the manifest unless a mounted root already covers it.
   /// `path` must be canonical: a symlink out of a root looks contained and is
-  /// not.
-  pub fn add(&mut self, path: impl Into<PathBuf>, readonly: bool) -> AddOutcome {
+  /// not. `local` records it in the uncommitted manifest instead of the one the
+  /// project shares.
+  pub fn add(&mut self, path: impl Into<PathBuf>, readonly: bool, local: bool) -> AddOutcome {
     let path = path.into();
 
     if let Some(root) = root_containing(&path, &self.resolved_roots()) {
@@ -121,6 +122,7 @@ impl Session {
     }
 
     self.manifest.paths.push(PathEntry {
+      local,
       readonly,
       source: path.display().to_string(),
       target: None,
@@ -268,12 +270,8 @@ impl Session {
 
     for entry in &self.manifest.paths {
       let target = entry.target.as_ref().map(PathBuf::from);
-      workspace.push(
-        self.resolver.resolve(&entry.source),
-        target,
-        Origin::Explicit,
-        entry.readonly,
-      );
+      let origin = if entry.local { Origin::Local } else { Origin::Explicit };
+      workspace.push(self.resolver.resolve(&entry.source), target, origin, entry.readonly);
     }
 
     workspace
@@ -647,7 +645,7 @@ source   = "~/.cargo/registry"
   fn add_inside_a_root_changes_nothing() {
     let mut session = session();
 
-    let outcome = session.add("/Users/user/workspace/other", false);
+    let outcome = session.add("/Users/user/workspace/other", false, false);
 
     assert_eq!(
       outcome,
@@ -663,7 +661,7 @@ source   = "~/.cargo/registry"
   fn add_outside_every_root_records_a_path() {
     let mut session = session();
 
-    let outcome = session.add("/Users/user/vendor/libfoo", true);
+    let outcome = session.add("/Users/user/vendor/libfoo", true, false);
 
     assert_eq!(outcome, AddOutcome::NeedsRestart);
     assert_eq!(session.manifest.paths[1].source, "/Users/user/vendor/libfoo");
@@ -677,6 +675,26 @@ source   = "~/.cargo/registry"
       }),
       "the added path must become a mount"
     );
+    assert_eq!(session.manifest.paths[1].local, false, "add records a shared path");
+  }
+
+  /// A local path mounts exactly like any other, and only `ls` tells them apart.
+  #[test]
+  fn a_local_path_mounts_and_says_where_it_came_from() {
+    let mut session = session();
+
+    session.add("/Users/user/vendor/libfoo", false, true);
+
+    assert!(session.manifest.paths[1].local);
+    let entry = session
+      .workspace()
+      .entries()
+      .iter()
+      .find(|entry| entry.host == PathBuf::from("/Users/user/vendor/libfoo"))
+      .expect("the local path should be mounted")
+      .clone();
+    assert_eq!(entry.origin, Origin::Local);
+    assert_eq!(entry.guest, PathBuf::from("/workspace/libfoo"));
   }
 
   #[test]
@@ -843,6 +861,7 @@ source   = "~/.cargo/registry"
 
     // The container still has the mounts it was created with.
     session.manifest.paths.push(PathEntry {
+      local: false,
       readonly: false,
       source: base.join("vendor").display().to_string(),
       target: None,
@@ -895,6 +914,7 @@ source   = "~/.cargo/registry"
 
     session.start(&engine).expect("start should succeed");
     session.manifest.paths.push(PathEntry {
+      local: false,
       readonly: false,
       source: base.join("vendor").display().to_string(),
       target: None,

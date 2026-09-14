@@ -217,6 +217,45 @@ fn add_outside_every_root_records_a_path_without_restarting() {
 }
 
 #[test]
+fn add_local_records_the_path_beside_the_committed_manifest() {
+  let temp = TempDir::new().expect("temp dir");
+  let project_dir = project_with_a_root(&temp);
+  let outside = temp
+    .path()
+    .canonicalize()
+    .expect("canonical temp")
+    .join("outside");
+  let manifest_path = project_dir.join(".config/compostbin.toml");
+  let committed = std::fs::read_to_string(&manifest_path).expect("manifest");
+
+  let output = compostbin(&project_dir, &["add", &outside.display().to_string(), "--local"]);
+
+  assert!(
+    output.status.success(),
+    "add failed: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(
+    std::fs::read_to_string(&manifest_path).expect("manifest"),
+    committed,
+    "--local must leave the committed manifest untouched"
+  );
+  let local = std::fs::read_to_string(project_dir.join(".config/compostbin.local.toml")).expect("local manifest");
+  assert!(
+    local.contains(&format!("source = \"{}\"", outside.display())),
+    "local manifest: {local}"
+  );
+
+  // And the session mounts it, saying where it came from.
+  let listed = compostbin(&project_dir, &["ls"]);
+  let stdout = String::from_utf8_lossy(&listed.stdout);
+  assert!(
+    stdout.contains("local") && stdout.contains(&outside.display().to_string()),
+    "ls should list the local path as local: {stdout}"
+  );
+}
+
+#[test]
 fn ls_without_a_manifest_names_the_missing_file() {
   let temp = TempDir::new().expect("temp dir");
 

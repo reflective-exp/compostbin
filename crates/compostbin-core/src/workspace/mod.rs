@@ -19,6 +19,9 @@ pub const WORKSPACE_TARGET: &str = "/workspace";
 pub enum Origin {
   /// A `[[paths]]` entry: mounted because it was asked for by name.
   Explicit,
+  /// A `[[paths]]` entry from the uncommitted local manifest — this checkout's
+  /// own, not the project's.
+  Local,
   /// The directory `compostbin` was invoked in.
   Project,
   /// A `[workspace] roots` entry.

@@ -19,6 +19,10 @@ pub enum Command {
     /// Mount a path `add` would otherwise refuse as too broad or too sensitive
     #[arg(long)]
     force: bool,
+    /// Record it in the uncommitted `.config/compostbin.local.toml` instead of
+    /// the manifest the project shares
+    #[arg(long)]
+    local: bool,
     #[arg(long)]
     readonly: bool,
     /// Recreate the container so an out-of-root path becomes visible
@@ -71,6 +75,7 @@ mod tests {
       parse(&["compostbin", "add", "../libfoo", "--readonly", "--restart"]),
       Command::Add {
         force: false,
+        local: false,
         path: PathBuf::from("../libfoo"),
         readonly: true,
         restart: true,
@@ -80,6 +85,7 @@ mod tests {
       parse(&["compostbin", "add", "../libfoo"]),
       Command::Add {
         force: false,
+        local: false,
         path: PathBuf::from("../libfoo"),
         readonly: false,
         restart: false,

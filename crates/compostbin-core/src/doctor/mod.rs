@@ -357,6 +357,7 @@ mod tests {
     let base = home.path().canonicalize().expect("canonical temp");
     let mut session = session(&home, &quoted(&base, "workspace"));
     session.manifest.paths.push(crate::manifest::PathEntry {
+      local: false,
       readonly: true,
       source: base.join(".ssh").display().to_string(),
       target: None,
@@ -387,6 +388,7 @@ mod tests {
     let mut session = session(&home, &quoted(&base, "workspace"));
     for source in [base.join("workspace/../.ssh"), base.join("keys")] {
       session.manifest.paths.push(crate::manifest::PathEntry {
+        local: false,
         readonly: true,
         source: source.display().to_string(),
         target: None,
@@ -454,6 +456,7 @@ mod tests {
 
     std::fs::create_dir_all(base.join("vendor")).expect("create vendor");
     session.manifest.paths.push(crate::manifest::PathEntry {
+      local: false,
       readonly: false,
       source: base.join("vendor").display().to_string(),
       target: None,
