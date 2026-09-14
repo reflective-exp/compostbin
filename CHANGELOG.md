@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.7.0
+
 - Also read `[[paths]]` from `.config/compostbin.local.toml`, which may be
   ignored from git. Adds `--local` option to `compostbin add`.
 
