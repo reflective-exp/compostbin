@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Update to CLI usage.
+
 ## v0.7.0
 
 - Also read `[[paths]]` from `.config/compostbin.local.toml`, which may be

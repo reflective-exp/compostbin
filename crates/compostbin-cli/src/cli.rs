@@ -2,10 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(
-  name = "compostbin",
-  about = "Run Claude Code in a container with the host filesystem live"
-)]
+#[command(name = "compostbin", about = "Run Claude Code in a container")]
 pub struct Arguments {
   #[command(subcommand)]
   pub command: Command,
