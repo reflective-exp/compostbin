@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "compostbin", about = "Run Claude Code in a container")]
+#[clap(version)]
 pub struct Arguments {
   #[command(subcommand)]
   pub command: Command,
