@@ -291,6 +291,96 @@ compostbin copies it from the host and never writes to it.
 The briefing is written when the container is created, so an edited
 `[host.commands]` reaches the session by the restart that serves it.
 
+## Containerization.framework
+
+An experiment, not a supported path. With `COMPOSTBIN_ENGINE=framework`, `run`
+and `shell` drive the session through
+[Containerization](https://github.com/apple/containerization) — the Swift
+package the `container` CLI is itself built on — instead of shelling out to the
+CLI:
+
+``` sh
+cargo build --release && bin/dev/sign target/release/compostbin
+COMPOSTBIN_ENGINE=framework ./target/release/compostbin run
+COMPOSTBIN_ENGINE=framework ./target/release/compostbin shell   # another terminal
+```
+
+An environment variable rather than a manifest key on purpose: the framework
+path is an experiment, and a manifest key is a promise to keep reading it.
+Unset, everything behaves exactly as before.
+
+`build` never moves — Containerization manages and pulls OCI images but does
+not build them, so it stays on `container build` and BuildKit.
+
+### Who owns the VM
+
+This is the whole difference. The `container` CLI's daemon holds a container
+*out of process*, so any terminal can reach a session. A `LinuxContainer` dies
+with the process that created it, so under this engine `compostbin run` **is**
+the thing holding the session, and `shell` becomes a client of it.
+
+They talk over a unix socket in the session's state directory, and what crosses
+it is the client's **terminal**, not its bytes: the request is sent with
+`SCM_RIGHTS` carrying the client's own tty descriptor, and `run` hands that
+descriptor straight to the guest process as its stdio. So the guest talks to the
+real terminal, nothing relays keystrokes, and the code that attaches a process
+is identical whether the terminal came from `run`'s own process or across the
+socket. The socket then carries only what a descriptor cannot: the request, a
+nudge on each window resize, and the exit code coming back.
+
+The consequence to know about: when `run` exits, the VM goes with it, and a
+`shell` attached to it ends too.
+
+### Attached processes are seeded from the image
+
+`ContainerManager.create` builds the container's first process from the image
+config, so the keepalive runs as `claude`. `LinuxContainer.exec` does not: it
+starts from a bare configuration, which is uid 0 with nothing but a default
+`PATH`. Since compostbin attaches Claude with `exec` rather than as the
+container's first process, taking that default would run the session as root in
+an image whose last line is `USER claude` — and give it `HOME=/root`, because
+the runtime resolves `HOME` from the passwd entry of whatever user the process
+ends up as.
+
+So the session's image config is kept from the boot that read it, and every
+attach seeds itself from it before applying the session's own arguments and
+environment.
+
+The Swift side lives in `swift/CompostbinContainerization`, bridged to Rust by
+`crates/containerization-framework-bridge` with
+[swift-bridge](https://github.com/chinedufn/swift-bridge). Building it needs
+Xcode 26 and macOS 26; `cargo build` drives `swift build` through the bridge
+crate's `build.rs`.
+
+Two more things are load-bearing and neither is obvious:
+
+- **The binary must be signed.** Virtualization.framework refuses every call
+  without the `com.apple.security.virtualization` entitlement, and a signature
+  does not survive a rebuild — so `bin/dev/sign` runs after every build, and
+  `bin/dev/start` does both.
+
+  It signs with `DEVELOPMENT_TEAM`, which `.envrc` requires and
+  `.local/envrc` supplies. That is a team id — the certificate's OU — and
+  `codesign --sign` matches common names, where a team id does not appear, so
+  `bin/dev/identity` resolves it to an identity by reading the certificate.
+  Without it the binary is signed ad hoc, which is enough for
+  the entitlement but gives the binary a new code identity on every rebuild;
+  the keychain notices, and compostbin reads Claude's credentials from there,
+  so an ad-hoc build re-prompts for access each time it is rebuilt.
+
+- **Images come from the CLI's store.** It is read in place, at
+  `~/Library/Application Support/com.apple.container`: an image index in
+  `state.json`, blobs under `content/`, per-container rootfs under
+  `containers/` — which is exactly Containerization's own `ImageStore` layout,
+  so `ContainerManager` opens it as-is. The kernel comes from `kernels/` beside
+  it. That is a dependency on an unpublished layout, and it is the reason there
+  is no separate image pipeline to build.
+
+The `vminit` reference pinned in
+`crates/containerization-framework-bridge/src/store.rs` and the package version
+pinned in `swift/CompostbinContainerization/Package.swift` are one protocol —
+the guest agent and the library that talks to it — and have to move together.
+
 ## Rosetta
 
 As of the time of writing this, Apple's `container` CLI requires that Rosetta 2

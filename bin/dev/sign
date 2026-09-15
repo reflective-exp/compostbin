@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+#
+# Signs a built binary with the virtualization entitlement.
+#
+# Virtualization.framework refuses to start a VM without
+# `com.apple.security.virtualization`, and a signature does not survive a
+# rebuild, so every build path calls this.
+#
+# With DEVELOPMENT_TEAM set — .envrc requires it — the binary is signed with
+# that team's identity rather than ad hoc. Ad hoc is enough for the entitlement,
+# and is what Apple's own containerization and container Makefiles use, but it
+# gives the binary a new code identity on every rebuild. The keychain is what
+# notices: compostbin reads Claude's credentials from it, so an ad-hoc build
+# asks for access again every time it is rebuilt.
+
+set -e
+
+binary="${1:?usage: bin/dev/sign <binary>}"
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+
+if [ -n "$DEVELOPMENT_TEAM" ]; then
+  identity="$("$root/bin/dev/identity" "$DEVELOPMENT_TEAM")"
+
+  if [ -z "$identity" ]; then
+    echo "bin/dev/sign: no codesigning identity belongs to team $DEVELOPMENT_TEAM" >&2
+    echo "the identities this machine holds are:" >&2
+    security find-identity -v -p codesigning >&2
+    exit 1
+  fi
+else
+  echo "bin/dev/sign: DEVELOPMENT_TEAM is unset, signing ad hoc" >&2
+  identity="-"
+fi
+
+codesign --force --entitlements "$root/compostbin.entitlements" --sign "$identity" --timestamp=none "$binary"

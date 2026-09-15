@@ -1,3 +1,9 @@
+/.config/compostbin.local.toml
+/.local
 /target
 /tmp
-/.config/compostbin.local.toml
+
+# SwiftPM's build directory, and the FFI glue build.rs regenerates from the
+# bridge module in containerization-framework-bridge.
+/swift/*/.build
+/swift/*/Sources/*/generated

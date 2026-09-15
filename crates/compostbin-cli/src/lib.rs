@@ -1,7 +1,8 @@
 pub mod cli;
+mod engine;
 mod report;
 
-use apple_container::engine::{CliEngine, Engine};
+use apple_container::engine::Engine;
 use clap::Parser;
 use cli::{Arguments, Command};
 use compostbin_core::doctor::{self, Status};
@@ -15,6 +16,7 @@ use compostbin_core::signals;
 use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
+use engine::select;
 use std::error::Error;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -161,7 +163,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
         }
         AddOutcome::NeedsRestart if restart => {
           save_manifest(&session, &manifest_path, local)?;
-          Ok(session.restart(&CliEngine::new())?)
+          Ok(session.restart(&select(&session)?)?)
         }
         AddOutcome::NeedsRestart => {
           save_manifest(&session, &manifest_path, local)?;
@@ -298,7 +300,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
         println!("shared from your own ~/.claude: {}", shared.join(", "));
       }
 
-      let engine = CliEngine::new();
+      let engine = select(&session)?;
       session.prepare_host_spool()?;
 
       // Before the container is created, since the sockets have to be sockets
@@ -371,7 +373,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       let bound = host::bind_all(&forwards, &report_port)?;
       std::fs::write(session.ports_pid(), std::process::id().to_string())?;
 
-      let engine = CliEngine::new();
+      let engine = select(&session)?;
       std::thread::scope(|scope| {
         scope.spawn(|| {
           host::watch(
@@ -400,12 +402,12 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 
     Command::Shell => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
-      Ok(CliEngine::new().exec(&session.exec_spec(&["bash".to_string()]))?)
+      Ok(select(&session)?.exec(&session.exec_spec(&["bash".to_string()]))?)
     }
 
     Command::Stop => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
-      let engine = CliEngine::new();
+      let engine = select(&session)?;
       let name = session.container_name();
       session.remove_container(&engine)?;
       session.clean(false)?;
@@ -429,7 +431,7 @@ fn build_base_image(session: &Session) -> Result<i32, Box<dyn Error>> {
     );
   }
 
-  Ok(image::build(session, &CliEngine::new())?)
+  Ok(image::build(session, &select(session)?)?)
 }
 
 /// Prints every check, exiting non-zero when any of them failed so `doctor` is
@@ -437,7 +439,7 @@ fn build_base_image(session: &Session) -> Result<i32, Box<dyn Error>> {
 fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
   let checks = doctor::diagnose(
     session,
-    &CliEngine::new(),
+    &select(session)?,
     &Keychain,
     std::env::var_os("ANTHROPIC_API_KEY").is_some(),
   );

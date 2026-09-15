@@ -19,6 +19,11 @@ apple-container.workspace = true
 clap.workspace = true
 compostbin-core.workspace = true
 
+# The framework experiment. macOS-only, so that the workspace still checks from
+# inside a session's own Debian guest.
+[target.'cfg(target_os = "macos")'.dependencies]
+containerization-framework-bridge.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 
