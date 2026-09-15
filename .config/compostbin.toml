@@ -37,6 +37,9 @@ tty = true
 packages = ["direnv"]
 run = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
 
+[[paths]]
+source = ".claude/plans"
+
 [project]
 image = "compostbin/base:latest"
 name = "compostbin"
