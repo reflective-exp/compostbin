@@ -6,7 +6,7 @@
 //! already refuses an argument containing a newline on the other side of the
 //! container.
 
-use apple_container::model::{EnvVar, Mount};
+use apple_container::model::{EnvVar, Mount, SocketRelay};
 
 /// One list element per line. Empty in, empty out — Swift reads `""` as no
 /// elements rather than as one empty one.
@@ -27,6 +27,20 @@ pub fn mounts(mounts: &[Mount]) -> String {
         if mount.readonly { "ro" } else { "rw" }
       )
     })
+    .collect();
+
+  lines.join("\n")
+}
+
+/// `source\tdestination`, one per line.
+///
+/// Not mounts: these are host sockets the guest reaches through, and mounting
+/// one as a filesystem relays nothing. Containerization carries them as
+/// configuration of their own.
+pub fn sockets(sockets: &[SocketRelay]) -> String {
+  let lines: Vec<String> = sockets
+    .iter()
+    .map(|socket| format!("{}\t{}", socket.source.display(), socket.target.display()))
     .collect();
 
   lines.join("\n")
@@ -133,6 +147,20 @@ mod tests {
   fn writes_no_mounts_as_nothing_at_all() {
     assert_eq!(mounts(&[]), "");
     assert_eq!(lines(&[]), "");
+    assert_eq!(sockets(&[]), "");
+  }
+
+  #[test]
+  fn writes_a_relayed_socket_as_a_pair_of_paths() {
+    let declared = [SocketRelay {
+      source: PathBuf::from("/state/ports/7001.sock"),
+      target: PathBuf::from("/run/compostbin/ports/7001.sock"),
+    }];
+
+    assert_eq!(
+      sockets(&declared),
+      "/state/ports/7001.sock\t/run/compostbin/ports/7001.sock"
+    );
   }
 
   #[test]

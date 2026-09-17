@@ -39,6 +39,7 @@ mod ffi {
       cpus: i32,
       memory_in_bytes: u64,
       mounts: &str,
+      sockets: &str,
       environment: &str,
       arguments: &str,
       working_directory: &str,

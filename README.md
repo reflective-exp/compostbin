@@ -2,9 +2,12 @@
 
 Run Claude Code in a container.
 
-This project uses Apple's [container CLI](https://github.com/apple/container)
-to attempt to contain Claude. The current directory is bind-mounted into the
-runtime, so that edits land directly in the host with no syncing or copying.
+This project uses Apple's
+[Containerization](https://github.com/apple/containerization) framework to
+attempt to contain Claude, and Apple's
+[container CLI](https://github.com/apple/container) to build the image it runs.
+The current directory is bind-mounted into the runtime, so that edits land
+directly in the host with no syncing or copying.
 
 Claude can only reach what is mounted; builds and tests may be configured to
 allow Claude Code to execute specific commands on the host--with no need to
@@ -28,7 +31,7 @@ at `.config/compostbin.toml`. A first session is four commands:
 ``` sh
 compostbin init         # write the manifest
 compostbin build        # build the base image, shared by every project
-compostbin doctor       # check the daemon, the image, credentials, the mounts
+compostbin doctor       # check the store, the image, credentials, the mounts
 compostbin run          # start the session and attach Claude
 ```
 
@@ -56,7 +59,7 @@ tools may be configured on top of the base image.
 
 `compostbin doctor` checks whether a session would work. It checks:
 
-- the `container` CLI and whether its daemon is responding
+- what runs containers, and whether its image store can be read
 - whether the base image has been built
 - whether the session can authenticate
 - every declared path: that it exists, and whether symlinks escape the mounted
@@ -114,11 +117,6 @@ way.
 `compostbin ls` lists what the session mounts: each host path, where it appears
 in the guest, and why it is there — the project directory, a workspace root, an
 explicit `[[paths]]` entry, or a local one.
-
-### stop
-
-`compostbin stop` stops and deletes the session's container. State that outlives
-it—the Claude home—is left intact.
 
 ### clean
 
@@ -246,16 +244,19 @@ Host services on fixed ports, such as MCP servers, reach the guest at its own
 ports = [7001, 7002]
 ```
 
-Each port is relayed through a unix socket in the session's own directory, which
-`container` carries into this container and no other: nothing listens on a
-network address, and **no other container on this Mac can reach a forwarded
-port**. Changing ports takes a restart.
+Each port is relayed through a unix socket in the session's own directory,
+carried into this container and no other: nothing listens on a network address,
+and **no other container on this Mac can reach a forwarded port**. Changing
+ports takes a restart, since the relays are set up when the VM starts.
 
-The sockets are held by a small relay process that starts with the container and
-ends with it, rather than by whoever is attached; leaving a session and
-starting another one keeps the ports up. `compostbin stop` ends it; if it is
-killed some other way, `doctor` says so, and the ports come back with a
-`stop` and a `run`.
+`run` holds the sockets for as long as the session lives, on a thread beside the
+host-command agent. Both end when Claude exits, which is also when the VM goes.
+
+A declared port whose host service has not started yet is an ordinary state —
+starting one through `compostbin-host` is a reason it would refuse for a while —
+so once Claude is attached the relay writes to `ports.log` in the session
+directory rather than to the terminal, which by then is Claude's. `doctor` is
+what says a port has nothing behind it.
 
 ### Clipboard
 
@@ -293,31 +294,26 @@ The briefing is written when the container is created, so an edited
 
 ## Containerization.framework
 
-An experiment, not a supported path. With `COMPOSTBIN_ENGINE=framework`, `run`
-and `shell` drive the session through
+A session is a virtual machine this process owns, through
 [Containerization](https://github.com/apple/containerization) — the Swift
-package the `container` CLI is itself built on — instead of shelling out to the
-CLI:
+package the `container` CLI is itself built on. There is no daemon, and nothing
+shells out to `container` to run anything.
 
-``` sh
-cargo build --release && bin/dev/sign target/release/compostbin
-COMPOSTBIN_ENGINE=framework ./target/release/compostbin run
-COMPOSTBIN_ENGINE=framework ./target/release/compostbin shell   # another terminal
-```
-
-An environment variable rather than a manifest key on purpose: the framework
-path is an experiment, and a manifest key is a promise to keep reading it.
-Unset, everything behaves exactly as before.
-
-`build` never moves — Containerization manages and pulls OCI images but does
-not build them, so it stays on `container build` and BuildKit.
+`build` is the exception, and a permanent one: Containerization manages and
+pulls OCI images but does not build them, so `compostbin build` still drives
+`container build` and BuildKit. That is why `Engine` has no `build` — image
+building is `apple_container::builder`, a separate thing a session never does.
 
 ### Who owns the VM
 
-This is the whole difference. The `container` CLI's daemon holds a container
-*out of process*, so any terminal can reach a session. A `LinuxContainer` dies
-with the process that created it, so under this engine `compostbin run` **is**
-the thing holding the session, and `shell` becomes a client of it.
+This shapes everything else. A daemon would hold a container *out of process*,
+so any terminal could reach a session; a `LinuxContainer` instead dies with the
+process that created it. So `compostbin run` **is** the thing holding the
+session, and `shell` is a client of it.
+
+It is also why there is no `compostbin stop`: nothing outlives `run` to be
+stopped. Leaving the session ends the VM, and `compostbin clean` is what removes
+what it left behind.
 
 They talk over a unix socket in the session's state directory, and what crosses
 it is the client's **terminal**, not its bytes: the request is sent with
@@ -330,6 +326,20 @@ nudge on each window resize, and the exit code coming back.
 
 The consequence to know about: when `run` exits, the VM goes with it, and a
 `shell` attached to it ends too.
+
+### Host ports are relayed, not mounted
+
+`[host] ports` puts one unix socket per port in the session directory and gives
+the guest the other end. The `container` CLI has no flag for that: it infers a
+relay from a `--volume` whose source is already a socket, which is undocumented
+and inspected at creation. Containerization takes it as configuration —
+`UnixSocketConfiguration`, with a direction and a mode of its own.
+
+So `RunSpec` says which it means: `mounts` for filesystems, `sockets` for
+relays. `CliEngine` renders both as `--volume`, since the inference is the only
+way to ask; the framework engine puts sockets in `config.sockets`, where a
+socket mounted as a filesystem — which is not a relay, and not much of a mount
+— cannot happen by accident.
 
 ### Attached processes are seeded from the image
 

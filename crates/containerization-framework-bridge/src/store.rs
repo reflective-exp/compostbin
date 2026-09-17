@@ -42,6 +42,8 @@ pub enum StoreError {
   /// A store, but without the kernel or the initfs a boot needs. A CLI too old
   /// to have written them, or one whose `container system start` has not run.
   Incomplete { root: PathBuf, missing: String },
+  /// The index is there and cannot be read.
+  Unreadable { path: PathBuf, source: String },
 }
 
 impl std::fmt::Display for StoreError {
@@ -55,6 +57,7 @@ impl std::fmt::Display for StoreError {
       Self::Incomplete { root, missing } => {
         write!(formatter, "the container store at {} has no {missing}", root.display())
       }
+      Self::Unreadable { path, source } => write!(formatter, "cannot read {}: {source}", path.display()),
     }
   }
 }
@@ -114,6 +117,38 @@ impl Store {
     INITFS_REFERENCE
   }
 
+  /// Every image the store holds, as `name:tag`.
+  ///
+  /// The index is a JSON object keyed by reference, so the keys are the answer.
+  /// Read by hand rather than parsed: one level of keys is all that is wanted,
+  /// and the values are OCI descriptors this has no use for.
+  pub fn images(&self) -> Result<Vec<String>, StoreError> {
+    let index = self.root.join(INDEX);
+    let text = std::fs::read_to_string(&index)
+      .map_err(|source| StoreError::Unreadable {
+        path: index,
+        source: source.to_string(),
+      })?
+      .replace("\\/", "/");
+
+    let mut references: Vec<String> = text
+      .match_indices("\":{")
+      .filter_map(|(at, _)| {
+        text[..at]
+          .rfind('"')
+          .map(|start| text[start + 1..at].to_string())
+      })
+      // Nested objects are keyed too — annotations above all — and their keys
+      // are not references. A reference always carries a tag.
+      .filter(|reference| reference.contains(':'))
+      .collect();
+
+    references.sort();
+    references.dedup();
+
+    Ok(references)
+  }
+
   /// Whether the index names an image. A substring test, not a parse: the index
   /// is keyed by reference, and a reference cannot occur anywhere else in it.
   ///
@@ -163,6 +198,27 @@ mod tests {
   /// one passed while the real one did not.
   fn index_holding(reference: &str) -> String {
     format!("{{\"{}\":{{}}}}", reference.replace('/', "\\/"))
+  }
+
+  /// As the CLI writes it: nested objects, escaped slashes, and an
+  /// `annotations` key that is not an image.
+  #[test]
+  fn lists_the_references_the_index_names() {
+    let root = tempfile::tempdir().expect("a temp dir");
+    std::fs::write(
+      root.path().join(INDEX),
+      r#"{"compostbin\/base:latest":{"digest":"sha256:aa","annotations":{"org.opencontainers.image.ref.name":"latest"}},"docker.io\/library\/debian:stable-slim":{"digest":"sha256:bb"}}"#,
+    )
+    .expect("index");
+
+    let store = Store {
+      root: root.path().to_path_buf(),
+    };
+
+    assert_eq!(
+      store.images().expect("the index should be readable"),
+      ["compostbin/base:latest", "docker.io/library/debian:stable-slim"]
+    );
   }
 
   #[test]

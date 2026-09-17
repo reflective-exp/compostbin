@@ -7,5 +7,4 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 cargo build --release
 "$root/bin/dev/sign" ./target/release/compostbin
 ./target/release/compostbin build
-./target/release/compostbin stop
 ./target/release/compostbin run -- "$@"

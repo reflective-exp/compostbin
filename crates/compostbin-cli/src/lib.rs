@@ -1,7 +1,7 @@
 pub mod cli;
-mod engine;
 mod report;
 
+use apple_container::builder::CliBuilder;
 use apple_container::engine::Engine;
 use clap::Parser;
 use cli::{Arguments, Command};
@@ -16,113 +16,39 @@ use compostbin_core::signals;
 use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
-use engine::select;
 use std::error::Error;
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-
-/// How long `run` waits for the relay it started to have its sockets up. They
-/// must be sockets before the container is created — `container` relays a
-/// source that is already one, and mounts anything else as a plain file.
-const RELAY_READY_TIMEOUT: Duration = Duration::from_secs(5);
-const RELAY_READY_POLL: Duration = Duration::from_millis(25);
-
-/// Starts the relay that holds this session's port sockets, unless one is
-/// already holding them.
-///
-/// It is a separate process, detached from this terminal, because its sockets
-/// belong to the container rather than to whoever is attached: the relay
-/// `container` sets up is bound to the socket that existed when the container
-/// was created, so a socket dropped and rebound mid-life is not reattached.
-/// Leaving a session and starting another one must not cost the session its
-/// ports, so the thing holding them outlives the attach and ends with the
-/// container.
-fn start_port_relay(session: &Session, project_dir: &std::path::Path) -> Result<(), Box<dyn Error>> {
-  let forwards = session.forwards();
-
-  if forwards.is_empty() || forwards.iter().all(host::served) {
-    return Ok(());
-  }
-
-  let log = std::fs::File::options()
-    .append(true)
-    .create(true)
-    .open(session.ports_log())?;
-
-  let mut relay = std::process::Command::new(std::env::current_exe()?);
-  relay
-    .arg("port-relay")
-    .current_dir(project_dir)
-    .stdin(std::process::Stdio::null())
-    .stdout(log.try_clone()?)
-    .stderr(log)
-    // Its own process group, so the Ctrl-C that interrupts Claude does not
-    // reach the relay: the container is still there, and so are its ports.
-    .process_group(0);
-  relay.spawn()?;
-
-  let deadline = Instant::now() + RELAY_READY_TIMEOUT;
-  while !forwards.iter().all(host::served) {
-    if Instant::now() > deadline {
-      return Err(
-        format!(
-          "the port relay did not come up within {RELAY_READY_TIMEOUT:?}; see {}",
-          session.ports_log().display()
-        )
-        .into(),
-      );
-    }
-    std::thread::sleep(RELAY_READY_POLL);
-  }
-
-  Ok(())
-}
-
-/// What a session attaching to a container someone else started can say about
-/// its ports. Normally the relay is right there, holding them; if it is not,
-/// nothing this process does would reach the guest — the container's end is
-/// bound to the socket that existed when it was created — so the fix is to
-/// recreate the container, and saying so is all that is left.
-fn report_adopted_ports(session: &Session) {
-  let forwards = session.forwards();
-  if forwards.is_empty() {
-    return;
-  }
-
-  if forwards.iter().all(host::served) {
-    println!("forwarding host ports {}", port_list(session));
-    return;
-  }
-
-  eprintln!(
-    "compostbin: host ports {} are declared but their relay is gone; `compostbin stop` then `compostbin run` restores them",
-    port_list(session)
-  );
-}
-
-fn port_list(session: &Session) -> String {
-  session
-    .manifest
-    .host
-    .ports
-    .iter()
-    .map(u16::to_string)
-    .collect::<Vec<String>>()
-    .join(", ")
-}
 
 /// What the relay says, in the terms a user would look for.
-fn report_port(event: PortEvent) {
+fn describe_port(event: &PortEvent) -> String {
   match event {
-    PortEvent::Listening(forward) => eprintln!(
-      "compostbin: forwarding localhost:{} to {}",
-      forward.port(),
-      forward.upstream
-    ),
+    PortEvent::Listening(forward) => format!("forwarding localhost:{} to {}", forward.port(), forward.upstream),
     PortEvent::UpstreamRefused(forward, error) => {
-      eprintln!("compostbin: nothing answers at {}: {error}", forward.upstream)
+      format!("nothing answers at {}: {error}", forward.upstream)
+    }
+  }
+}
+
+/// For the events that happen before Claude is attached, when the terminal is
+/// still ours to write to.
+fn report_port(event: PortEvent) {
+  eprintln!("compostbin: {}", describe_port(&event));
+}
+
+/// For the events that happen after.
+///
+/// A host service that has not started yet is an ordinary state — starting one
+/// through `compostbin-host` is a reason a port would refuse for a while — so
+/// the first connection to find it down must not draw over the session to say
+/// so. It still has to be somewhere, because a port that never comes up looks
+/// exactly the same from the guest.
+fn log_port(log: &std::path::Path) -> impl Fn(PortEvent) + Sync + '_ {
+  move |event| {
+    use std::io::Write;
+
+    if let Ok(mut file) = std::fs::File::options().append(true).create(true).open(log) {
+      let _ = writeln!(file, "{}", describe_port(&event));
     }
   }
 }
@@ -204,11 +130,9 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
         return Ok(1);
       }
 
-      // The ports belong to whatever created the container: their sockets were
-      // bound before it started, and nothing bound afterwards reaches it. So
-      // this says how they stand and serves the spool.
-      report_adopted_ports(&session);
-
+      // Only the spool. A session's ports belong to the `run` that created the
+      // VM and holds them for as long as it lives, so there is nothing here for
+      // another process to take over.
       if !session.manifest.host.has_commands() {
         return Ok(1);
       }
@@ -303,22 +227,22 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       let engine = select(&session)?;
       session.prepare_host_spool()?;
 
-      // Before the container is created, since the sockets have to be sockets
-      // by the time `container run` reads them — and only when this run is the
-      // one creating it. Attaching to a container that already has a relay
-      // leaves that relay exactly where it is.
-      if !session.is_running(&engine)? {
-        start_port_relay(&session, &project_dir)?;
-      }
+      // Before the container is created: each source has to already be a socket
+      // when the VM's relays are set up, and they are set up at start.
+      let bound = host::bind_all(&session.forwards(), &report_port)?;
 
       session.start(&engine)?;
-      report_adopted_ports(&session);
 
       let mut claude = vec!["claude".to_string()];
       claude.extend(arguments);
 
-      // The agent lives as long as the session: `exec` blocks until Claude
-      // exits, and the flag stops it as soon as it does.
+      // Both the agent and the relay live as long as the session: `exec` blocks
+      // until Claude exits, and the flag stops them as soon as it does.
+      //
+      // Threads rather than a process of their own. Under the `container` CLI
+      // the ports had to outlive this terminal, because the container did; the
+      // VM now dies with this process, so anything holding its ports afterwards
+      // would be holding them for nobody.
       let stop = AtomicBool::new(false);
       let spool = Spool::new(session.host_spool());
 
@@ -337,6 +261,16 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
           });
         }
 
+        if !bound.is_empty() {
+          // The log path moves in; the flag and the sockets are shared with the
+          // attach that ends them.
+          let log = session.ports_log();
+          let bound = &bound;
+          let stop = &stop;
+
+          scope.spawn(move || host::relay(bound, stop, &log_port(&log)));
+        }
+
         let code = engine.exec(&session.exec_spec(&claude));
         stop.store(true, Ordering::Relaxed);
         code
@@ -351,68 +285,9 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       Ok(code)
     }
 
-    Command::PortRelay => {
-      let session = load_session(&manifest_path, resolver, &project_dir)?;
-      let forwards = session.forwards();
-
-      if forwards.is_empty() {
-        eprintln!("no [host] ports in {}; nothing to relay", manifest_path.display());
-        return Ok(1);
-      }
-
-      // Another relay already holds them, which is the whole point of this
-      // being a process of its own: it survived whatever started it.
-      if forwards.iter().all(host::served) {
-        eprintln!("the ports are already held by another relay");
-        return Ok(0);
-      }
-
-      // Before binding, so a signal arriving immediately still unlinks the
-      // sockets rather than leaving them for the next session to adopt.
-      let stop = signals::stop_on_termination()?;
-      let bound = host::bind_all(&forwards, &report_port)?;
-      std::fs::write(session.ports_pid(), std::process::id().to_string())?;
-
-      let engine = select(&session)?;
-      std::thread::scope(|scope| {
-        scope.spawn(|| {
-          host::watch(
-            &session.container_name(),
-            &engine,
-            stop,
-            host::APPEAR_GRACE,
-            host::VANISH_GRACE,
-          );
-        });
-
-        host::relay(&bound, stop, &report_port);
-      });
-
-      // The sockets are this process's: nothing else can tell a live one from
-      // one left by a relay that died, so leaving them would make the next
-      // session read a dead relay as a working one.
-      drop(bound);
-      let _ = std::fs::remove_dir_all(session.port_sockets());
-      let _ = std::fs::remove_file(session.ports_pid());
-
-      eprintln!("the container is gone; the relay is stopping");
-
-      Ok(0)
-    }
-
     Command::Shell => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
       Ok(select(&session)?.exec(&session.exec_spec(&["bash".to_string()]))?)
-    }
-
-    Command::Stop => {
-      let session = load_session(&manifest_path, resolver, &project_dir)?;
-      let engine = select(&session)?;
-      let name = session.container_name();
-      session.remove_container(&engine)?;
-      session.clean(false)?;
-      println!("stopped {name}");
-      Ok(0)
     }
   }
 }
@@ -431,7 +306,10 @@ fn build_base_image(session: &Session) -> Result<i32, Box<dyn Error>> {
     );
   }
 
-  Ok(image::build(session, &select(session)?)?)
+  // Not the engine: Containerization manages and pulls images but does not
+  // build them, so BuildKit-in-a-container is still the CLI's job and always
+  // will be.
+  Ok(image::build(session, &CliBuilder::new())?)
 }
 
 /// Prints every check, exiting non-zero when any of them failed so `doctor` is
@@ -447,6 +325,75 @@ fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
   print!("{}", report::Diagnosis(&checks));
 
   Ok(i32::from(checks.iter().any(|check| check.status == Status::Fail)))
+}
+
+/// The engine a session runs on.
+///
+/// One implementation now: Containerization.framework, in this process. The
+/// `container` CLI still builds images — nothing in the framework replaces
+/// BuildKit — but it no longer runs anything.
+#[cfg(target_os = "macos")]
+fn select(session: &Session) -> Result<containerization_framework_bridge::FrameworkEngine, Box<dyn Error>> {
+  let store = containerization_framework_bridge::Store::discover()?;
+
+  // The control socket lives here, so the directory has to exist before `run`
+  // binds it — earlier than anything else would have created it.
+  std::fs::create_dir_all(session.state_dir())?;
+
+  Ok(containerization_framework_bridge::FrameworkEngine::new(
+    session.state_dir(),
+    store,
+  ))
+}
+
+/// compostbin only runs on macOS, but it has to compile inside its own Debian
+/// guest — where `cargo check` is how a session checks its work. Nothing
+/// constructs this; it exists so `select` has a type to fail with.
+#[cfg(not(target_os = "macos"))]
+mod unsupported {
+  use apple_container::error::EngineError;
+  use apple_container::model::{ExecSpec, RunSpec};
+
+  pub struct Engine;
+
+  impl apple_container::engine::Engine for Engine {
+    fn containers(&self) -> Result<Vec<String>, EngineError> {
+      unreachable!("no session runs off macOS")
+    }
+
+    fn delete(&self, _name: &str) -> Result<(), EngineError> {
+      unreachable!("no session runs off macOS")
+    }
+
+    fn exec(&self, _spec: &ExecSpec) -> Result<i32, EngineError> {
+      unreachable!("no session runs off macOS")
+    }
+
+    fn images(&self) -> Result<Vec<String>, EngineError> {
+      unreachable!("no session runs off macOS")
+    }
+
+    fn run(&self, _spec: &RunSpec) -> Result<String, EngineError> {
+      unreachable!("no session runs off macOS")
+    }
+
+    fn running_containers(&self) -> Result<Vec<String>, EngineError> {
+      unreachable!("no session runs off macOS")
+    }
+
+    fn stop(&self, _name: &str) -> Result<(), EngineError> {
+      unreachable!("no session runs off macOS")
+    }
+
+    fn version(&self) -> Result<Option<String>, EngineError> {
+      unreachable!("no session runs off macOS")
+    }
+  }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn select(_session: &Session) -> Result<unsupported::Engine, Box<dyn Error>> {
+  Err("Containerization.framework is macOS only".into())
 }
 
 /// Writes back whichever file the new entry belongs to, leaving the other

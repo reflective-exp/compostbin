@@ -1,7 +1,7 @@
 use crate::error::{ImageError, PathError};
 use crate::manifest::Manifest;
 use crate::session::Session;
-use apple_container::engine::Engine;
+use apple_container::builder::Builder;
 use apple_container::model::BuildSpec;
 use std::path::PathBuf;
 
@@ -34,7 +34,7 @@ pub const GUEST_PORTS_NAME: &str = "compostbin-ports";
 /// The base is shared by every project, so anything belonging to one project —
 /// direnv, a language toolchain, a private CA — goes in the derived image rather
 /// than growing the base for everyone.
-pub fn build(session: &Session, engine: &impl Engine) -> Result<i32, ImageError> {
+pub fn build(session: &Session, builder: &impl Builder) -> Result<i32, ImageError> {
   let context = context(session);
   std::fs::create_dir_all(&context).map_err(|source| ImageError::Io(PathError::new(&context, source)))?;
 
@@ -49,9 +49,9 @@ pub fn build(session: &Session, engine: &impl Engine) -> Result<i32, ImageError>
     std::fs::write(&path, contents).map_err(|source| ImageError::Io(PathError::new(&path, source)))?;
   }
 
-  engine.start_builder(Some(BUILD_MEMORY))?;
+  builder.start_builder(Some(BUILD_MEMORY))?;
 
-  let code = engine.build(&BuildSpec {
+  let code = builder.build(&BuildSpec {
     context,
     memory: Some(BUILD_MEMORY.to_string()),
     tag: session.manifest.project.image.clone(),
@@ -70,7 +70,7 @@ pub fn build(session: &Session, engine: &impl Engine) -> Result<i32, ImageError>
   let path = context.join(DOCKERFILE_NAME);
   std::fs::write(&path, dockerfile).map_err(|source| ImageError::Io(PathError::new(&path, source)))?;
 
-  Ok(engine.build(&BuildSpec {
+  Ok(builder.build(&BuildSpec {
     context,
     memory: Some(BUILD_MEMORY.to_string()),
     tag: session.image(),
@@ -138,7 +138,7 @@ mod tests {
   use super::*;
   use crate::manifest::Manifest;
   use crate::workspace::paths::PathResolver;
-  use apple_container::fake::RecordingEngine;
+  use apple_container::fake::RecordingBuilder;
   use tempfile::TempDir;
 
   fn session(home: &TempDir) -> Session {
@@ -156,7 +156,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let session = session(&home);
 
-    build(&session, &RecordingEngine::new()).expect("build should succeed");
+    build(&session, &RecordingBuilder::new()).expect("build should succeed");
 
     assert_eq!(
       std::fs::read_to_string(context(&session).join(DOCKERFILE_NAME)).expect("Dockerfile should exist"),
@@ -171,7 +171,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let session = session(&home);
 
-    build(&session, &RecordingEngine::new()).expect("build should succeed");
+    build(&session, &RecordingBuilder::new()).expect("build should succeed");
 
     let client = context(&session).join(GUEST_CLIENT_NAME);
     assert_eq!(
@@ -184,12 +184,12 @@ mod tests {
   fn starts_the_builder_before_building_the_manifest_image() {
     let home = TempDir::new().expect("temp dir");
     let session = session(&home);
-    let engine = RecordingEngine::new();
+    let builder = RecordingBuilder::new();
 
-    build(&session, &engine).expect("build should succeed");
+    build(&session, &builder).expect("build should succeed");
 
     assert_eq!(
-      engine.calls(),
+      builder.calls(),
       [
         vec![
           "builder".to_string(),
@@ -217,11 +217,11 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let mut session = session(&home);
     session.manifest.container.memory = "16G".to_string();
-    let engine = RecordingEngine::new();
+    let builder = RecordingBuilder::new();
 
-    build(&session, &engine).expect("build should succeed");
+    build(&session, &builder).expect("build should succeed");
 
-    let calls = engine.calls();
+    let calls = builder.calls();
     assert!(
       !calls.iter().flatten().any(|word| word == "16G"),
       "the runtime memory leaked into the build: {calls:?}"
@@ -321,11 +321,11 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let mut session = session(&home);
     session.manifest.image.packages = vec!["direnv".to_string()];
-    let engine = RecordingEngine::new();
+    let builder = RecordingBuilder::new();
 
-    build(&session, &engine).expect("build should succeed");
+    build(&session, &builder).expect("build should succeed");
 
-    let calls = engine.calls();
+    let calls = builder.calls();
     assert_eq!(calls.len(), 3, "builder, base, project: {calls:?}");
     assert!(calls[1].contains(&"compostbin/base:latest".to_string()), "{calls:?}");
     assert!(calls[2].contains(&session.image()), "{calls:?}");
@@ -339,11 +339,11 @@ mod tests {
   fn builds_only_the_base_when_the_manifest_adds_nothing() {
     let home = TempDir::new().expect("temp dir");
     let session = session(&home);
-    let engine = RecordingEngine::new();
+    let builder = RecordingBuilder::new();
 
-    build(&session, &engine).expect("build should succeed");
+    build(&session, &builder).expect("build should succeed");
 
-    assert_eq!(engine.calls().len(), 2, "builder and base only");
+    assert_eq!(builder.calls().len(), 2, "builder and base only");
     assert!(!project_context(&session).exists());
   }
 
@@ -366,7 +366,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let session = session(&home);
 
-    build(&session, &RecordingEngine::new()).expect("build should succeed");
+    build(&session, &RecordingBuilder::new()).expect("build should succeed");
 
     assert_eq!(
       std::fs::read_to_string(context(&session).join(GUEST_PORTS_NAME)).expect("the relay should exist"),
@@ -388,7 +388,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let session = session(&home);
 
-    build(&session, &RecordingEngine::new()).expect("build should succeed");
+    build(&session, &RecordingBuilder::new()).expect("build should succeed");
 
     assert_eq!(
       std::fs::read_to_string(context(&session).join(GUEST_CLIPBOARD_NAME)).expect("the tools should exist"),

@@ -19,7 +19,7 @@ use crate::session::record::{RECORD_FILE, Record};
 use crate::workspace::paths::{PathResolver, root_containing};
 use crate::workspace::{Origin, Workspace};
 use apple_container::engine::Engine;
-use apple_container::model::{EnvVar, ExecSpec, Mount, RunSpec};
+use apple_container::model::{EnvVar, ExecSpec, Mount, RunSpec, SocketRelay};
 use std::path::PathBuf;
 
 /// Where Claude's home is mounted inside the container, which runs as `claude`.
@@ -33,10 +33,8 @@ pub const SPOOL_DIR: &str = "host";
 /// live exactly as long as the container created with them — and so outlive the
 /// `run` that created it.
 pub const PORTS_DIR: &str = "ports";
-/// Where the relay writes, having outlived the terminal that started it.
+/// Where the relay says what it could not, while a session is attached.
 pub const PORTS_LOG: &str = "ports.log";
-/// The relay's own pid, so `stop` can end it.
-pub const PORTS_PID: &str = "ports.pid";
 /// Keeps a detached container alive so `exec` has something to attach to.
 pub const KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
 pub const NAME_PREFIX: &str = "compostbin-";
@@ -183,10 +181,6 @@ impl Session {
   /// exception: it discards the conversation too, so the session it belonged to
   /// is over by definition.
   pub fn clean(&self, everything: bool) -> Result<Vec<PathBuf>, PathError> {
-    // Before the sockets go: a relay left holding unlinked sockets would look
-    // alive to the next session and serve nothing.
-    self.stop_port_relay();
-
     if everything {
       let state = self.state_dir();
       if !state.exists() {
@@ -300,23 +294,6 @@ impl Session {
       });
     }
 
-    // One socket per declared port, each of which `container` turns into a
-    // relay rather than a mount — but only if it is already a socket when the
-    // container is created, which is why these are bound before it starts.
-    for forward in self.forwards() {
-      mounts.push(Mount {
-        readonly: false,
-        target: PathBuf::from(GUEST_PORTS_TARGET).join(
-          forward
-            .listen
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_default(),
-        ),
-        source: forward.listen,
-      });
-    }
-
     // Unconditional, unlike the spool: a session with no host commands still
     // needs to know it is in a container. Read-only, because the guest changing
     // what it is told is the whole point of managed settings.
@@ -337,6 +314,29 @@ impl Session {
 
   /// Where the session lands inside the container. The fallback to `/workspace`
   /// keeps a misconfigured manifest from starting in an unmounted directory.
+  /// One socket per declared port, carried into the guest rather than mounted
+  /// there, and named after the port so the guest's relay finds it without
+  /// being told where to look.
+  ///
+  /// Each has to be a live socket by the time the container is created, which
+  /// is why `run` starts the relay that binds them first.
+  pub fn sockets(&self) -> Vec<SocketRelay> {
+    self
+      .forwards()
+      .into_iter()
+      .map(|forward| SocketRelay {
+        target: PathBuf::from(GUEST_PORTS_TARGET).join(
+          forward
+            .listen
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_default(),
+        ),
+        source: forward.listen,
+      })
+      .collect()
+  }
+
   pub fn workdir(&self) -> PathBuf {
     self
       .workspace()
@@ -358,36 +358,15 @@ impl Session {
     self.state_dir().join(PORTS_DIR)
   }
 
-  /// Where the relay says what it could not: it outlives the terminal that
-  /// started it, so it has nowhere else to put a refused upstream.
+  /// Where the relay writes once Claude is attached.
+  ///
+  /// A file rather than the terminal, because by then the terminal is Claude's:
+  /// the relay runs on a thread of `run`, and anything it printed would land in
+  /// the middle of what Claude is drawing. A host service that has not started
+  /// yet is an ordinary state — `[host.commands]` is one of the ways it starts
+  /// — so the first connection to refuse must not look like a fault.
   pub fn ports_log(&self) -> PathBuf {
     self.state_dir().join(PORTS_LOG)
-  }
-
-  /// Written by the relay once its sockets are up, so `stop` can end it at once
-  /// rather than leaving it to notice the container is gone.
-  pub fn ports_pid(&self) -> PathBuf {
-    self.state_dir().join(PORTS_PID)
-  }
-
-  /// Ends the port relay, if one is running. Best effort by construction: the
-  /// pid file outlives a killed relay, and the relay ends itself anyway once
-  /// the container has been gone a while.
-  pub fn stop_port_relay(&self) {
-    let path = self.ports_pid();
-
-    if let Ok(contents) = std::fs::read_to_string(&path)
-      && let Ok(pid) = contents.trim().parse::<i32>()
-    {
-      // SAFETY: `kill` takes two integers and touches nothing of ours. A pid
-      // that has been reused is the reason this is best effort; the file is
-      // written by the relay and lives under the session directory.
-      unsafe {
-        libc::kill(pid, libc::SIGTERM);
-      }
-    }
-
-    let _ = std::fs::remove_file(&path);
   }
 
   /// The source side of the managed settings mount: what this session tells its
@@ -451,6 +430,7 @@ impl Session {
       memory: Some(self.manifest.container.memory.clone()),
       mounts: self.mounts(),
       name: self.container_name(),
+      sockets: self.sockets(),
       workdir: Some(self.workdir()),
     }
   }
@@ -488,7 +468,7 @@ impl Session {
     }
 
     engine.run(&spec)?;
-    Record::of(&spec.mounts).save(&self.mount_record())?;
+    Record::of(&spec.mounts, &spec.sockets).save(&self.mount_record())?;
 
     Ok(())
   }
@@ -705,7 +685,7 @@ source   = "~/.cargo/registry"
 
     assert_eq!(
       engine.calls(),
-      [vec!["ls", "--quiet"]],
+      [vec!["running"]],
       "a running container must not be recreated"
     );
   }
@@ -720,8 +700,8 @@ source   = "~/.cargo/registry"
     session.start(&engine).expect("start should succeed");
 
     let calls = engine.calls();
-    assert_eq!(calls[0], ["ls", "--quiet"]);
-    assert_eq!(calls[1], ["ls", "--all", "--quiet"]);
+    assert_eq!(calls[0], ["running"]);
+    assert_eq!(calls[1], ["containers"]);
     assert_eq!(calls[2], ["delete", "compostbin-cb"]);
     assert_eq!(calls[3], session.run_spec().to_argv());
     assert_eq!(calls.len(), 4);
@@ -737,8 +717,8 @@ source   = "~/.cargo/registry"
     session.start(&engine).expect("start should succeed");
 
     let calls = engine.calls();
-    assert_eq!(calls[0], ["ls", "--quiet"]);
-    assert_eq!(calls[1], ["ls", "--all", "--quiet"]);
+    assert_eq!(calls[0], ["running"]);
+    assert_eq!(calls[1], ["containers"]);
     assert_eq!(calls[2], session.run_spec().to_argv());
     assert_eq!(calls.len(), 3, "nothing to delete: {calls:?}");
   }
@@ -780,9 +760,9 @@ source   = "~/.cargo/registry"
     session.restart(&engine).expect("restart should succeed");
 
     let calls = engine.calls();
-    assert_eq!(calls[0], ["ls", "--quiet"]);
+    assert_eq!(calls[0], ["running"]);
     assert_eq!(calls[1], ["stop", "compostbin-cb"]);
-    assert_eq!(calls[2], ["ls", "--all", "--quiet"]);
+    assert_eq!(calls[2], ["containers"]);
     assert_eq!(calls[3], ["delete", "compostbin-cb"]);
     assert_eq!(calls[4], session.run_spec().to_argv());
     assert_eq!(
@@ -804,11 +784,7 @@ source   = "~/.cargo/registry"
 
     assert_eq!(
       engine.calls(),
-      [
-        vec!["ls", "--quiet"],
-        vec!["ls", "--all", "--quiet"],
-        vec!["delete", "compostbin-cb"]
-      ]
+      [vec!["running"], vec!["containers"], vec!["delete", "compostbin-cb"]]
     );
   }
 
@@ -822,7 +798,7 @@ source   = "~/.cargo/registry"
 
     assert_eq!(
       engine.calls(),
-      [vec!["ls", "--quiet"], vec!["ls", "--all", "--quiet"]],
+      [vec!["running"], vec!["containers"]],
       "another session's container must be left alone"
     );
   }
@@ -857,7 +833,7 @@ source   = "~/.cargo/registry"
     let recorded = Record::load(&session.mount_record())
       .expect("load should succeed")
       .expect("start must have written a record");
-    assert_eq!(recorded, Record::of(&session.mounts()));
+    assert_eq!(recorded, Record::of(&session.mounts(), &session.sockets()));
 
     // The container still has the mounts it was created with.
     session.manifest.paths.push(PathEntry {
@@ -868,7 +844,9 @@ source   = "~/.cargo/registry"
     });
 
     assert!(
-      !recorded.drift(&session.mounts()).is_empty(),
+      !recorded
+        .drift(&session.mounts(), &session.sockets())
+        .is_empty(),
       "a path added mid-session is not mounted until the container is recreated"
     );
   }
@@ -926,7 +904,9 @@ source   = "~/.cargo/registry"
       .expect("restart must have rewritten the record");
 
     assert!(
-      recorded.drift(&session.mounts()).is_empty(),
+      recorded
+        .drift(&session.mounts(), &session.sockets())
+        .is_empty(),
       "the record must describe the container that is running now: {recorded:?}"
     );
   }
@@ -1183,44 +1163,55 @@ source   = "~/.cargo/registry"
     );
   }
 
-  /// The socket is what `container` turns into a relay, so it has to be mounted
-  /// like any other source — and named after the port, since the guest's relay
-  /// finds it by name.
+  /// Relayed rather than mounted, and named after the port, since the guest's
+  /// relay finds it by name.
   #[test]
-  fn mounts_a_socket_per_declared_port() {
+  fn relays_a_socket_per_declared_port() {
     let mut session = session();
     session.manifest.host.ports = vec![7001, 7002];
 
-    let mounts = session.mounts();
+    let sockets = session.sockets();
 
     for port in [7001, 7002] {
       let source = session
         .state_dir()
         .join("ports")
         .join(format!("{port}.sock"));
-      let mount = mounts
+      let socket = sockets
         .iter()
-        .find(|mount| mount.source == source)
-        .unwrap_or_else(|| panic!("port {port} should be mounted: {mounts:?}"));
+        .find(|socket| socket.source == source)
+        .unwrap_or_else(|| panic!("port {port} should be relayed: {sockets:?}"));
 
       assert_eq!(
-        mount.target,
+        socket.target,
         PathBuf::from(format!("/run/compostbin/ports/{port}.sock"))
       );
-      assert!(!mount.readonly, "the relay is bidirectional");
     }
   }
 
+  /// A socket mounted as a filesystem is not a relay, and the framework engine
+  /// would try exactly that. The two must not be confused again.
   #[test]
-  fn mounts_no_sockets_without_ports() {
-    let session = session();
+  fn mounts_no_socket_for_a_declared_port() {
+    let mut session = session();
+    session.manifest.host.ports = vec![7001];
 
     assert!(
       !session
         .mounts()
         .iter()
         .any(|mount| mount.source.starts_with(session.port_sockets())),
-      "a session declaring no ports mounts nothing under ports/"
+      "a declared port is relayed, never mounted"
+    );
+  }
+
+  #[test]
+  fn relays_no_sockets_without_ports() {
+    let session = session();
+
+    assert!(
+      session.sockets().is_empty(),
+      "a session declaring no ports relays nothing"
     );
   }
 

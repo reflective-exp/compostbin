@@ -1,31 +1,27 @@
-//! What the `container` CLI and its daemon say about themselves, and whether
-//! they hold the image a session needs.
+//! What is running containers, and whether it holds the image a session needs.
 
 use super::{Check, Status, check};
 use crate::session::Session;
 use apple_container::engine::Engine;
 use apple_container::error::EngineError;
 
-/// The `container` CLI version this crate's behaviour was verified against.
-pub const TESTED_CLI_VERSION: &str = "1.3.1";
-
-pub fn cli_version(engine: &impl Engine) -> Check {
+pub fn version(engine: &impl Engine) -> Check {
   match engine.version() {
-    Ok(Some(version)) if version == TESTED_CLI_VERSION => check("container CLI", Status::Ok, version),
-    Ok(Some(version)) => check(
-      "container CLI",
-      Status::Warn,
-      format!("{version}; compostbin was verified against {TESTED_CLI_VERSION}"),
-    ),
-    Ok(None) => check("container CLI", Status::Warn, "unrecognised version output"),
-    Err(error) => check("container CLI", Status::Fail, error.to_string()),
+    Ok(Some(version)) => check("engine", Status::Ok, version),
+    Ok(None) => check("engine", Status::Warn, "cannot say what version it is"),
+    Err(error) => check("engine", Status::Fail, error.to_string()),
   }
 }
 
-pub fn daemon(images: &Result<Vec<String>, EngineError>) -> Check {
+/// Whether the image store can be read at all.
+///
+/// There is no daemon to be up or down any more: a session boots from the store
+/// on disk, so the question is only whether it is there and readable. It is
+/// written by `container build`, which is why the fix is a build.
+pub fn store(images: &Result<Vec<String>, EngineError>) -> Check {
   match images {
-    Ok(_) => check("daemon", Status::Ok, "responding"),
-    Err(error) => check("daemon", Status::Fail, format!("{error}; run `container system start`")),
+    Ok(_) => check("image store", Status::Ok, "readable"),
+    Err(error) => check("image store", Status::Fail, format!("{error}; run `compostbin build`")),
   }
 }
 
@@ -36,7 +32,7 @@ pub fn base_image(session: &Session, images: &Result<Vec<String>, EngineError>) 
     Err(_) => check(
       "base image",
       Status::Fail,
-      format!("cannot look for {wanted} while the daemon is unreachable"),
+      format!("cannot look for {wanted} while the image store is unreadable"),
     ),
     Ok(images) if images.contains(wanted) => check("base image", Status::Ok, wanted),
     Ok(_) => check(

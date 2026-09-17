@@ -12,8 +12,6 @@ use crate::session::Session;
 use crate::session::credentials::CredentialSource;
 use apple_container::engine::Engine;
 
-pub use crate::doctor::engine::TESTED_CLI_VERSION;
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Status {
   Fail,
@@ -44,8 +42,8 @@ pub fn diagnose(
   let images = engine.images();
 
   vec![
-    engine::cli_version(engine),
-    engine::daemon(&images),
+    engine::version(engine),
+    engine::store(&images),
     engine::base_image(session, &images),
     mounts::mounted_paths(session),
     mounts::dangling_symlinks(session),
@@ -138,8 +136,10 @@ mod tests {
     check.items.join("\n")
   }
 
+  /// A session boots from what is on disk, so an unreadable store is the whole
+  /// of the failure: there is nothing to start.
   #[test]
-  fn reports_a_daemon_that_was_never_started() {
+  fn reports_a_store_it_cannot_read() {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");
 
@@ -150,18 +150,18 @@ mod tests {
       false,
     );
 
-    assert_eq!(check(&checks, "daemon").status, Status::Fail);
+    assert_eq!(check(&checks, "image store").status, Status::Fail);
     assert!(
-      check(&checks, "daemon")
+      check(&checks, "image store")
         .detail
-        .contains("container system start"),
+        .contains("compostbin build"),
       "detail should name the fix: {:?}",
-      check(&checks, "daemon")
+      check(&checks, "image store")
     );
     assert_eq!(
       check(&checks, "base image").status,
       Status::Fail,
-      "an unreachable daemon cannot confirm the image"
+      "an unreadable store cannot confirm the image"
     );
   }
 
@@ -177,7 +177,7 @@ mod tests {
       false,
     );
 
-    assert_eq!(check(&checks, "daemon").status, Status::Ok);
+    assert_eq!(check(&checks, "image store").status, Status::Ok);
     assert_eq!(check(&checks, "base image").status, Status::Fail);
     assert!(
       check(&checks, "base image")
@@ -207,7 +207,7 @@ mod tests {
         .collect::<Vec<_>>(),
       Vec::<&Check>::new()
     );
-    assert_eq!(check(&checks, "container CLI").detail, TESTED_CLI_VERSION);
+    assert_eq!(check(&checks, "engine").detail, "Containerization 0.45.0");
   }
 
   #[test]
@@ -450,7 +450,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");
     let mut session = session(&home, &quoted(&base, "workspace"));
-    Record::of(&session.mounts())
+    Record::of(&session.mounts(), &session.sockets())
       .save(&session.mount_record())
       .expect("recording the started container should succeed");
 
@@ -486,7 +486,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");
     let session = session(&home, &quoted(&base, "workspace"));
-    Record::of(&session.mounts())
+    Record::of(&session.mounts(), &session.sockets())
       .save(&session.mount_record())
       .expect("recording the started container should succeed");
 

@@ -71,6 +71,17 @@ impl Request {
   }
 }
 
+/// Whether a connection asked anything at all.
+///
+/// A client always sends a request and a terminal together, in one message, so
+/// a connection carrying neither closed before speaking: a liveness check
+/// rather than an attach that went wrong. The distinction matters only because
+/// the two are otherwise indistinguishable at the point of failure, and one of
+/// them is worth reporting.
+fn probe(payload: &str, terminal: &Option<OwnedFd>) -> bool {
+  payload.is_empty() && terminal.is_none()
+}
+
 fn split(line: &str) -> Vec<String> {
   if line.is_empty() {
     return Vec::new();
@@ -141,6 +152,16 @@ where
   S: Fn(&str, RawFd) + Send,
 {
   let (payload, terminal) = receive(&stream)?;
+
+  // `served` connects and closes without sending, which is how anything asks
+  // whether this session is still up — `running_containers`, and so `doctor`
+  // and the port relay's watch, repeatedly. That is not a client and not an
+  // error, and saying so would put a line into the middle of someone's
+  // session every time it was asked.
+  if probe(&payload, &terminal) {
+    return Ok(());
+  }
+
   let request =
     Request::decode(&payload).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed request"))?;
 
@@ -349,6 +370,21 @@ mod tests {
   #[test]
   fn reads_nothing_from_a_truncated_request() {
     assert_eq!(Request::decode("bash"), None);
+  }
+
+  /// `served` connects and closes. Reporting that as a malformed request put a
+  /// line into the session every time anything asked whether it was running.
+  #[test]
+  fn a_connection_that_says_nothing_is_a_liveness_probe() {
+    assert!(probe("", &None));
+  }
+
+  #[test]
+  fn a_connection_that_says_something_is_not_a_probe() {
+    let file = tempfile::tempfile().expect("a temp file");
+
+    assert!(!probe(&request().encode(), &None));
+    assert!(!probe("", &Some(OwnedFd::from(file))));
   }
 
   #[test]

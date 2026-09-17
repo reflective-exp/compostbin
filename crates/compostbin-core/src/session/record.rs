@@ -9,7 +9,7 @@
 //! need re-probing on every upgrade, while the mounts we passed are already ours.
 
 use crate::error::{ManifestError, PathError};
-use apple_container::model::Mount;
+use apple_container::model::{Mount, SocketRelay};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -35,6 +35,20 @@ impl RecordedMount {
     }
   }
 
+  /// Recorded beside the mounts, and in the same shape.
+  ///
+  /// A relayed socket is not a mount, but it is fixed at creation exactly as a
+  /// mount is, and `doctor` has to say so when a declared port arrives after
+  /// the container did. Keeping both in one list is also what keeps the record
+  /// file's format unchanged.
+  fn of_socket(socket: &SocketRelay) -> Self {
+    Self {
+      readonly: false,
+      source: socket.source.display().to_string(),
+      target: socket.target.display().to_string(),
+    }
+  }
+
   fn describe(&self) -> String {
     let readonly = if self.readonly { ", readonly" } else { "" };
 
@@ -49,9 +63,13 @@ pub struct Record {
 }
 
 impl Record {
-  pub fn of(mounts: &[Mount]) -> Self {
+  pub fn of(mounts: &[Mount], sockets: &[SocketRelay]) -> Self {
     Self {
-      mounts: mounts.iter().map(RecordedMount::of).collect(),
+      mounts: mounts
+        .iter()
+        .map(RecordedMount::of)
+        .chain(sockets.iter().map(RecordedMount::of_socket))
+        .collect(),
     }
   }
 
@@ -91,8 +109,12 @@ impl Record {
   ///
   /// Matched by guest path, since that is what a session reaches for: a mount
   /// whose source moved is a *changed* mount rather than a removal and an add.
-  pub fn drift(&self, wanted: &[Mount]) -> Drift {
-    let wanted: Vec<RecordedMount> = wanted.iter().map(RecordedMount::of).collect();
+  pub fn drift(&self, wanted: &[Mount], sockets: &[SocketRelay]) -> Drift {
+    let wanted: Vec<RecordedMount> = wanted
+      .iter()
+      .map(RecordedMount::of)
+      .chain(sockets.iter().map(RecordedMount::of_socket))
+      .collect();
     let mut drift = Drift::default();
 
     for mount in &wanted {
@@ -171,14 +193,43 @@ mod tests {
   }
 
   fn recorded(mounts: &[Mount]) -> Record {
-    Record::of(mounts)
+    Record::of(mounts, &[])
+  }
+
+  fn socket(source: &str, target: &str) -> SocketRelay {
+    SocketRelay {
+      source: source.into(),
+      target: target.into(),
+    }
+  }
+
+  /// A port declared after the container started is exactly as invisible as a
+  /// mount added after it started, and has the same fix.
+  #[test]
+  fn a_port_declared_since_the_container_started_has_drifted() {
+    let started = Record::of(&[], &[]);
+    let wanted = [socket("/state/ports/7001.sock", "/run/compostbin/ports/7001.sock")];
+
+    let drift = started.drift(&[], &wanted);
+
+    assert_eq!(
+      drift.added,
+      ["/state/ports/7001.sock -> /run/compostbin/ports/7001.sock"]
+    );
+  }
+
+  #[test]
+  fn a_recorded_port_that_is_still_declared_has_not_drifted() {
+    let sockets = [socket("/state/ports/7001.sock", "/run/compostbin/ports/7001.sock")];
+
+    assert!(Record::of(&[], &sockets).drift(&[], &sockets).is_empty());
   }
 
   #[test]
   fn an_unchanged_manifest_has_not_drifted() {
     let mounts = [mount("/host/a", "/workspace/a"), mount("/host/b", "/workspace/b")];
 
-    assert!(recorded(&mounts).drift(&mounts).is_empty());
+    assert!(recorded(&mounts).drift(&mounts, &[]).is_empty());
   }
 
   #[test]
@@ -186,7 +237,7 @@ mod tests {
     let started = [mount("/host/a", "/workspace/a")];
     let wanted = [mount("/host/a", "/workspace/a"), mount("/host/b", "/workspace/b")];
 
-    let drift = recorded(&started).drift(&wanted);
+    let drift = recorded(&started).drift(&wanted, &[]);
 
     assert_eq!(drift.added, ["/host/b -> /workspace/b"]);
     assert!(drift.changed.is_empty() && drift.removed.is_empty(), "{drift:?}");
@@ -207,7 +258,7 @@ mod tests {
     ];
     let wanted = [mount("/host/a", "/workspace/a")];
 
-    let drift = recorded(&started).drift(&wanted);
+    let drift = recorded(&started).drift(&wanted, &[]);
 
     assert_eq!(drift.removed, ["/host/secret -> /workspace/secret"]);
     assert!(
@@ -219,7 +270,7 @@ mod tests {
   /// The session still has `/workspace/a`, pointing somewhere else.
   #[test]
   fn a_mount_whose_source_moved_reads_as_one_change() {
-    let drift = recorded(&[mount("/host/old", "/workspace/a")]).drift(&[mount("/host/new", "/workspace/a")]);
+    let drift = recorded(&[mount("/host/old", "/workspace/a")]).drift(&[mount("/host/new", "/workspace/a")], &[]);
 
     assert!(drift.added.is_empty() && drift.removed.is_empty(), "{drift:?}");
     assert_eq!(drift.changed.len(), 1);
@@ -238,7 +289,7 @@ mod tests {
     }];
     let wanted = [mount("/host/registry", "/workspace/registry")];
 
-    let drift = recorded(&started).drift(&wanted);
+    let drift = recorded(&started).drift(&wanted, &[]);
 
     assert_eq!(
       drift.changed.len(),
@@ -254,13 +305,13 @@ mod tests {
     let path = temp.path().join("session").join(RECORD_FILE);
     let mounts = [mount("/host/a", "/workspace/a")];
 
-    Record::of(&mounts)
+    Record::of(&mounts, &[])
       .save(&path)
       .expect("save should succeed");
 
     assert_eq!(
       Record::load(&path).expect("load should succeed"),
-      Some(Record::of(&mounts)),
+      Some(Record::of(&mounts, &[])),
       "the record must survive the process that wrote it"
     );
   }

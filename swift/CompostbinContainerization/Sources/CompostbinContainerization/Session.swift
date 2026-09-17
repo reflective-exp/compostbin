@@ -13,6 +13,8 @@ import ContainerizationExtras
 import ContainerizationOCI
 import ContainerizationOS
 import Foundation
+// For `FilePermissions`, which is how a relayed socket's mode is set.
+import SystemPackage
 
 /// What `RunSpec` carries, flattened for the bridge.
 struct BootSpec {
@@ -25,6 +27,8 @@ struct BootSpec {
     var memoryInBytes: UInt64
     /// `source\tdestination\tro?`, one per line.
     var mounts: [String]
+    /// `source\tdestination`, one per line. Host sockets relayed in, not mounted.
+    var sockets: [String]
     var environment: [String]
     var arguments: [String]
     var workingDirectory: String
@@ -72,6 +76,7 @@ enum Session {
         )
 
         let mounts = try spec.mounts.map(Self.share)
+        let sockets = try spec.sockets.map(Self.relay)
         let environment = spec.environment
         let arguments = spec.arguments
         let workingDirectory = spec.workingDirectory
@@ -100,6 +105,7 @@ enum Session {
             config.process.workingDirectory = workingDirectory
             config.process.environmentVariables += environment
             config.mounts.append(contentsOf: mounts)
+            config.sockets = sockets
             config.interfaces = [interface]
             config.dns = DNS(nameservers: nameservers)
         }
@@ -115,6 +121,33 @@ enum Session {
         Sessions.shared.insert(
             spec.name,
             Booted(manager: manager, container: container, imageConfig: imageConfig)
+        )
+    }
+
+    /// `source\tdestination` — the wire form of
+    /// `apple_container::model::SocketRelay`.
+    ///
+    /// `.into`, always: compostbin's ports are host services the guest reaches,
+    /// never the other way round.
+    ///
+    /// The mode is the same 0666 the CLI path ends up with. There it is
+    /// incidental — the host socket's mode copied verbatim onto a guest socket
+    /// owned by root, which the unprivileged `claude` could not otherwise open.
+    /// Here it is a choice, and a narrower one becomes possible as soon as the
+    /// guest-side owner is known. The confinement is the session directory
+    /// either way, not the mode.
+    private static func relay(_ socket: String) throws -> UnixSocketConfiguration {
+        let fields = socket.split(separator: "\t", omittingEmptySubsequences: false)
+
+        guard fields.count == 2 else {
+            throw BridgeError.malformed("socket", socket)
+        }
+
+        return UnixSocketConfiguration(
+            source: URL(fileURLWithPath: String(fields[0])),
+            destination: URL(fileURLWithPath: String(fields[1])),
+            permissions: FilePermissions(rawValue: 0o666),
+            direction: .into
         )
     }
 

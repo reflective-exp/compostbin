@@ -102,6 +102,21 @@ impl Mount {
   }
 }
 
+/// A host unix socket carried into the guest, rather than mounted there.
+///
+/// Its own field rather than a `Mount` that happens to point at a socket,
+/// because the two engines have to be told the same thing in different words.
+/// The `container` CLI has no flag for this: it infers a relay from a
+/// `--volume` whose source is already a socket, undocumented and inspected at
+/// creation. Containerization takes it as configuration of its own. Saying
+/// which we mean here is what stops the framework engine from mounting a
+/// socket as a filesystem, which is not a relay and not much of a mount.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SocketRelay {
+  pub source: PathBuf,
+  pub target: PathBuf,
+}
+
 /// A `container run` invocation. Mounts keep their declared order, which matters
 /// when one mounted path nests inside another.
 #[derive(Clone, Debug, PartialEq)]
@@ -114,6 +129,9 @@ pub struct RunSpec {
   pub memory: Option<String>,
   pub mounts: Vec<Mount>,
   pub name: String,
+  /// Relayed after the mounts. Nothing nests inside a socket, so the order
+  /// between the two groups does not matter the way it does within `mounts`.
+  pub sockets: Vec<SocketRelay>,
   pub workdir: Option<PathBuf>,
 }
 
@@ -146,6 +164,14 @@ impl RunSpec {
     for mount in &self.mounts {
       argv.push("--volume".to_string());
       argv.push(mount.to_argument());
+    }
+
+    // Also `--volume`: the CLI reads a source that is already a socket and
+    // relays it instead of mounting it. That inference is the only way to ask
+    // for it, so the distinction this crate draws disappears again here.
+    for socket in &self.sockets {
+      argv.push("--volume".to_string());
+      argv.push(format!("{}:{}", socket.source.display(), socket.target.display()));
     }
 
     if let Some(workdir) = &self.workdir {
@@ -269,6 +295,10 @@ mod tests {
         },
       ],
       name: "compostbin-compostbin".to_string(),
+      sockets: vec![SocketRelay {
+        source: "/Users/user/.local/state/compostbin/sessions/cb/ports/7001.sock".into(),
+        target: "/run/compostbin/ports/7001.sock".into(),
+      }],
       workdir: Some("/workspace/compostbin".into()),
     };
 
@@ -291,6 +321,8 @@ mod tests {
         "/Users/user/workspace:/workspace",
         "--volume",
         "/Users/user/.cargo/registry:/Users/user/.cargo/registry:ro",
+        "--volume",
+        "/Users/user/.local/state/compostbin/sessions/cb/ports/7001.sock:/run/compostbin/ports/7001.sock",
         "--workdir",
         "/workspace/compostbin",
         "compostbin/base:latest",

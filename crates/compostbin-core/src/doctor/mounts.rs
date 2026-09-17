@@ -123,7 +123,7 @@ pub fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
     Err(error) => return check("container mounts", Status::Warn, error.to_string()),
   };
 
-  let drift = record.drift(&session.mounts());
+  let drift = record.drift(&session.mounts(), &session.sockets());
 
   if drift.is_empty() {
     return check(

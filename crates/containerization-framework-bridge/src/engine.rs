@@ -16,9 +16,9 @@
 
 use crate::store::Store;
 use crate::{checked, control, ffi, spec, terminal};
-use apple_container::engine::{CliEngine, Engine};
+use apple_container::engine::Engine;
 use apple_container::error::EngineError;
-use apple_container::model::{BuildSpec, ExecSpec, RunSpec};
+use apple_container::model::{ExecSpec, RunSpec};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,10 +38,6 @@ pub struct FrameworkEngine {
   /// Where this session keeps its control socket.
   state_dir: PathBuf,
   store: Store,
-  /// `build` and `start_builder` are not ours: Containerization manages and
-  /// pulls images but does not build them, so BuildKit-in-a-container stays
-  /// where it is.
-  cli: CliEngine,
 }
 
 impl FrameworkEngine {
@@ -49,7 +45,6 @@ impl FrameworkEngine {
     Self {
       state_dir: state_dir.into(),
       store,
-      cli: CliEngine::new(),
     }
   }
 
@@ -121,10 +116,6 @@ impl FrameworkEngine {
 }
 
 impl Engine for FrameworkEngine {
-  fn build(&self, spec: &BuildSpec) -> Result<i32, EngineError> {
-    self.cli.build(spec)
-  }
-
   fn containers(&self) -> Result<Vec<String>, EngineError> {
     self.running_containers()
   }
@@ -193,8 +184,16 @@ impl Engine for FrameworkEngine {
     control::request(&self.socket(), &request, descriptor, &resized).map_err(|error| Self::failed("attach", error))
   }
 
+  /// Read from the store's own index rather than asked of anything.
+  ///
+  /// There is no daemon to ask any more: what a session can run is what
+  /// `compostbin build` has already put on disk, and the index is where the
+  /// CLI records it.
   fn images(&self) -> Result<Vec<String>, EngineError> {
-    self.cli.images()
+    self
+      .store
+      .images()
+      .map_err(|error| Self::failed("read the image index", error))
   }
 
   fn run(&self, spec: &RunSpec) -> Result<String, EngineError> {
@@ -223,6 +222,7 @@ impl Engine for FrameworkEngine {
         .and_then(spec::memory)
         .unwrap_or(2 * 1024 * 1024 * 1024),
       &spec::mounts(&spec.mounts),
+      &spec::sockets(&spec.sockets),
       &spec::environment(&spec.env),
       &spec::lines(&spec.arguments),
       &spec
@@ -248,10 +248,6 @@ impl Engine for FrameworkEngine {
     } else {
       Vec::new()
     })
-  }
-
-  fn start_builder(&self, memory: Option<&str>) -> Result<(), EngineError> {
-    self.cli.start_builder(memory)
   }
 
   fn stop(&self, name: &str) -> Result<(), EngineError> {
