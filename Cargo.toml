@@ -1,6 +1,6 @@
 [workspace]
 members = [
-  "crates/apple-container",
+  "crates/compostbin-engine",
   "crates/compostbin-cli",
   "crates/compostbin-core",
   "crates/compostbin-test",
@@ -16,7 +16,7 @@ rust-version = "1.98"
 version = "0.7.0"
 
 [workspace.dependencies]
-apple-container = { path = "crates/apple-container" }
+compostbin-engine = { path = "crates/compostbin-engine" }
 clap = { version = "4", features = ["derive"] }
 compostbin-core = { path = "crates/compostbin-core" }
 containerization-framework-bridge = { path = "crates/containerization-framework-bridge" }

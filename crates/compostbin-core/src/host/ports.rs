@@ -2,13 +2,12 @@
 //!
 //! The guest's own relay turns `localhost:<port>` into a connection to
 //! `/run/compostbin/ports/<port>.sock`; this is the other half, accepting there
-//! and connecting to the host's `127.0.0.1:<port>`. `container` relays the
-//! socket into the guest itself — a socket passed as `--volume` becomes a vsock
-//! relay rather than a mount — so nothing listens on a network address and no
-//! other container can reach a forwarded port.
+//! and connecting to the host's `127.0.0.1:<port>`. The socket itself is relayed
+//! into the guest over vsock rather than mounted there, so nothing listens on a
+//! network address and no other container can reach a forwarded port.
 
 use crate::host::POLL_INTERVAL;
-use apple_container::engine::Engine;
+use compostbin_engine::engine::Engine;
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
@@ -22,9 +21,8 @@ use std::time::{Duration, Instant};
 /// Loopback refuses at once; this only bounds a service that accepts nothing.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const BUFFER_SIZE: usize = 16 * 1024;
-/// Asking the daemon what is running costs a subprocess, so this is far slower
-/// than the relay's own poll. Nothing waits on it: it only decides when a relay
-/// nobody needs any more gives up.
+/// Far slower than the relay's own poll, because nothing waits on it: it only
+/// decides when a relay nobody needs any more gives up.
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 /// How long the relay waits for the container to be created after it binds.
 pub const APPEAR_GRACE: Duration = Duration::from_secs(120);

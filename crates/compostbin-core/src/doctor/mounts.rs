@@ -7,7 +7,7 @@ use crate::session::Session;
 use crate::session::record::Record;
 use crate::workspace::danger::{Danger, danger};
 use crate::workspace::{Escape, WALK_LIMIT};
-use apple_container::engine::Engine;
+use compostbin_engine::engine::Engine;
 
 /// Roots and explicit paths only. Claude's home is excluded: `run` creates it,
 /// so its absence before the first session is normal.

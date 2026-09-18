@@ -1,4 +1,4 @@
-//! Turning `apple_container`'s specs into what the bridge carries.
+//! Turning `compostbin_engine`'s specs into what the bridge carries.
 //!
 //! Lists cross as newline-separated strings, and mounts as tab-separated
 //! triples inside them. Neither separator can occur in what compostbin puts
@@ -6,7 +6,7 @@
 //! already refuses an argument containing a newline on the other side of the
 //! container.
 
-use apple_container::model::{EnvVar, Mount, SocketRelay};
+use compostbin_engine::model::{EnvVar, Mount, SocketRelay};
 
 /// One list element per line. Empty in, empty out — Swift reads `""` as no
 /// elements rather than as one empty one.
@@ -68,9 +68,9 @@ pub fn environment(env: &[EnvVar]) -> String {
 /// The gateway of the network Virtualization.framework's built-in NAT puts a
 /// guest on — macOS's shared networking, the same one every other VZ VM uses.
 ///
-/// Not vmnet: creating a vmnet network wants privileges an unentitled binary
-/// does not have, which is why the `container` CLI runs its vmnet plugin as a
-/// separate helper. NAT needs nothing beyond the virtualization entitlement.
+/// Not vmnet: creating a vmnet network wants privileges this binary does not have,
+/// and getting them would mean a privileged helper of its own. NAT needs nothing
+/// beyond the virtualization entitlement.
 pub const NAT_GATEWAY: &str = "192.168.64.1";
 /// The prefix length of that network.
 const NAT_PREFIX: u32 = 24;

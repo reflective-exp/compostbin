@@ -1,8 +1,6 @@
 pub mod cli;
 mod report;
 
-use apple_container::builder::CliBuilder;
-use apple_container::engine::Engine;
 use clap::Parser;
 use cli::{Arguments, Command};
 use compostbin_core::doctor::{self, Status};
@@ -12,10 +10,10 @@ use compostbin_core::session::credentials::{self, Keychain, SeedOutcome};
 use compostbin_core::session::image;
 use compostbin_core::session::settings;
 use compostbin_core::session::{AddOutcome, Session};
-use compostbin_core::signals;
 use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
+use compostbin_engine::engine::Engine;
 use std::error::Error;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -118,49 +116,6 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 
     Command::Doctor => report_diagnosis(&load_session(&manifest_path, resolver, &project_dir)?),
 
-    Command::HostAgent => {
-      let session = load_session(&manifest_path, resolver, &project_dir)?;
-      session.prepare_host_spool()?;
-
-      if session.manifest.host.is_empty() {
-        eprintln!(
-          "no [host.commands] or [host] ports in {}; there is nothing to serve",
-          manifest_path.display()
-        );
-        return Ok(1);
-      }
-
-      // Only the spool. A session's ports belong to the `run` that created the
-      // VM and holds them for as long as it lives, so there is nothing here for
-      // another process to take over.
-      if !session.manifest.host.has_commands() {
-        return Ok(1);
-      }
-
-      // Before the loop, so a signal arriving immediately stops the agent rather
-      // than killing a claimed request.
-      let stop = signals::stop_on_termination()?;
-
-      println!(
-        "serving {} host commands from {}",
-        session.manifest.host.served_commands().len(),
-        session.host_spool().display()
-      );
-      println!("SIGINT or SIGTERM stops it, a second one kills it");
-
-      host::serve(
-        &Spool::new(session.host_spool()),
-        &session.manifest.host.served_commands(),
-        &project_dir,
-        session.manifest.host.concurrency,
-        stop,
-      )?;
-
-      println!("stopped");
-
-      Ok(0)
-    }
-
     Command::Init => {
       let mut manifest = Manifest::default();
       manifest.project.name = project_dir
@@ -239,10 +194,9 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       // Both the agent and the relay live as long as the session: `exec` blocks
       // until Claude exits, and the flag stops them as soon as it does.
       //
-      // Threads rather than a process of their own. Under the `container` CLI
-      // the ports had to outlive this terminal, because the container did; the
-      // VM now dies with this process, so anything holding its ports afterwards
-      // would be holding them for nobody.
+      // Threads rather than a process of their own: the VM dies with this
+      // process, so anything holding its ports afterwards would be holding them
+      // for nobody.
       let stop = AtomicBool::new(false);
       let spool = Spool::new(session.host_spool());
 
@@ -292,24 +246,44 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
   }
 }
 
-/// Builds the base image, naming where the Dockerfile landed so a failed build
-/// can be retried by hand.
+/// Builds the base image, and the project's own when the manifest adds to it.
 fn build_base_image(session: &Session) -> Result<i32, Box<dyn Error>> {
-  let context = image::context(session);
-  println!("building {} from {}", session.manifest.project.image, context.display());
+  println!(
+    "building {} into {}",
+    session.manifest.project.image,
+    image::store(session).display()
+  );
 
-  if !session.manifest.image.is_empty() {
-    println!(
-      "then {} from {}, for this project's own additions",
-      session.image(),
-      image::project_context(session).display()
-    );
+  if image::adds_to_the_base(&session.manifest) {
+    println!("then {}, for this project's own additions", session.image());
   }
 
-  // Not the engine: Containerization manages and pulls images but does not
-  // build them, so BuildKit-in-a-container is still the CLI's job and always
-  // will be.
-  Ok(image::build(session, &CliBuilder::new())?)
+  build_images(session)?;
+
+  Ok(0)
+}
+
+/// Builds with the framework builder, provisioning the store first.
+///
+/// `provision` is part of building rather than a command of its own: a store
+/// that has never been used needs a kernel and an init image before anything can
+/// boot, and a separate step for that is exactly the `container system start`
+/// this replaced.
+#[cfg(target_os = "macos")]
+fn build_images(session: &Session) -> Result<(), Box<dyn Error>> {
+  let builder = containerization_framework_bridge::FrameworkBuilder::new(containerization_framework_bridge::Store::at(
+    image::store(session),
+  ));
+
+  builder.provision()?;
+  image::build(session, &builder)?;
+
+  Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn build_images(_session: &Session) -> Result<(), Box<dyn Error>> {
+  Err("Containerization.framework is macOS only".into())
 }
 
 /// Prints every check, exiting non-zero when any of them failed so `doctor` is
@@ -329,12 +303,14 @@ fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
 
 /// The engine a session runs on.
 ///
-/// One implementation now: Containerization.framework, in this process. The
-/// `container` CLI still builds images — nothing in the framework replaces
-/// BuildKit — but it no longer runs anything.
+/// One implementation: Containerization.framework, in this process. Nothing else
+/// is installed, started, or asked — which is why the store has to be ready
+/// before a session can begin, and why the error says to build.
 #[cfg(target_os = "macos")]
 fn select(session: &Session) -> Result<containerization_framework_bridge::FrameworkEngine, Box<dyn Error>> {
-  let store = containerization_framework_bridge::Store::discover()?;
+  let store = containerization_framework_bridge::Store::at(image::store(session));
+
+  store.ready()?;
 
   // The control socket lives here, so the directory has to exist before `run`
   // binds it — earlier than anything else would have created it.
@@ -351,12 +327,12 @@ fn select(session: &Session) -> Result<containerization_framework_bridge::Framew
 /// constructs this; it exists so `select` has a type to fail with.
 #[cfg(not(target_os = "macos"))]
 mod unsupported {
-  use apple_container::error::EngineError;
-  use apple_container::model::{ExecSpec, RunSpec};
+  use compostbin_engine::error::EngineError;
+  use compostbin_engine::model::{ExecSpec, RunSpec};
 
   pub struct Engine;
 
-  impl apple_container::engine::Engine for Engine {
+  impl compostbin_engine::engine::Engine for Engine {
     fn containers(&self) -> Result<Vec<String>, EngineError> {
       unreachable!("no session runs off macOS")
     }

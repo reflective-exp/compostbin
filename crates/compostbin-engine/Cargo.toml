@@ -1,7 +1,7 @@
 [package]
 edition.workspace = true
 license.workspace = true
-name = "apple-container"
+name = "compostbin-engine"
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true

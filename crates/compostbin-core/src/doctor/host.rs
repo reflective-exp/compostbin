@@ -5,7 +5,7 @@ use super::{Check, Status, check, listed};
 use crate::host::served;
 use crate::session::Session;
 use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialSource, KEYCHAIN_SERVICE};
-use apple_container::engine::Engine;
+use compostbin_engine::engine::Engine;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::time::Duration;
 
@@ -49,8 +49,7 @@ pub fn allowlist(session: &Session) -> Check {
 /// and nothing else would say so.
 ///
 /// Reach is not reported because there is none to report: each port travels
-/// through a socket in the session directory that `container` relays into this
-/// container alone.
+/// through a socket in the session directory, relayed into this container alone.
 pub fn ports(session: &Session, engine: &impl Engine) -> Check {
   if !session.manifest.host.has_ports() {
     return check("host ports", Status::Ok, "no [host] ports: nothing is forwarded");

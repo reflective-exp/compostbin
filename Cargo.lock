@@ -53,13 +53,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "apple-container"
-version = "0.7.0"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -121,9 +114,9 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 name = "compostbin-cli"
 version = "0.7.0"
 dependencies = [
- "apple-container",
  "clap",
  "compostbin-core",
+ "compostbin-engine",
  "containerization-framework-bridge",
  "tempfile",
 ]
@@ -132,11 +125,18 @@ dependencies = [
 name = "compostbin-core"
 version = "0.7.0"
 dependencies = [
- "apple-container",
+ "compostbin-engine",
  "libc",
  "serde",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "compostbin-engine"
+version = "0.7.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -152,8 +152,10 @@ dependencies = [
 name = "containerization-framework-bridge"
 version = "0.7.0"
 dependencies = [
- "apple-container",
+ "compostbin-engine",
  "libc",
+ "serde",
+ "serde_json",
  "swift-bridge",
  "swift-bridge-build",
  "tempfile",

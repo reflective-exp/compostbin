@@ -10,7 +10,7 @@ mod mounts;
 
 use crate::session::Session;
 use crate::session::credentials::CredentialSource;
-use apple_container::engine::Engine;
+use compostbin_engine::engine::Engine;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status {
@@ -86,7 +86,7 @@ mod tests {
   use crate::session::credentials::CREDENTIALS_FILE_NAME;
   use crate::session::record::Record;
   use crate::workspace::paths::PathResolver;
-  use apple_container::fake::RecordingEngine;
+  use compostbin_engine::fake::RecordingEngine;
   use std::path::Path;
   use tempfile::TempDir;
 

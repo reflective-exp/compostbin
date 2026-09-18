@@ -13,5 +13,4 @@ pub mod error;
 pub mod host;
 pub mod manifest;
 pub mod session;
-pub mod signals;
 pub mod workspace;

@@ -107,6 +107,44 @@ func compostbin_boot(
     }
 }
 
+/// Builds an image from a plan, with no builder and no daemon.
+///
+/// The plan crosses as JSON, alone among the bridged calls: it nests, and a
+/// build step is arbitrary shell that may contain the newline the other calls
+/// use as a separator.
+func compostbin_build(plan: RustStr) -> Int32 {
+    reporting {
+        let json = plan.toString()
+
+        guard let data = json.data(using: .utf8) else {
+            throw BridgeError.malformed("build plan", json)
+        }
+
+        let plan = try JSONDecoder().decode(BuildPlan.self, from: data)
+
+        try blocking { try await Build.run(plan) }
+
+        return 0
+    }
+}
+
+/// Puts a kernel and an init image in the store, fetching whatever is missing.
+func compostbin_provision(spec: RustStr) -> Int32 {
+    reporting {
+        let json = spec.toString()
+
+        guard let data = json.data(using: .utf8) else {
+            throw BridgeError.malformed("provision spec", json)
+        }
+
+        let spec = try JSONDecoder().decode(ProvisionSpec.self, from: data)
+
+        try blocking { try await Provision.run(spec) }
+
+        return 0
+    }
+}
+
 /// Runs a process in a booted session and blocks until it exits, returning its
 /// exit code.
 ///

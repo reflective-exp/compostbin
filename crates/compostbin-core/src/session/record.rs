@@ -9,7 +9,7 @@
 //! need re-probing on every upgrade, while the mounts we passed are already ours.
 
 use crate::error::{At, ManifestError};
-use apple_container::model::{Mount, SocketRelay};
+use compostbin_engine::model::{Mount, SocketRelay};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;

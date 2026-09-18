@@ -7,7 +7,7 @@
 //! `agent` runs them, `pty` is the terminal a command can ask for.
 //!
 //! `ports` is the one path that is not files: declared ports, each relayed
-//! through a unix socket `container` carries into the guest.
+//! through a unix socket carried into the guest.
 
 mod agent;
 mod ports;

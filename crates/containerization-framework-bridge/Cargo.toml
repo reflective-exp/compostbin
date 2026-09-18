@@ -8,8 +8,10 @@ rust-version.workspace = true
 version.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-container.workspace = true
+compostbin-engine.workspace = true
 libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 swift-bridge.workspace = true
 
 [target.'cfg(target_os = "macos")'.build-dependencies]

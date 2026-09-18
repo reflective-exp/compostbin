@@ -10,14 +10,16 @@
 // own module, so the exemption has to live out here.
 #![allow(clippy::too_many_arguments)]
 
+pub mod build;
 pub mod control;
 pub mod engine;
 mod spec;
 mod store;
 mod terminal;
 
+pub use crate::build::FrameworkBuilder;
 pub use crate::engine::FrameworkEngine;
-pub use crate::store::{INITFS_REFERENCE, INITFS_VERSION, Store, StoreError};
+pub use crate::store::{INITFS_REFERENCE, INITFS_VERSION, KERNEL_VERSION, Store, StoreError};
 
 use std::fmt;
 
@@ -55,6 +57,14 @@ mod ffi {
       working_directory: &str,
       terminal: i32,
     ) -> i32;
+
+    // `plan` is JSON, alone among these: it nests, and a build step's script may
+    // hold the newline the other calls use as a separator. swift-bridge cannot
+    // parse a doc comment in here, hence this one.
+    fn compostbin_build(plan: &str) -> i32;
+
+    // Also JSON: it carries the kernel's URL and where to put it.
+    fn compostbin_provision(spec: &str) -> i32;
 
     fn compostbin_resize(id: &str, terminal: i32) -> i32;
 

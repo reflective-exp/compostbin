@@ -45,6 +45,17 @@ enum BridgeError: Error, CustomStringConvertible {
     /// The binary is not signed for virtualization. Almost always a rebuild
     /// that was not re-signed.
     case unentitled
+    /// A build step exited non-zero. Carries the step's own label, so the
+    /// message names what failed rather than a number.
+    case stepFailed(String, Int32)
+    /// The ingest body finished without leaving an index descriptor behind,
+    /// which can only be a bug in `Build.ingest`.
+    case notIngested(String)
+    /// The kernel download did not answer with one.
+    case kernelUnavailable(String, Int)
+    /// The archive downloaded, and the kernel was not in it where it was meant to
+    /// be: a release whose layout has changed.
+    case kernelMissing(String)
 
     var description: String {
         switch self {
@@ -54,6 +65,14 @@ enum BridgeError: Error, CustomStringConvertible {
             return "malformed \(what): \(value.debugDescription)"
         case .notBooted(let name):
             return "this process does not own a session named \(name)"
+        case .stepFailed(let label, let code):
+            return "build step failed with exit code \(code): \(label)"
+        case .notIngested(let reference):
+            return "nothing was ingested for \(reference)"
+        case .kernelUnavailable(let url, let status):
+            return "downloading a kernel from \(url) answered \(status)"
+        case .kernelMissing(let path):
+            return "the downloaded archive has no \(path)"
         case .unentitled:
             return """
                 this build is not signed for virtualization — run `bin/dev/sign \

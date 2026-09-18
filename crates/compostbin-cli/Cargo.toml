@@ -15,7 +15,7 @@ name = "compostbin"
 path = "src/main.rs"
 
 [dependencies]
-apple-container.workspace = true
+compostbin-engine.workspace = true
 clap.workspace = true
 compostbin-core.workspace = true
 

@@ -2,10 +2,10 @@
 // Booting a session's VM, and running processes in it.
 //
 // Shaped after `cctl`'s RunCommand, with the differences that matter to
-// compostbin: the image comes from the `container` CLI's store rather than a
-// registry pull, the boot process is a keepalive rather than the workload, and
-// the terminal a process is attached to is whichever one asked — the owner's
-// own, or one handed over a control socket by `compostbin shell`.
+// compostbin: the image is read from the store rather than pulled, the boot
+// process is a keepalive rather than the workload, and the terminal a process is
+// attached to is whichever one asked — the owner's own, or one handed over a
+// control socket by `compostbin shell`.
 //===----------------------------------------------------------------------===//
 
 import Containerization

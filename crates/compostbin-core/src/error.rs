@@ -8,7 +8,7 @@
 //! something of its own names what it holds as the source, because the two
 //! sentences are then different.
 
-use apple_container::error::EngineError;
+use compostbin_engine::error::EngineError;
 use std::error::Error;
 use std::fmt;
 use std::io;

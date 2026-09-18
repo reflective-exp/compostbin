@@ -35,10 +35,8 @@ pub enum Command {
     #[arg(long)]
     all: bool,
   },
-  /// Check the host, the daemon, and every declared path
+  /// Check the host, the image store, and every declared path
   Doctor,
-  /// Serve host commands for a session started elsewhere
-  HostAgent,
   /// Write a manifest with defaults
   Init,
   /// List the session's mounts
@@ -100,7 +98,6 @@ mod tests {
   fn parses_bare_subcommands() {
     assert_eq!(parse(&["compostbin", "clean"]), Command::Clean { all: false });
     assert_eq!(parse(&["compostbin", "clean", "--all"]), Command::Clean { all: true });
-    assert_eq!(parse(&["compostbin", "host-agent"]), Command::HostAgent);
     assert_eq!(parse(&["compostbin", "init"]), Command::Init);
     assert_eq!(parse(&["compostbin", "ls"]), Command::Ls);
     assert_eq!(parse(&["compostbin", "shell"]), Command::Shell);

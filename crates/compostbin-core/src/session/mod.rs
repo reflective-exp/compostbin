@@ -18,8 +18,8 @@ use crate::session::image::GUEST_PORTS_NAME;
 use crate::session::record::{RECORD_FILE, Record};
 use crate::workspace::paths::{PathResolver, root_containing};
 use crate::workspace::{Origin, Workspace};
-use apple_container::engine::Engine;
-use apple_container::model::{EnvVar, ExecSpec, Mount, RunSpec, SocketRelay};
+use compostbin_engine::engine::Engine;
+use compostbin_engine::model::{EnvVar, ExecSpec, Mount, RunSpec, SocketRelay};
 use std::path::{Path, PathBuf};
 
 /// Where Claude's home is mounted inside the container, which runs as `claude`.
@@ -575,7 +575,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use apple_container::fake::RecordingEngine;
+  use compostbin_engine::fake::{Call, RecordingEngine};
   use std::os::unix::fs::MetadataExt;
   use tempfile::TempDir;
 
@@ -678,7 +678,7 @@ source   = "~/.cargo/registry"
 
     assert_eq!(
       engine.calls(),
-      [vec!["running"]],
+      [Call::Running],
       "a running container must not be recreated"
     );
   }
@@ -692,12 +692,15 @@ source   = "~/.cargo/registry"
 
     session.start(&engine).expect("start should succeed");
 
-    let calls = engine.calls();
-    assert_eq!(calls[0], ["running"]);
-    assert_eq!(calls[1], ["containers"]);
-    assert_eq!(calls[2], ["delete", "compostbin-cb"]);
-    assert_eq!(calls[3], session.run_spec().to_argv());
-    assert_eq!(calls.len(), 4);
+    assert_eq!(
+      engine.calls(),
+      [
+        Call::Running,
+        Call::Containers,
+        Call::Delete("compostbin-cb".to_string()),
+        Call::Run(session.run_spec()),
+      ]
+    );
   }
 
   #[test]
@@ -709,11 +712,11 @@ source   = "~/.cargo/registry"
 
     session.start(&engine).expect("start should succeed");
 
-    let calls = engine.calls();
-    assert_eq!(calls[0], ["running"]);
-    assert_eq!(calls[1], ["containers"]);
-    assert_eq!(calls[2], session.run_spec().to_argv());
-    assert_eq!(calls.len(), 3, "nothing to delete: {calls:?}");
+    assert_eq!(
+      engine.calls(),
+      [Call::Running, Call::Containers, Call::Run(session.run_spec())],
+      "there was nothing to delete"
+    );
   }
 
   /// The mount source has to exist before the container does, and what it holds
@@ -752,19 +755,17 @@ source   = "~/.cargo/registry"
 
     session.restart(&engine).expect("restart should succeed");
 
-    let calls = engine.calls();
-    assert_eq!(calls[0], ["running"]);
-    assert_eq!(calls[1], ["stop", "compostbin-cb"]);
-    assert_eq!(calls[2], ["containers"]);
-    assert_eq!(calls[3], ["delete", "compostbin-cb"]);
-    assert_eq!(calls[4], session.run_spec().to_argv());
     assert_eq!(
-      calls[5],
-      session
-        .exec_spec(&["claude".to_string(), "--continue".to_string()])
-        .to_argv()
+      engine.calls(),
+      [
+        Call::Running,
+        Call::Stop("compostbin-cb".to_string()),
+        Call::Containers,
+        Call::Delete("compostbin-cb".to_string()),
+        Call::Run(session.run_spec()),
+        Call::Exec(session.exec_spec(&["claude".to_string(), "--continue".to_string()])),
+      ]
     );
-    assert_eq!(calls.len(), 6);
   }
 
   #[test]
@@ -777,7 +778,11 @@ source   = "~/.cargo/registry"
 
     assert_eq!(
       engine.calls(),
-      [vec!["running"], vec!["containers"], vec!["delete", "compostbin-cb"]]
+      [
+        Call::Running,
+        Call::Containers,
+        Call::Delete("compostbin-cb".to_string())
+      ]
     );
   }
 
@@ -791,7 +796,7 @@ source   = "~/.cargo/registry"
 
     assert_eq!(
       engine.calls(),
-      [vec!["running"], vec!["containers"]],
+      [Call::Running, Call::Containers],
       "another session's container must be left alone"
     );
   }
@@ -805,10 +810,16 @@ source   = "~/.cargo/registry"
 
     session.restart(&engine).expect("restart should succeed");
 
-    let run = &engine.calls()[2];
+    let Call::Run(spec) = &engine.calls()[2] else {
+      panic!("the third call should have created the container: {:?}", engine.calls());
+    };
     assert!(
-      run.contains(&format!("{}:{CLAUDE_HOME_TARGET}", session.claude_home().display())),
-      "the recreated container must remount Claude's home: {run:?}"
+      spec
+        .mounts
+        .iter()
+        .any(|mount| { mount.source == session.claude_home() && mount.target == PathBuf::from(CLAUDE_HOME_TARGET) }),
+      "the recreated container must remount Claude's home: {:?}",
+      spec.mounts
     );
   }
 
@@ -907,23 +918,24 @@ source   = "~/.cargo/registry"
   #[test]
   fn builds_exec_spec() {
     assert_eq!(
-      session()
-        .exec_spec(&["claude".to_string(), "--continue".to_string()])
-        .to_argv(),
-      [
-        "exec",
-        "--env",
-        "CLAUDE_CONFIG_DIR=/home/claude/.claude",
-        "--env",
-        "IS_SANDBOX=1",
-        "--interactive",
-        "--tty",
-        "--workdir",
-        "/workspace/workspace/compostbin",
-        "compostbin-cb",
-        "claude",
-        "--continue",
-      ]
+      session().exec_spec(&["claude".to_string(), "--continue".to_string()]),
+      ExecSpec {
+        arguments: vec!["claude".to_string(), "--continue".to_string()],
+        env: vec![
+          EnvVar::Set {
+            name: "CLAUDE_CONFIG_DIR".to_string(),
+            value: "/home/claude/.claude".to_string(),
+          },
+          EnvVar::Set {
+            name: "IS_SANDBOX".to_string(),
+            value: "1".to_string(),
+          },
+        ],
+        interactive: true,
+        name: "compostbin-cb".to_string(),
+        tty: true,
+        workdir: Some(PathBuf::from("/workspace/workspace/compostbin")),
+      }
     );
   }
 
@@ -932,13 +944,16 @@ source   = "~/.cargo/registry"
   #[test]
   fn names_a_display_only_for_the_clipboard() {
     let mut session = session();
-    let display = format!("WAYLAND_DISPLAY={CLIPBOARD_DISPLAY}");
+    let display = EnvVar::Set {
+      name: "WAYLAND_DISPLAY".to_string(),
+      value: CLIPBOARD_DISPLAY.to_string(),
+    };
 
-    assert!(!session.exec_spec(&[]).to_argv().contains(&display));
+    assert!(!session.exec_spec(&[]).env.contains(&display));
 
     session.manifest.host.clipboard = true;
 
-    assert!(session.exec_spec(&[]).to_argv().contains(&display));
+    assert!(session.exec_spec(&[]).env.contains(&display));
     assert!(
       session
         .mounts()
@@ -1063,33 +1078,43 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn builds_run_spec() {
+    let sessions = "/Users/user/.local/state/compostbin/sessions/compostbin-cb";
+
     assert_eq!(
-      session().run_spec().to_argv(),
-      [
-        "run",
-        "--cpus",
-        "4",
-        "--detach",
-        "--env",
-        "ANTHROPIC_API_KEY",
-        "--memory",
-        "8G",
-        "--name",
-        "compostbin-cb",
-        "--volume",
-        "/Users/user/workspace:/workspace/workspace",
-        "--volume",
-        "/Users/user/.cargo/registry:/workspace/registry:ro",
-        "--volume",
-        "/Users/user/.local/state/compostbin/sessions/compostbin-cb/managed:/etc/claude-code:ro",
-        "--volume",
-        "/Users/user/.local/state/compostbin/sessions/compostbin-cb/claude-home:/home/claude/.claude",
-        "--workdir",
-        "/workspace/workspace/compostbin",
-        "compostbin/base:latest",
-        "sleep",
-        "infinity",
-      ]
+      session().run_spec(),
+      RunSpec {
+        arguments: KEEPALIVE_COMMAND.map(str::to_string).to_vec(),
+        cpus: Some(4),
+        detach: true,
+        env: vec![EnvVar::Inherit("ANTHROPIC_API_KEY".to_string())],
+        image: "compostbin/base:latest".to_string(),
+        memory: Some("8G".to_string()),
+        mounts: vec![
+          Mount {
+            readonly: false,
+            source: PathBuf::from("/Users/user/workspace"),
+            target: PathBuf::from("/workspace/workspace"),
+          },
+          Mount {
+            readonly: true,
+            source: PathBuf::from("/Users/user/.cargo/registry"),
+            target: PathBuf::from("/workspace/registry"),
+          },
+          Mount {
+            readonly: true,
+            source: PathBuf::from(format!("{sessions}/managed")),
+            target: PathBuf::from(MANAGED_SETTINGS_TARGET),
+          },
+          Mount {
+            readonly: false,
+            source: PathBuf::from(format!("{sessions}/claude-home")),
+            target: PathBuf::from(CLAUDE_HOME_TARGET),
+          },
+        ],
+        name: "compostbin-cb".to_string(),
+        sockets: Vec::new(),
+        workdir: Some(PathBuf::from("/workspace/workspace/compostbin")),
+      }
     );
   }
 
@@ -1120,11 +1145,9 @@ source   = "~/.cargo/registry"
     session.manifest.image.packages = vec!["direnv".to_string()];
 
     assert_eq!(session.image(), "compostbin/compostbin-cb:latest");
-    assert!(
-      session
-        .run_spec()
-        .to_argv()
-        .contains(&"compostbin/compostbin-cb:latest".to_string()),
+    assert_eq!(
+      session.run_spec().image,
+      "compostbin/compostbin-cb:latest",
       "the session must run the image it built"
     );
   }
@@ -1136,9 +1159,11 @@ source   = "~/.cargo/registry"
     let mut session = session();
     session.manifest.host.ports = vec![7001, 7002];
 
-    let argv = session.run_spec().to_argv();
-
-    assert_eq!(argv[argv.len() - 3..], ["compostbin-ports", "7001", "7002"]);
+    assert_eq!(
+      session.run_spec().arguments,
+      [GUEST_PORTS_NAME, "7001", "7002"],
+      "the relay is the container's own process"
+    );
   }
 
   #[test]

@@ -7,13 +7,13 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
-apple-container.workspace = true
+compostbin-engine.workspace = true
 libc.workspace = true
 serde.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
-apple-container = { workspace = true, features = ["fake"] }
+compostbin-engine = { workspace = true, features = ["fake"] }
 tempfile.workspace = true
 
 [features]

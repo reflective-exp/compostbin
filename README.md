@@ -4,10 +4,9 @@ Run Claude Code in a container.
 
 This project uses Apple's
 [Containerization](https://github.com/apple/containerization) framework to
-attempt to contain Claude, and Apple's
-[container CLI](https://github.com/apple/container) to build the image it runs.
-The current directory is bind-mounted into the runtime, so that edits land
-directly in the host with no syncing or copying.
+attempt to contain Claude, building the image as well as running it. The current
+directory is bind-mounted into the runtime, so that edits land directly in the
+host with no syncing or copying.
 
 Claude can only reach what is mounted; builds and tests may be configured to
 allow Claude Code to execute specific commands on the host--with no need to
@@ -47,13 +46,19 @@ file may be added to `.gitignore` to ensure the configuration is local-only.
 
 ### build
 
-`compostbin build` builds the base image: debian, node, Claude Code, and the
-handful of tools a session needs. One image serves every project, so it is built
-rarely; a rebuild with an unchanged Dockerfile is mostly cache.
+`compostbin build` builds the base image: debian, Claude Code, and the handful of
+tools a session needs. One image serves every project, so it is built rarely.
 
-When the manifest has an `[image]` table, a second image is built `FROM` the
-base with additions. Extra language toolchains, private CAs, or other project-specific
-tools may be configured on top of the base image.
+The first build provisions the store at `~/.cache/compostbin/images`, downloading a
+kernel from
+[Kata Containers](https://github.com/kata-containers/kata-containers/releases) and
+pulling the `vminit` image from ghcr.io.
+
+When the manifest has an `[image]` table, a second image is built on top of the
+base with the additions. Extra language toolchains, private CAs, or other
+project-specific tools may be configured there.
+
+Each build runs every step: there is no build cache.
 
 ### doctor
 
@@ -123,12 +128,6 @@ explicit `[[paths]]` entry, or a local one.
 `compostbin clean` removes a session's transient state. With `--all` it also
 removes the Claude home, discarding old conversations, and the session's
 credentials.
-
-### host-agent
-
-`compostbin host-agent` serves host commands for a session started elsewhere —
-`compostbin shell`, or a container you attached to by hand. `run` does this
-itself, so this is only for the sessions it did not start.
 
 ## Configuration
 
@@ -295,21 +294,16 @@ The briefing is written when the container is created, so an edited
 ## Containerization.framework
 
 A session is a virtual machine this process owns, through
-[Containerization](https://github.com/apple/containerization) — the Swift
-package the `container` CLI is itself built on. There is no daemon, and nothing
-shells out to `container` to run anything.
+[Containerization](https://github.com/apple/containerization). Builds go through
+the same library — see [Building images](#building-images).
 
-`build` is the exception, and a permanent one: Containerization manages and
-pulls OCI images but does not build them, so `compostbin build` still drives
-`container build` and BuildKit. That is why `Engine` has no `build` — image
-building is `apple_container::builder`, a separate thing a session never does.
+`Engine` has no `build`: image building is `compostbin_engine::builder`, a
+separate thing a session never does.
 
 ### Who owns the VM
 
-This shapes everything else. A daemon would hold a container *out of process*,
-so any terminal could reach a session; a `LinuxContainer` instead dies with the
-process that created it. So `compostbin run` **is** the thing holding the
-session, and `shell` is a client of it.
+A `LinuxContainer` dies with the process that created it. So `compostbin run`
+**is** the thing holding the session, and `shell` is a client of it.
 
 It is also why there is no `compostbin stop`: nothing outlives `run` to be
 stopped. Leaving the session ends the VM, and `compostbin clean` is what removes
@@ -327,19 +321,41 @@ nudge on each window resize, and the exit code coming back.
 The consequence to know about: when `run` exits, the VM goes with it, and a
 `shell` attached to it ends too.
 
+### Building images
+
+A build is a `BuildPlan` — a base, a sequence of named steps, and what the
+finished image runs as — which the builder executes:
+
+1. pull the base into the store, unpack it to a writable `rootfs.ext4`;
+2. boot that block with a keepalive process, the same NAT a session gets (`apt`
+   needs the network) and the build context mounted read-only;
+3. run each step as an `exec` of `bash -euo pipefail -c`, as root or as a named
+   user, streaming its output to stderr;
+4. stop the VM and export the block back to a tar with `EXT4Reader.export`;
+5. ingest that tar as a single-layer image — layer, config, manifest, index — and
+   register it under the plan's tag.
+
+The layer is an **uncompressed** tar (`imageLayer`, not `imageLayerGzip`), which
+makes the layer digest and the diffID the same value. Nothing pushes these images,
+so there is nothing to gain from compressing them.
+
+Every build runs every step, and the result is a single layer. `base_plan` is the
+base image's definition; `project_plan` composes a project's additions out of
+manifest fields.
+
+The export reads the inodes and writes pax with `schily` xattrs, which is what
+carries uids, modes, symlinks, hardlinks and extended attributes into the layer.
+
 ### Host ports are relayed, not mounted
 
 `[host] ports` puts one unix socket per port in the session directory and gives
-the guest the other end. The `container` CLI has no flag for that: it infers a
-relay from a `--volume` whose source is already a socket, which is undocumented
-and inspected at creation. Containerization takes it as configuration —
-`UnixSocketConfiguration`, with a direction and a mode of its own.
+the guest the other end. Containerization takes that as configuration —
+`UnixSocketConfiguration`, with a direction and a mode of its own — rather than
+as a filesystem.
 
 So `RunSpec` says which it means: `mounts` for filesystems, `sockets` for
-relays. `CliEngine` renders both as `--volume`, since the inference is the only
-way to ask; the framework engine puts sockets in `config.sockets`, where a
-socket mounted as a filesystem — which is not a relay, and not much of a mount
-— cannot happen by accident.
+relays. Sockets go in `config.sockets`, where a socket mounted as a filesystem —
+which is not a relay, and not much of a mount — cannot happen by accident.
 
 ### Attached processes are seeded from the image
 
@@ -347,10 +363,9 @@ socket mounted as a filesystem — which is not a relay, and not much of a mount
 config, so the keepalive runs as `claude`. `LinuxContainer.exec` does not: it
 starts from a bare configuration, which is uid 0 with nothing but a default
 `PATH`. Since compostbin attaches Claude with `exec` rather than as the
-container's first process, taking that default would run the session as root in
-an image whose last line is `USER claude` — and give it `HOME=/root`, because
-the runtime resolves `HOME` from the passwd entry of whatever user the process
-ends up as.
+container's first process, taking that default runs the session as root in an image
+whose config names `claude` — and gives it `HOME=/root`, because the runtime
+resolves `HOME` from the passwd entry of whatever user the process ends up as.
 
 So the session's image config is kept from the boot that read it, and every
 attach seeds itself from it before applying the session's own arguments and
@@ -378,33 +393,17 @@ Two more things are load-bearing and neither is obvious:
   the keychain notices, and compostbin reads Claude's credentials from there,
   so an ad-hoc build re-prompts for access each time it is rebuilt.
 
-- **Images come from the CLI's store.** It is read in place, at
-  `~/Library/Application Support/com.apple.container`: an image index in
-  `state.json`, blobs under `content/`, per-container rootfs under
-  `containers/` — which is exactly Containerization's own `ImageStore` layout,
-  so `ContainerManager` opens it as-is. The kernel comes from `kernels/` beside
-  it. That is a dependency on an unpublished layout, and it is the reason there
-  is no separate image pipeline to build.
+- **The store is disposable.** `~/.cache/compostbin/images`, in
+  Containerization's `ImageStore` layout: an image index in `state.json`, blobs
+  under `content/`, the kernel under `kernels/`, one unpacked rootfs per
+  container under `containers/`. `ContainerManager` opens that directory as-is.
+  `compostbin build` provisions whatever is missing, so nothing in it has to be
+  kept and `clean` never touches it.
 
 The `vminit` reference pinned in
 `crates/containerization-framework-bridge/src/store.rs` and the package version
 pinned in `swift/CompostbinContainerization/Package.swift` are one protocol —
 the guest agent and the library that talks to it — and have to move together.
-
-## Rosetta
-
-As of the time of writing this, Apple's `container` CLI requires that Rosetta 2
-be installed. This can be disabled by configuring `~/.config/container/config.toml`
-
-``` toml
-[build]
-rosetta = false
-```
-
-``` shell
-container system stop
-container system start
-```
 
 ## Development
 

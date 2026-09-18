@@ -1,24 +1,21 @@
-//! `Engine`, backed by Containerization.framework instead of the CLI.
+//! `Engine`, backed by Containerization.framework.
 //!
-//! The trait is unchanged, and so is everything in `compostbin-core` that is
-//! generic over it. What changes is where a container lives: the CLI's daemon
-//! holds one out of process, and this holds one *in* process. Two consequences
-//! run through everything below.
+//! A container lives *in* this process rather than in a daemon's, and two
+//! consequences run through everything below.
 //!
 //! The first is that `run` does not return to a caller that can walk away. The
 //! VM lives exactly as long as this process, so `run` also starts the control
 //! socket, which is how `shell` in another terminal reaches it.
 //!
-//! The second is that there is no register to ask. `containers` and
-//! `running_containers` are one line each against the CLI because the daemon
-//! keeps the list; here the question "is this session up?" is answered by
-//! whether anything answers on its control socket.
+//! The second is that there is no register to ask. Nothing keeps a list of
+//! containers, so the question "is this session up?" is answered by whether
+//! anything answers on its control socket.
 
 use crate::store::Store;
 use crate::{checked, control, ffi, spec, terminal};
-use apple_container::engine::Engine;
-use apple_container::error::EngineError;
-use apple_container::model::{ExecSpec, RunSpec};
+use compostbin_engine::engine::Engine;
+use compostbin_engine::error::EngineError;
+use compostbin_engine::model::{ExecSpec, RunSpec};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,10 +55,7 @@ impl FrameworkEngine {
   }
 
   fn failed(action: &'static str, error: impl std::fmt::Display) -> EngineError {
-    EngineError::Spawn {
-      argv: vec![action.to_string()],
-      source: std::io::Error::other(error.to_string()),
-    }
+    EngineError::failed(action, error)
   }
 
   /// Runs a guest process against a terminal, as the owner of the VM.
@@ -186,27 +180,21 @@ impl Engine for FrameworkEngine {
 
   /// Read from the store's own index rather than asked of anything.
   ///
-  /// There is no daemon to ask any more: what a session can run is what
-  /// `compostbin build` has already put on disk, and the index is where the
-  /// CLI records it.
+  /// There is no daemon to ask: what a session can run is what `compostbin
+  /// build` has already put on disk, and the index is where it goes.
   fn images(&self) -> Result<Vec<String>, EngineError> {
     self
       .store
       .images()
-      .map_err(|error| Self::failed("read the image index", error))
+      .map_err(|error| EngineError::unavailable("read the image index", error))
   }
 
   fn run(&self, spec: &RunSpec) -> Result<String, EngineError> {
     // `ContainerManager.create` refuses a container directory that already
     // exists, and every previous run left one: the VM dies with its process, so
-    // nothing gets the chance to tidy up afterwards. Clearing it here is also
-    // what the CLI engine does in effect — `Session::start` deletes a stopped
-    // container before recreating it — so a run still begins on a rootfs
-    // unpacked fresh from the image.
-    //
-    // The caveat is switching engines mid-session: a container of this name
-    // held by the `container` daemon has its files removed from under it. Stop
-    // the session before changing `COMPOSTBIN_ENGINE`.
+    // nothing gets the chance to tidy up afterwards. So a run always begins on a
+    // rootfs unpacked fresh from the image, which is what `Session::start`
+    // deleting a stopped container already meant.
     let _ = std::fs::remove_dir_all(self.store.container_dir(&spec.name));
 
     let code = ffi::compostbin_boot(
@@ -262,8 +250,14 @@ impl Engine for FrameworkEngine {
       .map_err(|error| Self::failed("stop", error))
   }
 
+  /// Names both halves of what boots a session, because they are pinned
+  /// separately and a mismatch is a runtime failure rather than a build one.
   fn version(&self) -> Result<Option<String>, EngineError> {
-    Ok(Some(format!("Containerization {}", crate::INITFS_VERSION)))
+    Ok(Some(format!(
+      "Containerization {}, kernel {}",
+      crate::INITFS_VERSION,
+      crate::KERNEL_VERSION
+    )))
   }
 }
 

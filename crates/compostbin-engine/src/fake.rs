@@ -1,24 +1,38 @@
 use crate::builder::Builder;
 use crate::engine::Engine;
 use crate::error::EngineError;
-use crate::model::{BuildSpec, ExecSpec, RunSpec};
+use crate::model::{BuildPlan, ExecSpec, RunSpec};
 use std::cell::RefCell;
 
-/// Records the argv of every call instead of running anything, so callers can
-/// assert what was invoked and that nothing else was.
+/// A call that was made instead of run. Carries the spec rather than a rendering
+/// of it, so a test asserts against what the caller composed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Call {
+  Containers,
+  Delete(String),
+  Exec(ExecSpec),
+  Images,
+  Run(RunSpec),
+  Running,
+  Stop(String),
+  Version,
+}
+
+/// Records every call instead of running anything, so callers can assert what was
+/// asked of the engine and that nothing else was.
 #[derive(Debug, Default)]
 pub struct Calls {
-  recorded: RefCell<Vec<Vec<String>>>,
+  recorded: RefCell<Vec<Call>>,
 }
 
 impl Calls {
-  /// Every recorded argv, in call order.
-  pub fn all(&self) -> Vec<Vec<String>> {
+  /// Every recorded call, in order.
+  pub fn all(&self) -> Vec<Call> {
     self.recorded.borrow().clone()
   }
 
-  fn record(&self, argv: Vec<String>) {
-    self.recorded.borrow_mut().push(argv);
+  fn record(&self, call: Call) {
+    self.recorded.borrow_mut().push(call);
   }
 }
 
@@ -59,14 +73,14 @@ impl RecordingEngine {
     }
   }
 
-  pub fn calls(&self) -> Vec<Vec<String>> {
+  pub fn calls(&self) -> Vec<Call> {
     self.calls.all()
   }
 }
 
 impl Engine for RecordingEngine {
   fn containers(&self) -> Result<Vec<String>, EngineError> {
-    self.calls.record(vec!["containers".to_string()]);
+    self.calls.record(Call::Containers);
 
     Ok(
       self
@@ -78,34 +92,31 @@ impl Engine for RecordingEngine {
   }
 
   fn delete(&self, name: &str) -> Result<(), EngineError> {
-    self
-      .calls
-      .record(vec!["delete".to_string(), name.to_string()]);
+    self.calls.record(Call::Delete(name.to_string()));
     Ok(())
   }
 
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError> {
-    self.calls.record(spec.to_argv());
+    self.calls.record(Call::Exec(spec.clone()));
     Ok(0)
   }
 
   fn images(&self) -> Result<Vec<String>, EngineError> {
-    let argv = vec!["images".to_string()];
-    self.calls.record(argv.clone());
+    self.calls.record(Call::Images);
 
-    self.images.clone().ok_or(EngineError::Spawn {
-      argv,
-      source: std::io::Error::new(std::io::ErrorKind::NotFound, "no image store"),
-    })
+    self
+      .images
+      .clone()
+      .ok_or_else(|| EngineError::unavailable("read the image store", "there is none"))
   }
 
   fn run(&self, spec: &RunSpec) -> Result<String, EngineError> {
-    self.calls.record(spec.to_argv());
+    self.calls.record(Call::Run(spec.clone()));
     Ok(spec.name.clone())
   }
 
   fn running_containers(&self) -> Result<Vec<String>, EngineError> {
-    self.calls.record(vec!["running".to_string()]);
+    self.calls.record(Call::Running);
 
     Ok(
       self
@@ -118,23 +129,25 @@ impl Engine for RecordingEngine {
   }
 
   fn stop(&self, name: &str) -> Result<(), EngineError> {
-    self
-      .calls
-      .record(vec!["stop".to_string(), name.to_string()]);
+    self.calls.record(Call::Stop(name.to_string()));
     Ok(())
   }
 
   fn version(&self) -> Result<Option<String>, EngineError> {
-    self.calls.record(vec!["version".to_string()]);
+    self.calls.record(Call::Version);
 
     Ok(self.version.clone())
   }
 }
 
-/// A `Builder` that records the argv it would have run.
+/// A `Builder` that builds nothing and keeps the plans it was given.
+///
+/// The plans themselves rather than a rendering of them: a plan is what the
+/// caller composed, and asserting against it reads better than asserting against
+/// a string that would have to be invented for the purpose.
 #[derive(Debug, Default)]
 pub struct RecordingBuilder {
-  calls: Calls,
+  plans: RefCell<Vec<BuildPlan>>,
 }
 
 impl RecordingBuilder {
@@ -142,26 +155,15 @@ impl RecordingBuilder {
     Self::default()
   }
 
-  pub fn calls(&self) -> Vec<Vec<String>> {
-    self.calls.all()
+  /// Every plan it was asked to build, in call order.
+  pub fn plans(&self) -> Vec<BuildPlan> {
+    self.plans.borrow().clone()
   }
 }
 
 impl Builder for RecordingBuilder {
-  fn build(&self, spec: &BuildSpec) -> Result<i32, EngineError> {
-    self.calls.record(spec.to_argv());
-    Ok(0)
-  }
-
-  fn start_builder(&self, memory: Option<&str>) -> Result<(), EngineError> {
-    let mut argv = vec!["builder".to_string(), "start".to_string()];
-
-    if let Some(memory) = memory {
-      argv.push("--memory".to_string());
-      argv.push(memory.to_string());
-    }
-
-    self.calls.record(argv);
+  fn build(&self, plan: &BuildPlan) -> Result<(), EngineError> {
+    self.plans.borrow_mut().push(plan.clone());
     Ok(())
   }
 }
@@ -177,12 +179,25 @@ mod tests {
     engine.stop("cb-test").expect("stop should succeed");
     engine.delete("cb-test").expect("delete should succeed");
 
-    assert_eq!(engine.calls(), [vec!["stop", "cb-test"], vec!["delete", "cb-test"]]);
+    assert_eq!(
+      engine.calls(),
+      [Call::Stop("cb-test".to_string()), Call::Delete("cb-test".to_string())]
+    );
   }
 
   #[test]
   fn records_nothing_when_unused() {
-    assert_eq!(RecordingEngine::new().calls(), Vec::<Vec<String>>::new());
-    assert_eq!(RecordingBuilder::new().calls(), Vec::<Vec<String>>::new());
+    assert!(RecordingEngine::new().calls().is_empty());
+    assert!(RecordingBuilder::new().plans().is_empty());
+  }
+
+  #[test]
+  fn keeps_the_plans_it_was_given() {
+    let builder = RecordingBuilder::new();
+    let plan = BuildPlan::new("docker.io/library/debian:stable-slim", "compostbin/base:latest");
+
+    builder.build(&plan).expect("recording should succeed");
+
+    assert_eq!(builder.plans(), [plan]);
   }
 }

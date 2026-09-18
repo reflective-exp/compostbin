@@ -1,9 +1,9 @@
 //! How a second terminal reaches a session this process owns.
 //!
-//! The VM dies with the process that created it, so `compostbin shell` cannot
-//! attach to it the way `container exec` attaches to a daemon's container. It
-//! connects here instead, to a socket in the session's state directory, and the
-//! process that owns the VM runs the command on its behalf.
+//! The VM dies with the process that created it, so there is nothing for
+//! `compostbin shell` to attach to directly. It connects here instead, to a socket
+//! in the session's state directory, and the process that owns the VM runs the
+//! command on its behalf.
 //!
 //! What crosses is the client's **terminal**, not its bytes: the request is sent
 //! with `SCM_RIGHTS` carrying the client's own tty descriptor, and the owner

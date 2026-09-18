@@ -1,7 +1,7 @@
 //! A running container, whoever is running it.
 //!
-//! Deliberately not image building: that is `builder`, it is the one thing only
-//! the `container` CLI can do, and a session never does it.
+//! Deliberately not image building: that is `builder`. A session never builds,
+//! and a build is not a session.
 
 use crate::error::EngineError;
 use crate::model::{ExecSpec, RunSpec};
