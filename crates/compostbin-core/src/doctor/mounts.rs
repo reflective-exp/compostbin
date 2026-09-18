@@ -81,7 +81,8 @@ pub fn dangling_symlinks(session: &Session) -> Check {
 
 /// Whether the running container has the mounts the manifest describes. `run`
 /// attaches to a live container, and mounts cannot be added to one, so a manifest
-/// edited mid-session takes effect at the next `stop` + `run` and not before.
+/// edited mid-session takes effect once the session exits and `run` creates it
+/// again, and not before.
 /// Nothing else says so: the path is simply missing in the guest, which reads as
 /// the feature being broken.
 ///
@@ -116,7 +117,7 @@ pub fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
         "container mounts",
         Status::Warn,
         format!(
-          "{name} is running but nothing recorded what it was started with; `compostbin stop` then `compostbin run` to be sure"
+          "{name} is running but nothing recorded what it was started with; exit it and `compostbin run` again to be sure"
         ),
       );
     }
@@ -137,7 +138,7 @@ pub fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
     "container mounts",
     Status::Warn,
     format!(
-      "{name} was started before the manifest changed; mounts cannot be added to a running container, so `compostbin stop` then `compostbin run`"
+      "{name} was started before the manifest changed; mounts cannot be added to a running container, so exit it and `compostbin run` again"
     ),
     drift.lines(),
   )

@@ -7,7 +7,6 @@
 //! network address and no other container can reach a forwarded port.
 
 use crate::host::POLL_INTERVAL;
-use compostbin_engine::engine::Engine;
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
@@ -16,19 +15,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Loopback refuses at once; this only bounds a service that accepts nothing.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const BUFFER_SIZE: usize = 16 * 1024;
-/// Far slower than the relay's own poll, because nothing waits on it: it only
-/// decides when a relay nobody needs any more gives up.
-const WATCH_INTERVAL: Duration = Duration::from_secs(2);
-/// How long the relay waits for the container to be created after it binds.
-pub const APPEAR_GRACE: Duration = Duration::from_secs(120);
-/// How long a container may be absent before the relay takes it as gone for
-/// good rather than restarting.
-pub const VANISH_GRACE: Duration = Duration::from_secs(30);
 
 /// The guest end of the relay is `root:root` with this socket's mode copied
 /// verbatim, and the session runs as `claude`: anything short of
@@ -87,6 +78,21 @@ pub enum PortEvent {
   UpstreamRefused(Forward, String),
 }
 
+/// In the terms a user would look for.
+impl std::fmt::Display for PortEvent {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Listening(forward) => write!(
+        formatter,
+        "forwarding localhost:{} to {}",
+        forward.port(),
+        forward.upstream
+      ),
+      Self::UpstreamRefused(forward, error) => write!(formatter, "nothing answers at {}: {error}", forward.upstream),
+    }
+  }
+}
+
 /// Whether something is already accepting on this socket — another agent
 /// serving the same session. A refused connection means a socket left behind by
 /// one that died, and a missing one means nothing has bound it yet; neither is
@@ -131,39 +137,6 @@ fn bind(forward: &Forward) -> io::Result<Bound> {
     forward: forward.clone(),
     listener,
   })
-}
-
-/// Sets `stop` when the container these sockets serve is gone for good, so the
-/// relay outlives the `run` that started it and nothing else.
-///
-/// Two graces, because neither edge is instant: the container does not exist
-/// yet when the relay binds — it cannot, the sockets have to be there first —
-/// and `add --restart` takes it away and puts it back, which must not be read
-/// as the session ending.
-pub fn watch(container: &str, engine: &impl Engine, stop: &AtomicBool, appear: Duration, vanish: Duration) {
-  let mut appeared = false;
-  let mut waiting_since = Instant::now();
-
-  while !stop.load(Ordering::Relaxed) {
-    let running = engine
-      .running_containers()
-      .map(|containers| containers.iter().any(|name| name == container))
-      .unwrap_or(true);
-
-    if running {
-      appeared = true;
-      waiting_since = Instant::now();
-    } else {
-      let grace = if appeared { vanish } else { appear };
-
-      if waiting_since.elapsed() > grace {
-        stop.store(true, Ordering::Relaxed);
-        return;
-      }
-    }
-
-    std::thread::sleep(WATCH_INTERVAL);
-  }
 }
 
 /// Relays every bound socket until `stop` is set, then returns once every

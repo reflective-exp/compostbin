@@ -16,8 +16,7 @@ import ContainerizationOCI
 import Foundation
 
 struct Booted {
-    /// Held because `delete` is on the manager, not the container, and because
-    /// dropping it would drop the network interface with it.
+    /// Held because dropping it would drop the network interface with it.
     var manager: ContainerManager
     var container: LinuxContainer
     /// The image's own process configuration — its user above all.
@@ -49,12 +48,6 @@ final class Sessions: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return booted[name]
-    }
-
-    func remove(_ name: String) -> Booted? {
-        lock.lock()
-        defer { lock.unlock() }
-        return booted.removeValue(forKey: name)
     }
 
     var names: [String] {

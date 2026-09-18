@@ -11,9 +11,10 @@ pub mod record;
 pub mod settings;
 
 use crate::error::{At, PathError, SessionError};
-use crate::host::{Forward, GUEST_PORTS_TARGET, GUEST_SPOOL_TARGET, Spool};
+use crate::host::{self, Forward, GUEST_PORTS_TARGET, GUEST_SPOOL_TARGET, PortEvent, Spool};
 use crate::manifest::{Manifest, PathEntry, SESSIONS_DIR};
 use crate::session::briefing::{MANAGED_SETTINGS_DIR, MANAGED_SETTINGS_TARGET};
+use crate::session::credentials::{CredentialSource, SeedOutcome};
 use crate::session::image::GUEST_PORTS_NAME;
 use crate::session::record::{RECORD_FILE, Record};
 use crate::workspace::paths::{PathResolver, root_containing};
@@ -21,6 +22,7 @@ use crate::workspace::{Origin, Workspace};
 use compostbin_engine::engine::Engine;
 use compostbin_engine::model::{EnvVar, ExecSpec, Mount, RunSpec, SocketRelay};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Where Claude's home is mounted inside the container, which runs as `claude`.
 pub const CLAUDE_HOME_TARGET: &str = "/home/claude/.claude";
@@ -30,7 +32,7 @@ pub const CLAUDE_HOME_DIR: &str = "claude-home";
 /// in flight. Emptied and not removed — the container mounts it.
 pub const SPOOL_DIR: &str = "host";
 /// Under the session state directory: one bound socket per declared port, which
-/// live exactly as long as the container created with them — and so outlive the
+/// live exactly as long as the container created with them. Both belong to the
 /// `run` that created it.
 pub const PORTS_DIR: &str = "ports";
 /// Where the relay says what it could not, while a session is attached.
@@ -73,6 +75,40 @@ fn clear(target: &Path) -> Result<(), PathError> {
   }
 
   Ok(())
+}
+
+/// `claude`, then whatever the caller passes through to it.
+fn claude(arguments: &[String]) -> Vec<String> {
+  std::iter::once("claude".to_string())
+    .chain(arguments.iter().cloned())
+    .collect()
+}
+
+/// Best effort: a log that cannot be written must not take a port down with it.
+fn append_to_log(log: &Path, event: &PortEvent) {
+  use std::io::Write;
+
+  if let Ok(mut file) = std::fs::File::options().append(true).create(true).open(log) {
+    let _ = writeln!(file, "{event}");
+  }
+}
+
+/// What a session has to say as it starts, runs, and ends, left to the caller to
+/// print: core does not own the terminal.
+///
+/// Port events only arrive here until Claude is attached. After that the
+/// terminal is Claude's, and the relay writes to `ports_log` instead.
+#[derive(Debug)]
+pub enum Notice {
+  /// Claude's home had no token, and the Keychain had none to seed it with.
+  NotInKeychain,
+  /// What was copied from the host's own `~/.claude`. Never empty.
+  Shared(Vec<String>),
+  Port(PortEvent),
+  /// The host command agent gave up; the session carries on without it.
+  AgentStopped(PathError),
+  /// The spool could not be emptied after Claude exited.
+  CleanupFailed(PathError),
 }
 
 /// What `add` did, and therefore what the caller must do next.
@@ -153,7 +189,7 @@ impl Session {
       .join(self.container_name())
   }
 
-  /// What `stop` and `clean` may delete: state that means nothing once the
+  /// What `clean` may delete: state that means nothing once the
   /// container is gone. Not Claude's home — that holds the conversation
   /// `--continue` reattaches to.
   fn transient_state(&self) -> Vec<PathBuf> {
@@ -203,17 +239,14 @@ impl Session {
     Ok(cleared)
   }
 
-  /// What `run` may delete when Claude exits. Narrower than `clean`: the
-  /// container is still running, with the managed settings mounted, and the next
-  /// `run` attaches to it without writing them again.
+  /// What the `run` that created the container clears when Claude exits: only
+  /// the spool, so nothing claimed outlives the agent that claimed it.
   ///
-  /// The port sockets stay: they belong to the container, which is still
-  /// running, and to the relay holding them — which outlives this process for
-  /// exactly that reason. The spool is emptied rather than removed, for the
-  /// same reason in a different shape: the container is holding that mount, and
-  /// unlinking the directory would leave every later `shell` and `host-agent`
-  /// for this container talking to an inode nothing can reach.
-  pub fn clean_after_exit(&self) -> Result<Vec<PathBuf>, PathError> {
+  /// Emptied rather than removed, because until this process exits the
+  /// container is still holding that mount (§`clear`). The rest of the transient
+  /// state is left for the next create, which binds the sockets and writes the
+  /// managed settings again anyway.
+  fn clean_after_exit(&self) -> Result<Vec<PathBuf>, PathError> {
     let spool = self.host_spool();
     if !spool.exists() {
       return Ok(Vec::new());
@@ -449,9 +482,7 @@ impl Session {
   fn create(&self, engine: &impl Engine) -> Result<(), SessionError> {
     let spec = self.run_spec();
 
-    // Here rather than in the CLI, so every path that creates a container —
-    // `run`, `add --restart` — mounts a briefing rendered from the manifest as
-    // it reads now.
+    // Every create mounts a briefing rendered from the manifest as it reads now.
     briefing::write(&self.managed_settings(), &self.manifest)?;
 
     // Every guest client that could still be waiting on a response died with the
@@ -466,7 +497,7 @@ impl Session {
     Ok(())
   }
 
-  /// Whether the container is already up, and so whether `start` will attach to
+  /// Whether the container is already up, and so whether `run` will attach to
   /// it rather than create it. Asked before starting by anything whose work
   /// belongs to the container's creation — binding the port sockets, above all.
   pub fn is_running(&self, engine: &impl Engine) -> Result<bool, SessionError> {
@@ -477,34 +508,119 @@ impl Session {
     )
   }
 
-  /// Makes the container be running, attaching to one that already is: a second
-  /// `run` joins the session rather than replacing it.
+  /// Attaches Claude to the session, creating the container first unless it is
+  /// already running, and returns Claude's exit code. `arguments` are passed
+  /// through to `claude`.
+  ///
+  /// A second `run` joins the session rather than replacing it, and does
+  /// nothing else: the host command agent, the port relay, and the cleanup on
+  /// exit belong to the process that created the container. A joiner binding
+  /// the sockets again would take them from the relay the container is using,
+  /// and one cleaning up as it left would empty a spool still being served.
   ///
   /// Attaching leaves the record alone. It describes the running container, not
   /// the manifest as it reads now, and `doctor` checks the gap between them.
-  pub fn start(&self, engine: &impl Engine) -> Result<(), SessionError> {
+  pub fn run(
+    &self,
+    engine: &impl Engine,
+    credentials: &impl CredentialSource,
+    arguments: &[String],
+    notify: &(dyn Fn(Notice) + Sync),
+  ) -> Result<i32, SessionError> {
+    self.prepare(credentials, notify)?;
+
     if self.is_running(engine)? {
-      return Ok(());
+      return Ok(engine.exec(&self.exec_spec(&claude(arguments)))?);
     }
 
-    self.create(engine)
+    self.launch(engine, arguments, notify)
   }
 
-  /// Stops the container. A session that is already over is not an error, which
-  /// is what `clean` and `add --restart` both rely on.
-  pub fn remove_container(&self, engine: &impl Engine) -> Result<(), SessionError> {
-    engine.stop(&self.container_name())?;
+  /// Seeds Claude's token and shares the host's own settings into Claude's
+  /// home, the source side of a mount, and so reachable whether or not the
+  /// container is up yet.
+  fn prepare(&self, credentials: &impl CredentialSource, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
+    let seeded = credentials::seed(
+      &self.claude_home(),
+      self.manifest.claude.seed_from_keychain,
+      credentials,
+    )?;
+
+    if seeded == SeedOutcome::NotInKeychain {
+      notify(Notice::NotInKeychain);
+    }
+
+    let shared = settings::share(
+      &self.resolve(settings::HOST_CLAUDE_HOME),
+      &self.claude_home(),
+      &self.manifest.claude.shared,
+    )?;
+
+    if !shared.is_empty() {
+      notify(Notice::Shared(shared));
+    }
 
     Ok(())
   }
 
-  /// Recreates the container so a new mount takes effect, then reattaches to the
-  /// same conversation — cheap, because Claude's home outlives the container.
-  pub fn restart(&self, engine: &impl Engine) -> Result<i32, SessionError> {
-    self.remove_container(engine)?;
+  /// Creates the container and serves it until Claude exits.
+  ///
+  /// The port sockets are bound first: each has to already be a socket when the
+  /// container's relays are set up, and they are set up at creation. The agent
+  /// and the relay then run beside the attach, and the flag stops them as soon
+  /// as it returns.
+  ///
+  /// Threads rather than a process of their own: the container dies with this
+  /// process, so anything holding its ports afterwards would be holding them for
+  /// nobody.
+  fn launch(
+    &self,
+    engine: &impl Engine,
+    arguments: &[String],
+    notify: &(dyn Fn(Notice) + Sync),
+  ) -> Result<i32, SessionError> {
+    self.prepare_host_spool()?;
+
+    let bound = host::bind_all(&self.forwards(), &|event| notify(Notice::Port(event))).at(self.port_sockets())?;
+
     self.create(engine)?;
 
-    Ok(engine.exec(&self.exec_spec(&["claude".to_string(), "--continue".to_string()]))?)
+    let stop = AtomicBool::new(false);
+    let spool = Spool::new(self.host_spool());
+    let log = self.ports_log();
+    let log_port = |event: PortEvent| append_to_log(&log, &event);
+
+    let code = std::thread::scope(|scope| {
+      if self.manifest.host.has_commands() {
+        scope.spawn(|| {
+          if let Err(error) = host::serve(
+            &spool,
+            &self.manifest.host.served_commands(),
+            &self.project_dir,
+            self.manifest.host.concurrency,
+            &stop,
+          ) {
+            notify(Notice::AgentStopped(error));
+          }
+        });
+      }
+
+      if !bound.is_empty() {
+        scope.spawn(|| host::relay(&bound, &stop, &log_port));
+      }
+
+      let code = engine.exec(&self.exec_spec(&claude(arguments)));
+      stop.store(true, Ordering::Relaxed);
+      code
+    })?;
+
+    // Best effort: a killed session leaves the spool behind, which is what
+    // `compostbin clean` is for.
+    if let Err(error) = self.clean_after_exit() {
+      notify(Notice::CleanupFailed(error));
+    }
+
+    Ok(code)
   }
 
   /// `IS_SANDBOX=1` tells Claude it is already sandboxed.
@@ -561,7 +677,7 @@ impl Session {
 mod tests {
   use super::*;
   use compostbin_engine::fake::{Call, RecordingEngine};
-  use std::os::unix::fs::MetadataExt;
+  use std::os::unix::fs::{FileTypeExt, MetadataExt};
   use tempfile::TempDir;
 
   const MANIFEST: &str = r#"
@@ -597,6 +713,23 @@ source   = "~/.cargo/registry"
       PathResolver::new(base.join("workspace/compostbin"), base),
       base.join("workspace/compostbin"),
     )
+  }
+
+  /// A Keychain with nothing in it: `run` says so and carries on.
+  struct NoToken;
+
+  impl CredentialSource for NoToken {
+    fn read(&self) -> Result<Option<String>, crate::error::CredentialError> {
+      Ok(None)
+    }
+  }
+
+  fn quiet(_: Notice) {}
+
+  fn run(session: &Session, engine: &RecordingEngine) -> i32 {
+    session
+      .run(engine, &NoToken, &[], &quiet)
+      .expect("run should succeed")
   }
 
   #[test]
@@ -656,29 +789,112 @@ source   = "~/.cargo/registry"
   }
 
   #[test]
-  fn start_attaches_to_an_already_running_container() {
+  fn run_attaches_to_an_already_running_container() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = session_under(&base);
     let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
-    session().start(&engine).expect("start should succeed");
+    run(&session, &engine);
 
     assert_eq!(
       engine.calls(),
-      [Call::Running],
+      [Call::Running, Call::Exec(session.exec_spec(&["claude".to_string()]))],
       "a running container must not be recreated"
     );
   }
 
-  /// Another session's container is not this one: `start` creates its own.
+  /// Another session's container is not this one: `run` creates its own.
   #[test]
-  fn start_creates_a_container_that_is_not_running() {
+  fn run_creates_a_container_that_is_not_running() {
     let temp = TempDir::new().expect("temp dir");
     let base = temp.path().canonicalize().expect("canonical temp");
     let session = session_under(&base);
     let engine = RecordingEngine::with_running(&["compostbin-other"]);
 
-    session.start(&engine).expect("start should succeed");
+    run(&session, &engine);
 
-    assert_eq!(engine.calls(), [Call::Running, Call::Run(session.run_spec())]);
+    assert_eq!(
+      engine.calls(),
+      [
+        Call::Running,
+        Call::Run(session.run_spec()),
+        Call::Exec(session.exec_spec(&["claude".to_string()])),
+      ]
+    );
+  }
+
+  #[test]
+  fn run_passes_its_arguments_through_to_claude() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = session_under(&base);
+    let engine = RecordingEngine::new();
+
+    session
+      .run(&engine, &NoToken, &["--continue".to_string()], &quiet)
+      .expect("run should succeed");
+
+    assert_eq!(
+      engine.calls().last(),
+      Some(&Call::Exec(
+        session.exec_spec(&["claude".to_string(), "--continue".to_string()])
+      ))
+    );
+  }
+
+  /// Declared ports are bound before the container is created, since each has
+  /// to already be a socket when its relay is set up.
+  #[test]
+  fn run_binds_the_port_sockets_before_creating_the_container() {
+    // Under `/tmp` because macOS's own temp directory is deep enough to push a
+    // socket in the session directory past the length a socket path may have.
+    let temp = tempfile::Builder::new()
+      .tempdir_in("/tmp")
+      .expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let mut session = session_under(&base);
+    session.manifest.host.ports = vec![7001];
+    let engine = RecordingEngine::new();
+
+    run(&session, &engine);
+
+    assert!(
+      std::fs::symlink_metadata(&session.forwards()[0].listen)
+        .expect("the socket should have been bound")
+        .file_type()
+        .is_socket()
+    );
+  }
+
+  /// Binding again would take the sockets from the relay the running container
+  /// is using.
+  #[test]
+  fn joining_a_running_session_binds_nothing() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let mut session = session_under(&base);
+    session.manifest.host.ports = vec![7001];
+
+    run(&session, &RecordingEngine::with_running(&["compostbin-cb"]));
+
+    assert!(!session.port_sockets().exists());
+  }
+
+  #[test]
+  fn run_says_when_there_is_no_token_to_seed() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = session_under(&base);
+    let said = std::sync::Mutex::new(Vec::new());
+
+    session
+      .run(&RecordingEngine::new(), &NoToken, &[], &|notice| {
+        said.lock().expect("lock").push(format!("{notice:?}"))
+      })
+      .expect("run should succeed");
+
+    assert_eq!(said.into_inner().expect("lock"), ["NotInKeychain"]);
   }
 
   /// The mount source has to exist before the container does, and what it holds
@@ -690,9 +906,7 @@ source   = "~/.cargo/registry"
     let base = temp.path().canonicalize().expect("canonical temp");
     let session = session_under(&base);
 
-    session
-      .start(&RecordingEngine::new())
-      .expect("start should succeed");
+    run(&session, &RecordingEngine::new());
 
     assert_eq!(
       std::fs::read_to_string(session.managed_settings().join(briefing::BRIEFING_FILE))
@@ -708,60 +922,6 @@ source   = "~/.cargo/registry"
     );
   }
 
-  #[test]
-  fn restarts_by_stopping_recreating_and_continuing() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = session_under(&base);
-    let engine = RecordingEngine::with_running(&["compostbin-cb"]);
-
-    session.restart(&engine).expect("restart should succeed");
-
-    assert_eq!(
-      engine.calls(),
-      [
-        Call::Stop("compostbin-cb".to_string()),
-        Call::Run(session.run_spec()),
-        Call::Exec(session.exec_spec(&["claude".to_string(), "--continue".to_string()])),
-      ]
-    );
-  }
-
-  /// A session that is already over: stopping it says so and is not an error.
-  #[test]
-  fn removes_a_container_that_is_not_running() {
-    let engine = RecordingEngine::new();
-
-    session()
-      .remove_container(&engine)
-      .expect("remove should succeed");
-
-    assert_eq!(engine.calls(), [Call::Stop("compostbin-cb".to_string())]);
-  }
-
-  #[test]
-  fn preserves_claude_home_across_restart() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = session_under(&base);
-    let engine = RecordingEngine::new();
-
-    session.restart(&engine).expect("restart should succeed");
-
-    let calls = engine.calls();
-    let Some(Call::Run(spec)) = calls.iter().find(|call| matches!(call, Call::Run(_))) else {
-      panic!("restart should have recreated the container: {calls:?}");
-    };
-    assert!(
-      spec
-        .mounts
-        .iter()
-        .any(|mount| { mount.source == session.claude_home() && mount.target == PathBuf::from(CLAUDE_HOME_TARGET) }),
-      "the recreated container must remount Claude's home: {:?}",
-      spec.mounts
-    );
-  }
-
   /// What `doctor`'s stale-mount check reads: the container's real mount set,
   /// which the manifest stops describing once edited.
   #[test]
@@ -771,11 +931,11 @@ source   = "~/.cargo/registry"
     let mut session = session_under(&base);
     let engine = RecordingEngine::new();
 
-    session.start(&engine).expect("start should succeed");
+    run(&session, &engine);
 
     let recorded = Record::load(&session.mount_record())
       .expect("load should succeed")
-      .expect("start must have written a record");
+      .expect("run must have written a record");
     assert_eq!(recorded, Record::of(&session.mounts(), &session.sockets()));
 
     // The container still has the mounts it was created with.
@@ -811,17 +971,13 @@ source   = "~/.cargo/registry"
     let orphan = spool.responses().join("0001.out.000001");
     std::fs::write(&orphan, "stranded\n").expect("write orphan");
 
-    session
-      .start(&RecordingEngine::with_running(&["compostbin-cb"]))
-      .expect("start should succeed");
+    run(&session, &RecordingEngine::with_running(&["compostbin-cb"]));
     assert!(
       orphan.exists(),
-      "a running container's responses are not ours to delete"
+      "a running container's responses are not a joiner's to delete, on the way in or out"
     );
 
-    session
-      .start(&RecordingEngine::new())
-      .expect("start should succeed");
+    run(&session, &RecordingEngine::new());
     assert!(!orphan.exists(), "a replaced container's are");
   }
 
@@ -831,20 +987,20 @@ source   = "~/.cargo/registry"
     let temp = TempDir::new().expect("temp dir");
     let base = temp.path().canonicalize().expect("canonical temp");
     let mut session = session_under(&base);
-    let engine = RecordingEngine::new();
 
-    session.start(&engine).expect("start should succeed");
+    run(&session, &RecordingEngine::new());
     session.manifest.paths.push(PathEntry {
       local: false,
       readonly: false,
       source: base.join("vendor").display().to_string(),
       target: None,
     });
-    session.restart(&engine).expect("restart should succeed");
+    // The first session has exited, taking its container with it.
+    run(&session, &RecordingEngine::new());
 
     let recorded = Record::load(&session.mount_record())
       .expect("load should succeed")
-      .expect("restart must have rewritten the record");
+      .expect("run must have rewritten the record");
 
     assert!(
       recorded

@@ -187,7 +187,7 @@ fn add_inside_a_root_records_no_path_entry() {
 }
 
 #[test]
-fn add_outside_every_root_records_a_path_without_restarting() {
+fn add_outside_every_root_records_a_path_and_says_how_to_mount_it() {
   let temp = TempDir::new().expect("temp dir");
   let project_dir = project_with_a_root(&temp);
   let outside = temp
@@ -204,7 +204,7 @@ fn add_outside_every_root_records_a_path_without_restarting() {
     String::from_utf8_lossy(&output.stderr)
   );
   assert!(
-    String::from_utf8_lossy(&output.stdout).contains("--restart"),
+    String::from_utf8_lossy(&output.stdout).contains("compostbin run -- --continue"),
     "stdout must say how to make the path visible: {}",
     String::from_utf8_lossy(&output.stdout)
   );

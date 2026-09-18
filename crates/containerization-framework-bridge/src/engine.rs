@@ -230,18 +230,6 @@ impl Engine for FrameworkEngine {
     })
   }
 
-  fn stop(&self, name: &str) -> Result<(), EngineError> {
-    if !self.owns(name) {
-      // Someone else's VM, or none: either way there is nothing here to stop,
-      // and the socket going quiet is what tells the next caller so.
-      return Ok(());
-    }
-
-    checked(ffi::compostbin_stop(name))
-      .map(|_| ())
-      .map_err(|error| Self::failed("stop", error))
-  }
-
   /// Names both halves of what boots a session, because they are pinned
   /// separately and a mismatch is a runtime failure rather than a build one.
   fn version(&self) -> Result<Option<String>, EngineError> {

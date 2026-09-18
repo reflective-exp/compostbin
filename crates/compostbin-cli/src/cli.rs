@@ -23,9 +23,6 @@ pub enum Command {
     local: bool,
     #[arg(long)]
     readonly: bool,
-    /// Recreate the container so an out-of-root path becomes visible
-    #[arg(long)]
-    restart: bool,
   },
   /// Build the base image, and the project's own image if the manifest adds to it
   Build {
@@ -66,13 +63,12 @@ mod tests {
   #[test]
   fn parses_add() {
     assert_eq!(
-      parse(&["compostbin", "add", "../libfoo", "--readonly", "--restart"]),
+      parse(&["compostbin", "add", "../libfoo", "--readonly"]),
       Command::Add {
         force: false,
         local: false,
         path: PathBuf::from("../libfoo"),
         readonly: true,
-        restart: true,
       }
     );
     assert_eq!(
@@ -82,7 +78,6 @@ mod tests {
         local: false,
         path: PathBuf::from("../libfoo"),
         readonly: false,
-        restart: false,
       }
     );
   }

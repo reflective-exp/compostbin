@@ -184,17 +184,6 @@ func compostbin_resize(id: RustStr, terminal: Int32) -> Int32 {
     }
 }
 
-/// Stops and deletes a session this process owns. Succeeds when it owns none.
-func compostbin_stop(name: RustStr) -> Int32 {
-    reporting {
-        let name = name.toString()
-
-        try blocking { try await Session.stop(name: name) }
-
-        return 0
-    }
-}
-
 /// Whether this process owns a running session by that name.
 func compostbin_is_running(name: RustStr) -> Bool {
     Sessions.shared.get(name.toString()) != nil

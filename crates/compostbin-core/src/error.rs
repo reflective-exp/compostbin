@@ -128,11 +128,12 @@ impl From<PathError> for ManifestError {
   }
 }
 
-/// A container that could not be created, or whose mount record could not be
-/// written. One error because they are one step: `run` records what it started
-/// the container with.
+/// A session that could not be prepared or created, or whose mount record could
+/// not be written. One error because they are one step: `run`
+/// seeds, creates, and records what it created the container with.
 #[derive(Debug)]
 pub enum SessionError {
+  Credential(CredentialError),
   Engine(EngineError),
   Io(PathError),
   Record(ManifestError),
@@ -141,6 +142,7 @@ pub enum SessionError {
 impl fmt::Display for SessionError {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
+      Self::Credential(error) => error.fmt(formatter),
       Self::Engine(error) => error.fmt(formatter),
       Self::Io(error) => error.fmt(formatter),
       Self::Record(error) => write!(formatter, "recording the container's mounts: {error}"),
@@ -151,11 +153,18 @@ impl fmt::Display for SessionError {
 impl Error for SessionError {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match self {
+      Self::Credential(error) => error.source(),
       Self::Engine(error) => error.source(),
       Self::Io(error) => error.source(),
       // Says something of its own, so what it holds really is the source.
       Self::Record(error) => Some(error),
     }
+  }
+}
+
+impl From<CredentialError> for SessionError {
+  fn from(error: CredentialError) -> Self {
+    Self::Credential(error)
   }
 }
 

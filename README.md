@@ -103,12 +103,12 @@ user, in the project's directory under `/workspace`.
 
 ``` sh
 compostbin add ../libfoo --readonly
-compostbin add ../libfoo --restart     # recreate the container and reattach, so it appears immediately
 ```
 
 A path already inside a `[workspace] roots` tree is mounted already: `add` says
 so, records nothing, and ignores `--readonly`. Anything else needs the container
-recreated, which `--restart` does before reattaching Claude with `--continue`.
+recreated: exit the running session, then `compostbin run -- --continue` picks
+the conversation back up with the new mount.
 
 `--local` records the entry in `.config/compostbin.local.toml`.
 

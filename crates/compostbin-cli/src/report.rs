@@ -48,8 +48,8 @@ mod tests {
   #[test]
   fn prints_a_check_without_findings_on_one_line() {
     assert_eq!(
-      Diagnosis(&[check("daemon", Status::Ok, "responding", &[])]).to_string(),
-      "ok    daemon: responding\n"
+      Diagnosis(&[check("image store", Status::Ok, "readable", &[])]).to_string(),
+      "ok    image store: readable\n"
     );
   }
 

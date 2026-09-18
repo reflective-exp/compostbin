@@ -253,13 +253,4 @@ enum Session {
         let size = try Terminal(descriptor: terminal, setInitState: false).size
         try await process.resize(to: size)
     }
-
-    static func stop(name: String) async throws {
-        guard var booted = Sessions.shared.remove(name) else {
-            return
-        }
-
-        try? await booted.container.stop()
-        try? booted.manager.delete(name)
-    }
 }

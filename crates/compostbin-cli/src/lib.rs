@@ -4,50 +4,26 @@ mod report;
 use clap::Parser;
 use cli::{Arguments, Command};
 use compostbin_core::doctor::{self, Status};
-use compostbin_core::host::{self, PortEvent, Spool};
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest};
-use compostbin_core::session::credentials::{self, Keychain, SeedOutcome};
+use compostbin_core::session::credentials::{KEYCHAIN_SERVICE, Keychain};
 use compostbin_core::session::image;
-use compostbin_core::session::settings;
-use compostbin_core::session::{AddOutcome, Session};
+use compostbin_core::session::{AddOutcome, Notice, Session};
 use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
 use compostbin_engine::engine::Engine;
 use std::error::Error;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-/// What the relay says, in the terms a user would look for.
-fn describe_port(event: &PortEvent) -> String {
-  match event {
-    PortEvent::Listening(forward) => format!("forwarding localhost:{} to {}", forward.port(), forward.upstream),
-    PortEvent::UpstreamRefused(forward, error) => {
-      format!("nothing answers at {}: {error}", forward.upstream)
-    }
-  }
-}
-
-/// For the events that happen before Claude is attached, when the terminal is
-/// still ours to write to.
-fn report_port(event: PortEvent) {
-  eprintln!("compostbin: {}", describe_port(&event));
-}
-
-/// For the events that happen after.
-///
-/// A host service that has not started yet is an ordinary state — starting one
-/// through `compostbin-host` is a reason a port would refuse for a while — so
-/// the first connection to find it down must not draw over the session to say
-/// so. It still has to be somewhere, because a port that never comes up looks
-/// exactly the same from the guest.
-fn log_port(log: &Path) -> impl Fn(PortEvent) + Sync + '_ {
-  move |event| {
-    use std::io::Write;
-
-    if let Ok(mut file) = std::fs::File::options().append(true).create(true).open(log) {
-      let _ = writeln!(file, "{}", describe_port(&event));
-    }
+fn report(notice: Notice) {
+  match notice {
+    Notice::NotInKeychain => eprintln!(
+      "no \"{KEYCHAIN_SERVICE}\" entry in the login Keychain; the session will need ANTHROPIC_API_KEY or an interactive login"
+    ),
+    Notice::Shared(names) => println!("shared from your own ~/.claude: {}", names.join(", ")),
+    Notice::Port(event) => eprintln!("compostbin: {event}"),
+    Notice::AgentStopped(error) => eprintln!("compostbin: the host command agent stopped: {error}"),
+    Notice::CleanupFailed(error) => eprintln!("compostbin: could not clean up after the session: {error}"),
   }
 }
 
@@ -64,7 +40,6 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       local,
       path,
       readonly,
-      restart,
     } => {
       let canonical = resolver.canonicalize(&path.display().to_string())?;
 
@@ -85,14 +60,10 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
           println!("{} is already mounted under {}", canonical.display(), root.display());
           Ok(0)
         }
-        AddOutcome::NeedsRestart if restart => {
-          save_manifest(&session, &manifest_path, local)?;
-          Ok(session.restart(&select(&session)?)?)
-        }
         AddOutcome::NeedsRestart => {
           save_manifest(&session, &manifest_path, local)?;
           println!(
-            "{} recorded; run `compostbin add --restart` or restart the session to mount it",
+            "{} recorded; exit the running session and `compostbin run -- --continue` to mount it",
             canonical.display()
           );
           Ok(0)
@@ -158,85 +129,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
     Command::Run { arguments } => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
 
-      if credentials::seed(
-        &session.claude_home(),
-        session.manifest.claude.seed_from_keychain,
-        &Keychain,
-      )? == SeedOutcome::NotInKeychain
-      {
-        eprintln!(
-          "no \"{}\" entry in the login Keychain; the session will need ANTHROPIC_API_KEY or an interactive login",
-          credentials::KEYCHAIN_SERVICE
-        );
-      }
-
-      let shared = settings::share(
-        &session.resolve(settings::HOST_CLAUDE_HOME),
-        &session.claude_home(),
-        &session.manifest.claude.shared,
-      )?;
-      if !shared.is_empty() {
-        println!("shared from your own ~/.claude: {}", shared.join(", "));
-      }
-
-      let engine = select(&session)?;
-      session.prepare_host_spool()?;
-
-      // Before the container is created: each source has to already be a socket
-      // when the VM's relays are set up, and they are set up at start.
-      let bound = host::bind_all(&session.forwards(), &report_port)?;
-
-      session.start(&engine)?;
-
-      let mut claude = vec!["claude".to_string()];
-      claude.extend(arguments);
-
-      // Both the agent and the relay live as long as the session: `exec` blocks
-      // until Claude exits, and the flag stops them as soon as it does.
-      //
-      // Threads rather than a process of their own: the VM dies with this
-      // process, so anything holding its ports afterwards would be holding them
-      // for nobody.
-      let stop = AtomicBool::new(false);
-      let spool = Spool::new(session.host_spool());
-
-      let code = std::thread::scope(|scope| {
-        if session.manifest.host.has_commands() {
-          scope.spawn(|| {
-            if let Err(error) = host::serve(
-              &spool,
-              &session.manifest.host.served_commands(),
-              &project_dir,
-              session.manifest.host.concurrency,
-              &stop,
-            ) {
-              eprintln!("compostbin: the host command agent stopped: {error}");
-            }
-          });
-        }
-
-        if !bound.is_empty() {
-          // The log path moves in; the flag and the sockets are shared with the
-          // attach that ends them.
-          let log = session.ports_log();
-          let bound = &bound;
-          let stop = &stop;
-
-          scope.spawn(move || host::relay(bound, stop, &log_port(&log)));
-        }
-
-        let code = engine.exec(&session.exec_spec(&claude));
-        stop.store(true, Ordering::Relaxed);
-        code
-      })?;
-
-      // Best effort: a killed session leaves the spool behind, which is what
-      // `compostbin clean` is for.
-      if let Err(error) = session.clean_after_exit() {
-        eprintln!("compostbin: could not clean up after the session: {error}");
-      }
-
-      Ok(code)
+      Ok(session.run(&select(&session)?, &Keychain, &arguments, &report)?)
     }
 
     Command::Shell => {
@@ -346,10 +239,6 @@ mod unsupported {
     }
 
     fn running_containers(&self) -> Result<Vec<String>, EngineError> {
-      unreachable!("no session runs off macOS")
-    }
-
-    fn stop(&self, _name: &str) -> Result<(), EngineError> {
       unreachable!("no session runs off macOS")
     }
 

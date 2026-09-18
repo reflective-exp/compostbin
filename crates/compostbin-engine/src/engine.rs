@@ -21,9 +21,6 @@ pub trait Engine {
   /// is not running does not exist: it dies with the process that started it.
   fn running_containers(&self) -> Result<Vec<String>, EngineError>;
 
-  /// Stops a container. Stopping one that is not running is not an error.
-  fn stop(&self, name: &str) -> Result<(), EngineError>;
-
   /// What is running containers, and at what version. `None` when it cannot
   /// say, which `doctor` reports rather than treating as a failure.
   fn version(&self) -> Result<Option<String>, EngineError>;

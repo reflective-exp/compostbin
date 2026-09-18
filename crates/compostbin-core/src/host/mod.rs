@@ -19,9 +19,7 @@ mod spool;
 mod fixtures;
 
 pub use crate::host::agent::{POLL_INTERVAL, serve, serve_once};
-pub use crate::host::ports::{
-  APPEAR_GRACE, Bound, Forward, PortEvent, SOCKET_SUFFIX, VANISH_GRACE, bind_all, relay, served, watch,
-};
+pub use crate::host::ports::{Bound, Forward, PortEvent, SOCKET_SUFFIX, bind_all, relay, served};
 pub use crate::host::request::{Request, resolve};
 pub use crate::host::spool::Spool;
 

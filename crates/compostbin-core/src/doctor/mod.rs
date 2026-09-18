@@ -476,7 +476,7 @@ mod tests {
       "detail should name the path that is not really mounted: {mounts:?}"
     );
     assert!(
-      mounts.detail.contains("compostbin stop"),
+      mounts.detail.contains("`compostbin run` again"),
       "the fix is not guessable, so it has to be printed: {mounts:?}"
     );
   }

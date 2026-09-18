@@ -1,12 +1,13 @@
 //! What the container that is running now was actually started with.
 //!
-//! Mounts cannot be added to a running container, and `start` attaches to a live
+//! Mounts cannot be added to a running container, and `run` attaches to a live
 //! one rather than recreating it. So a manifest edited mid-session is ignored
-//! until `stop` + `run`, which without a record looks like a broken feature.
+//! until the session exits and `run` creates it again, which without a record
+//! looks like a broken feature.
 //!
-//! Recorded by whoever creates the container rather than read back out of
-//! `container inspect`: that CLI's JSON is Apple's and unversioned, so it would
-//! need re-probing on every upgrade, while the mounts we passed are already ours.
+//! Recorded by whoever creates the container rather than asked of the engine:
+//! the mounts we passed are already ours, and not every engine can say what a
+//! running container was created with.
 
 use crate::error::{At, ManifestError};
 use compostbin_engine::model::{Mount, SocketRelay};
@@ -17,7 +18,7 @@ use std::path::Path;
 /// Beside Claude's home and the spool, under the session state directory.
 pub const RECORD_FILE: &str = "mounts.toml";
 
-/// One mount as it was passed to `container run`. Paths are strings: TOML holds
+/// One mount as it was passed to the engine. Paths are strings: TOML holds
 /// them that way, and the record is only ever compared, never resolved.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

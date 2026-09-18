@@ -12,7 +12,6 @@ pub enum Call {
   Images,
   Run(RunSpec),
   Running,
-  Stop(String),
   Version,
 }
 
@@ -38,8 +37,9 @@ impl Calls {
 #[derive(Debug, Default)]
 pub struct RecordingEngine {
   calls: Calls,
-  /// The containers the posed engine is running.
-  running: Vec<String>,
+  /// The containers the posed engine is running, and every one `run` has
+  /// started since.
+  running: RefCell<Vec<String>>,
   /// `None` poses an engine that cannot say what images exist.
   images: Option<Vec<String>>,
   version: Option<String>,
@@ -53,7 +53,7 @@ impl RecordingEngine {
   /// Poses an engine running exactly these containers.
   pub fn with_running(containers: &[&str]) -> Self {
     Self {
-      running: containers.iter().copied().map(str::to_string).collect(),
+      running: RefCell::new(containers.iter().copied().map(str::to_string).collect()),
       ..Self::default()
     }
   }
@@ -89,18 +89,14 @@ impl Engine for RecordingEngine {
 
   fn run(&self, spec: &RunSpec) -> Result<String, EngineError> {
     self.calls.record(Call::Run(spec.clone()));
+    self.running.borrow_mut().push(spec.name.clone());
     Ok(spec.name.clone())
   }
 
   fn running_containers(&self) -> Result<Vec<String>, EngineError> {
     self.calls.record(Call::Running);
 
-    Ok(self.running.clone())
-  }
-
-  fn stop(&self, name: &str) -> Result<(), EngineError> {
-    self.calls.record(Call::Stop(name.to_string()));
-    Ok(())
+    Ok(self.running.borrow().clone())
   }
 
   fn version(&self) -> Result<Option<String>, EngineError> {
@@ -146,10 +142,10 @@ mod tests {
   fn records_calls_in_order() {
     let engine = RecordingEngine::new();
 
-    engine.stop("cb-test").expect("stop should succeed");
+    engine.running_containers().expect("running should succeed");
     engine.version().expect("version should succeed");
 
-    assert_eq!(engine.calls(), [Call::Stop("cb-test".to_string()), Call::Version]);
+    assert_eq!(engine.calls(), [Call::Running, Call::Version]);
   }
 
   #[test]

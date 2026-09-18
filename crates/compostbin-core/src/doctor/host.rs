@@ -63,7 +63,7 @@ pub fn ports(session: &Session, engine: &impl Engine) -> Check {
       "host ports",
       Status::Warn,
       format!(
-        "{} is running, but the relay holding its port sockets is gone; `compostbin stop` then `compostbin run`",
+        "{} is running, but the relay holding its port sockets is gone; exit it and `compostbin run` again",
         session.container_name()
       ),
     );
