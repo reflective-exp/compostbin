@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.8.1
+
+- Specify a small, random container ID for the container builder.
+
 ## v0.8.0
 
 - **Breaking:** build images with Containerization instead of `container build`
