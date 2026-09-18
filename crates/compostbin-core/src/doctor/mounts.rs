@@ -5,8 +5,8 @@
 use super::{Check, Status, check, listed};
 use crate::session::Session;
 use crate::session::record::Record;
-use crate::workspace::WALK_LIMIT;
 use crate::workspace::danger::{Danger, danger};
+use crate::workspace::{Escape, WALK_LIMIT};
 use apple_container::engine::Engine;
 
 /// Roots and explicit paths only. Claude's home is excluded: `run` creates it,
@@ -61,7 +61,7 @@ pub fn dangling_symlinks(session: &Session) -> Check {
     .escapes
     .iter()
     .take(NAMED)
-    .map(|escape| format!("{} -> {}", escape.link.display(), escape.target.display()))
+    .map(Escape::to_string)
     .collect();
 
   // In the list rather than the sentence, so the sentence stays true however

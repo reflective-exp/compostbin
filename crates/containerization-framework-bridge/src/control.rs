@@ -41,7 +41,7 @@ const MAX_REQUEST: usize = 64 * 1024;
 const RESIZE_POLL: Duration = Duration::from_millis(100);
 
 /// What a client asks the owner to run.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Request {
   pub arguments: Vec<String>,
   pub environment: Vec<String>,
@@ -87,7 +87,7 @@ fn split(line: &str) -> Vec<String> {
     return Vec::new();
   }
 
-  line.split(UNIT).map(|word| word.to_string()).collect()
+  line.split(UNIT).map(str::to_string).collect()
 }
 
 /// Whether a live owner answers at this path.

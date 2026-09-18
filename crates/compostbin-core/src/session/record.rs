@@ -8,9 +8,10 @@
 //! `container inspect`: that CLI's JSON is Apple's and unversioned, so it would
 //! need re-probing on every upgrade, while the mounts we passed are already ours.
 
-use crate::error::{ManifestError, PathError};
+use crate::error::{At, ManifestError};
 use apple_container::model::{Mount, SocketRelay};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::Path;
 
 /// Beside Claude's home and the spool, under the session state directory.
@@ -18,7 +19,7 @@ pub const RECORD_FILE: &str = "mounts.toml";
 
 /// One mount as it was passed to `container run`. Paths are strings: TOML holds
 /// them that way, and the record is only ever compared, never resolved.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordedMount {
   pub readonly: bool,
@@ -48,15 +49,23 @@ impl RecordedMount {
       target: socket.target.display().to_string(),
     }
   }
+}
 
-  fn describe(&self) -> String {
-    let readonly = if self.readonly { ", readonly" } else { "" };
+/// How `doctor` names a mount to the user: source, target, and whether the
+/// kernel is holding it read-only.
+impl fmt::Display for RecordedMount {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{} -> {}", self.source, self.target)?;
 
-    format!("{} -> {}{readonly}", self.source, self.target)
+    if self.readonly {
+      formatter.write_str(", readonly")?;
+    }
+
+    Ok(())
   }
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Record {
   pub mounts: Vec<RecordedMount>,
@@ -76,10 +85,10 @@ impl Record {
   /// `None` when there is no record, which is not an error: a state directory
   /// cleaned mid-session leaves nothing to compare against.
   pub fn load(path: &Path) -> Result<Option<Self>, ManifestError> {
-    let text = match std::fs::read_to_string(path) {
+    let text = match std::fs::read_to_string(path).at(path) {
       Ok(text) => text,
-      Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-      Err(source) => return Err(ManifestError::Io(PathError::new(path, source))),
+      Err(error) if error.is_not_found() => return Ok(None),
+      Err(error) => return Err(error.into()),
     };
 
     toml::from_str(&text)
@@ -99,10 +108,10 @@ impl Record {
     })?;
 
     if let Some(parent) = path.parent() {
-      std::fs::create_dir_all(parent).map_err(|source| ManifestError::Io(PathError::new(parent, source)))?;
+      std::fs::create_dir_all(parent).at(parent)?;
     }
 
-    std::fs::write(path, rendered).map_err(|source| ManifestError::Io(PathError::new(path, source)))
+    Ok(std::fs::write(path, rendered).at(path)?)
   }
 
   /// How the manifest's mounts differ from the ones the container really has.
@@ -123,20 +132,17 @@ impl Record {
         .iter()
         .find(|recorded| recorded.target == mount.target)
       {
-        None => drift.added.push(mount.describe()),
-        Some(recorded) if recorded != mount => drift.changed.push(format!(
-          "{} is {} in the container, not {}",
-          mount.target,
-          recorded.describe(),
-          mount.describe()
-        )),
+        None => drift.added.push(mount.to_string()),
+        Some(recorded) if recorded != mount => drift
+          .changed
+          .push(format!("{} is {recorded} in the container, not {mount}", mount.target)),
         Some(_) => {}
       }
     }
 
     for recorded in &self.mounts {
       if !wanted.iter().any(|mount| mount.target == recorded.target) {
-        drift.removed.push(recorded.describe());
+        drift.removed.push(recorded.to_string());
       }
     }
 
@@ -147,7 +153,7 @@ impl Record {
 /// Every way the manifest and the running container disagree, kept apart because
 /// each reads differently: a mount the manifest gained is invisible in the
 /// session, one it lost is still exposed, and one that moved points elsewhere.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub struct Drift {
   pub added: Vec<String>,
   pub changed: Vec<String>,

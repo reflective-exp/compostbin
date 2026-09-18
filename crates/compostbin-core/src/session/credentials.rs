@@ -1,4 +1,4 @@
-use crate::error::{CredentialError, PathError};
+use crate::error::{At, CredentialError};
 use std::path::Path;
 use std::process::Command;
 
@@ -8,7 +8,7 @@ pub const CREDENTIALS_FILE_NAME: &str = ".credentials.json";
 pub const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
 /// What `seed` did, so the caller can say so without re-reading the filesystem.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SeedOutcome {
   Disabled,
   KeptExisting,
@@ -32,7 +32,7 @@ impl CredentialSource for Keychain {
     let output = Command::new("security")
       .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
       .output()
-      .map_err(|source| CredentialError::Io(PathError::new("security", source)))?;
+      .at("security")?;
 
     if output.status.code() == Some(KEYCHAIN_ITEM_NOT_FOUND) {
       return Ok(None);
@@ -66,8 +66,8 @@ pub fn seed(claude_home: &Path, enabled: bool, source: &impl CredentialSource) -
     return Ok(SeedOutcome::NotInKeychain);
   };
 
-  std::fs::create_dir_all(claude_home).map_err(|source| CredentialError::Io(PathError::new(claude_home, source)))?;
-  std::fs::write(&destination, secret).map_err(|source| CredentialError::Io(PathError::new(&destination, source)))?;
+  std::fs::create_dir_all(claude_home).at(claude_home)?;
+  std::fs::write(&destination, secret).at(&destination)?;
   restrict_to_owner(&destination)?;
 
   Ok(SeedOutcome::Seeded)
@@ -77,8 +77,7 @@ pub fn seed(claude_home: &Path, enabled: bool, source: &impl CredentialSource) -
 fn restrict_to_owner(path: &Path) -> Result<(), CredentialError> {
   use std::os::unix::fs::PermissionsExt;
 
-  std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-    .map_err(|source| CredentialError::Io(PathError::new(path, source)))
+  Ok(std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).at(path)?)
 }
 
 #[cfg(not(unix))]

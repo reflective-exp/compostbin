@@ -5,6 +5,7 @@
 //! without `--force`; `doctor` reports both, a manifest being hand-editable.
 
 use crate::workspace::paths::PathResolver;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// Paths whose contents are secrets: mounting one, or anything above it, hands
@@ -23,7 +24,7 @@ pub const SENSITIVE_PATHS: [&str; 7] = [
 pub const BROAD_PATHS: [&str; 6] = ["/", "/Users", "~", "~/Desktop", "~/Documents", "~/Downloads"];
 
 /// Why a path should probably not be mounted.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Danger {
   /// Wide enough to expose the whole account, `SENSITIVE_PATHS` included.
   Broad(PathBuf),
@@ -31,8 +32,8 @@ pub enum Danger {
   Sensitive(PathBuf),
 }
 
-impl std::fmt::Display for Danger {
-  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Danger {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::Broad(path) => write!(
         formatter,

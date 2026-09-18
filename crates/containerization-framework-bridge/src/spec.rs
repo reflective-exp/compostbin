@@ -98,9 +98,11 @@ pub fn nat_address(name: &str) -> String {
   }
 
   let host = FIRST_HOST + (hash % u64::from(LAST_HOST - FIRST_HOST + 1)) as u32;
-  let gateway: Vec<&str> = NAT_GATEWAY.rsplitn(2, '.').collect();
+  let (network, _) = NAT_GATEWAY
+    .rsplit_once('.')
+    .expect("the gateway is a dotted quad");
 
-  format!("{}.{host}/{NAT_PREFIX}", gateway[1])
+  format!("{network}.{host}/{NAT_PREFIX}")
 }
 
 /// `8G`, `512M`, `1024` — the forms the manifest's `[container] memory` takes,

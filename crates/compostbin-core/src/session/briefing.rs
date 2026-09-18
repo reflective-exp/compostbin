@@ -11,7 +11,7 @@
 //! from the host's `~/.claude` and would overwrite; that file is the user's, and
 //! this is not.
 
-use crate::error::PathError;
+use crate::error::{At, PathError};
 use crate::manifest::{CLIPBOARD_COMMAND, MANIFEST_RELATIVE_PATH, Manifest};
 use std::path::Path;
 
@@ -144,14 +144,14 @@ fn ports(manifest: &Manifest) -> String {
 /// starts, since the mount source must exist by then and the guest cannot
 /// create it.
 pub fn write(dir: &Path, manifest: &Manifest) -> Result<(), PathError> {
-  std::fs::create_dir_all(dir).map_err(|source| PathError::new(dir, source))?;
+  std::fs::create_dir_all(dir).at(dir)?;
 
   for (name, contents) in [
     (MANAGED_SETTINGS_FILE, managed_settings()),
     (BRIEFING_FILE, briefing(manifest)),
   ] {
     let path = dir.join(name);
-    std::fs::write(&path, contents).map_err(|source| PathError::new(&path, source))?;
+    std::fs::write(&path, contents).at(&path)?;
   }
 
   Ok(())

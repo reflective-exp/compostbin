@@ -1,6 +1,16 @@
+//! Every domain's failures, since all of them reach the same CLI.
+//!
+//! Variants come in two shapes, and the difference decides what `source` says.
+//! A variant that only widens a type — `SessionError::Io`, say — delegates
+//! `Display` to what it holds, so reporting it *and* naming it as the source
+//! would print the same sentence twice down a chain; those forward the inner
+//! error's own source, skipping the level they add. A variant that says
+//! something of its own names what it holds as the source, because the two
+//! sentences are then different.
+
 use apple_container::error::EngineError;
 use std::error::Error;
-use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -12,8 +22,8 @@ pub enum CredentialError {
   Keychain(String),
 }
 
-impl Display for CredentialError {
-  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+impl fmt::Display for CredentialError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::Io(error) => error.fmt(formatter),
       Self::Keychain(message) => write!(formatter, "reading the login Keychain: {message}"),
@@ -24,9 +34,15 @@ impl Display for CredentialError {
 impl Error for CredentialError {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match self {
-      Self::Io(error) => Some(error),
+      Self::Io(error) => error.source(),
       Self::Keychain(_) => None,
     }
+  }
+}
+
+impl From<PathError> for CredentialError {
+  fn from(error: PathError) -> Self {
+    Self::Io(error)
   }
 }
 
@@ -37,8 +53,8 @@ pub enum ImageError {
   Io(PathError),
 }
 
-impl Display for ImageError {
-  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+impl fmt::Display for ImageError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::Engine(error) => error.fmt(formatter),
       Self::Io(error) => error.fmt(formatter),
@@ -49,8 +65,8 @@ impl Display for ImageError {
 impl Error for ImageError {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match self {
-      Self::Engine(error) => Some(error),
-      Self::Io(error) => Some(error),
+      Self::Engine(error) => error.source(),
+      Self::Io(error) => error.source(),
     }
   }
 }
@@ -58,6 +74,12 @@ impl Error for ImageError {
 impl From<EngineError> for ImageError {
   fn from(error: EngineError) -> Self {
     Self::Engine(error)
+  }
+}
+
+impl From<PathError> for ImageError {
+  fn from(error: PathError) -> Self {
+    Self::Io(error)
   }
 }
 
@@ -80,8 +102,8 @@ impl ManifestError {
   }
 }
 
-impl Display for ManifestError {
-  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+impl fmt::Display for ManifestError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::Io(error) => error.fmt(formatter),
       Self::Parse { path, source } => write!(formatter, "{}: {source}", path.display()),
@@ -93,10 +115,16 @@ impl Display for ManifestError {
 impl Error for ManifestError {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match self {
-      Self::Io(error) => Some(error),
+      Self::Io(error) => error.source(),
       Self::Parse { source, .. } => Some(source),
       Self::Render { source, .. } => Some(source),
     }
+  }
+}
+
+impl From<PathError> for ManifestError {
+  fn from(error: PathError) -> Self {
+    Self::Io(error)
   }
 }
 
@@ -110,8 +138,8 @@ pub enum SessionError {
   Record(ManifestError),
 }
 
-impl Display for SessionError {
-  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+impl fmt::Display for SessionError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::Engine(error) => error.fmt(formatter),
       Self::Io(error) => error.fmt(formatter),
@@ -123,8 +151,9 @@ impl Display for SessionError {
 impl Error for SessionError {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match self {
-      Self::Engine(error) => Some(error),
-      Self::Io(error) => Some(error),
+      Self::Engine(error) => error.source(),
+      Self::Io(error) => error.source(),
+      // Says something of its own, so what it holds really is the source.
       Self::Record(error) => Some(error),
     }
   }
@@ -168,10 +197,17 @@ impl PathError {
   pub fn path(&self) -> &Path {
     &self.path
   }
+
+  /// Whether nothing was there at all. Several callers treat that as an
+  /// ordinary outcome — no local manifest, no record, no spool yet — rather
+  /// than as a failure.
+  pub fn is_not_found(&self) -> bool {
+    self.source.kind() == io::ErrorKind::NotFound
+  }
 }
 
-impl Display for PathError {
-  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+impl fmt::Display for PathError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(formatter, "{}: {}", self.path.display(), self.source)
   }
 }
@@ -182,9 +218,24 @@ impl Error for PathError {
   }
 }
 
+/// Names the path a filesystem call failed on, which `io::Error` does not.
+///
+/// Every `std::fs` call in compostbin goes through this: `.at(&path)?` rather
+/// than a closure rebuilding the same `PathError` by hand. The `?` then does
+/// the rest, since every error type that can hold one converts from it.
+pub trait At<T> {
+  fn at(self, path: impl Into<PathBuf>) -> Result<T, PathError>;
+}
+
+impl<T> At<T> for io::Result<T> {
+  fn at(self, path: impl Into<PathBuf>) -> Result<T, PathError> {
+    self.map_err(|source| PathError::new(path, source))
+  }
+}
+
 /// Why a host command was refused — an outcome reported to the guest, not a
 /// failure of the agent. Separate from `HostError` so it compares by value.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Refusal {
   /// Declared without `arguments = true`.
   ArgumentsNotAllowed(String),
@@ -196,8 +247,8 @@ pub enum Refusal {
   UnknownCommand(String),
 }
 
-impl Display for Refusal {
-  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+impl fmt::Display for Refusal {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::ArgumentsNotAllowed(name) => write!(
         formatter,
@@ -227,8 +278,8 @@ pub enum HostError {
   Refused(Refusal),
 }
 
-impl Display for HostError {
-  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+impl fmt::Display for HostError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::Io(error) => error.fmt(formatter),
       Self::Refused(refusal) => refusal.fmt(formatter),
@@ -239,8 +290,8 @@ impl Display for HostError {
 impl Error for HostError {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match self {
-      Self::Io(error) => Some(error),
-      Self::Refused(refusal) => Some(refusal),
+      Self::Io(error) => error.source(),
+      Self::Refused(refusal) => refusal.source(),
     }
   }
 }

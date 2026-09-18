@@ -12,14 +12,14 @@ use crate::session::Session;
 use crate::session::credentials::CredentialSource;
 use apple_container::engine::Engine;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status {
   Fail,
   Ok,
   Warn,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Check {
   pub detail: String,
   /// The findings behind `detail`, when a check is about several things at once

@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::fmt;
 use std::io;
 use std::process::ExitStatus;
 
@@ -32,8 +32,8 @@ impl EngineError {
   }
 }
 
-impl Display for EngineError {
-  fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+impl fmt::Display for EngineError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     let command = self.argv().join(" ");
     match self {
       Self::Failed { status, stderr, .. } => {

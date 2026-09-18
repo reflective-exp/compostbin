@@ -53,7 +53,7 @@ impl RecordingEngine {
   /// Poses an engine holding exactly these images.
   pub fn with_images(images: &[&str]) -> Self {
     Self {
-      images: Some(images.iter().map(|name| name.to_string()).collect()),
+      images: Some(images.iter().copied().map(str::to_string).collect()),
       version: Some("Containerization 0.45.0".to_string()),
       ..Self::default()
     }

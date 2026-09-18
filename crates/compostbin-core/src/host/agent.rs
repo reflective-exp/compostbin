@@ -4,7 +4,7 @@
 //! of output is already a complete inode. Hence chunks published by rename, and
 //! a status file written last.
 
-use crate::error::PathError;
+use crate::error::{At, PathError};
 use crate::host::pty::Pty;
 use crate::host::request::{Request, resolve};
 use crate::host::spool::Spool;
@@ -50,7 +50,7 @@ fn complete(
 ) -> Result<(), PathError> {
   let status = run_claimed(spool, commands, project_dir, id, claimed)?;
   write_status(spool, id, status)?;
-  std::fs::remove_file(claimed).map_err(|source| PathError::new(claimed, source))
+  std::fs::remove_file(claimed).at(claimed)
 }
 
 /// Claims and runs one request in the caller's thread, reporting whether there
@@ -77,9 +77,12 @@ fn run_claimed(
   id: &str,
   claimed: &Path,
 ) -> Result<i32, PathError> {
-  let text = std::fs::read_to_string(claimed).map_err(|source| PathError::new(claimed, source))?;
+  let text = std::fs::read_to_string(claimed).at(claimed)?;
 
-  let argv = match Request::parse(&text).and_then(|request| resolve(commands, &request).map(|argv| (argv, request))) {
+  let (argv, tty) = match text
+    .parse::<Request>()
+    .and_then(|request| resolve(commands, &request).map(|argv| (argv, request)))
+  {
     Ok((argv, request)) => {
       // Separate, so `resolve` decides what may run and not how it is wired up.
       // Both sides must want a terminal: the command, and a caller that has one.
@@ -95,7 +98,6 @@ fn run_claimed(
     }
   };
 
-  let (argv, tty) = argv;
   let mut command = Command::new(&argv[0]);
   command.args(&argv[1..]).current_dir(project_dir);
 
@@ -214,8 +216,8 @@ fn publish_chunk(spool: &Spool, id: &str, stream: &str, sequence: usize, data: &
   let partial = spool.responses().join(format!("{name}{PARTIAL_SUFFIX}"));
   let published = spool.responses().join(&name);
 
-  std::fs::write(&partial, data).map_err(|source| PathError::new(&partial, source))?;
-  std::fs::rename(&partial, &published).map_err(|source| PathError::new(&partial, source))
+  std::fs::write(&partial, data).at(&partial)?;
+  std::fs::rename(&partial, &published).at(&partial)
 }
 
 /// Feeds the guest's input to the command as it arrives, ending at the guest's
@@ -267,8 +269,8 @@ fn write_status(spool: &Spool, id: &str, status: i32) -> Result<(), PathError> {
     .join(format!("{id}{STATUS_SUFFIX}{PARTIAL_SUFFIX}"));
   let final_path = spool.responses().join(format!("{id}{STATUS_SUFFIX}"));
 
-  std::fs::write(&partial, format!("{status}\n")).map_err(|source| PathError::new(&partial, source))?;
-  std::fs::rename(&partial, &final_path).map_err(|source| PathError::new(&partial, source))
+  std::fs::write(&partial, format!("{status}\n")).at(&partial)?;
+  std::fs::rename(&partial, &final_path).at(&partial)
 }
 
 /// Serves requests until `stop` is set, each on its own thread: subagents call

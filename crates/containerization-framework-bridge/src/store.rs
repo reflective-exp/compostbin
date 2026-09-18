@@ -10,6 +10,7 @@
 //! Containerization has no image builder, so `build` has to stay on the CLI
 //! whatever else moves.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// Under the user's Application Support directory.
@@ -30,12 +31,12 @@ const CONTAINERS: &str = "containers";
 pub const INITFS_VERSION: &str = "0.45.0";
 pub const INITFS_REFERENCE: &str = "ghcr.io/apple/containerization/vminit:0.45.0";
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Store {
   root: PathBuf,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum StoreError {
   /// No `container` store at all — nothing has ever been built.
   Missing(PathBuf),
@@ -46,8 +47,8 @@ pub enum StoreError {
   Unreadable { path: PathBuf, source: String },
 }
 
-impl std::fmt::Display for StoreError {
-  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for StoreError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::Missing(root) => write!(
         formatter,

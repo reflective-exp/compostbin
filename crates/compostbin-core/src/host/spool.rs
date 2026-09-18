@@ -1,10 +1,9 @@
 //! The request/response directory tree, on whichever side of the mount the
 //! caller happens to be.
 
-use crate::error::{HostError, PathError};
+use crate::error::{At, HostError, PathError};
 use crate::host::request::Request;
 use crate::host::{PARTIAL_SUFFIX, REQUEST_SUFFIX, REQUESTS_DIR, RESPONSES_DIR, RUNNING_DIR};
-use std::io;
 use std::path::PathBuf;
 
 pub struct Spool {
@@ -32,7 +31,7 @@ impl Spool {
   /// these itself on a mount that does not yet exist.
   pub fn create(&self) -> Result<(), PathError> {
     for directory in [self.requests(), self.running(), self.responses()] {
-      std::fs::create_dir_all(&directory).map_err(|source| PathError::new(&directory, source))?;
+      std::fs::create_dir_all(&directory).at(&directory)?;
     }
     Ok(())
   }
@@ -48,14 +47,10 @@ impl Spool {
     self.create()?;
 
     for directory in [self.requests(), self.running(), self.responses()] {
-      let entries = std::fs::read_dir(&directory).map_err(|source| PathError::new(&directory, source))?;
+      for entry in std::fs::read_dir(&directory).at(&directory)? {
+        let path = entry.at(&directory)?.path();
 
-      for entry in entries {
-        let path = entry
-          .map_err(|source| PathError::new(&directory, source))?
-          .path();
-
-        std::fs::remove_file(&path).map_err(|source| PathError::new(&path, source))?;
+        std::fs::remove_file(&path).at(&path)?;
       }
     }
 
@@ -76,22 +71,20 @@ impl Spool {
     let mut removed = Vec::new();
 
     for directory in [self.running(), self.responses()] {
-      let entries = match std::fs::read_dir(&directory) {
+      let entries = match std::fs::read_dir(&directory).at(&directory) {
         Ok(entries) => entries,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
-        Err(source) => return Err(PathError::new(&directory, source)),
+        Err(error) if error.is_not_found() => continue,
+        Err(error) => return Err(error),
       };
 
       for entry in entries {
-        let path = entry
-          .map_err(|source| PathError::new(&directory, source))?
-          .path();
+        let path = entry.at(&directory)?.path();
 
         if path.is_dir() {
           continue;
         }
 
-        std::fs::remove_file(&path).map_err(|source| PathError::new(&path, source))?;
+        std::fs::remove_file(&path).at(&path)?;
         removed.push(path);
       }
     }
@@ -106,27 +99,27 @@ impl Spool {
     let partial = self.requests().join(format!("{id}{PARTIAL_SUFFIX}"));
     let final_path = self.requests().join(format!("{id}{REQUEST_SUFFIX}"));
 
-    std::fs::write(&partial, rendered).map_err(|source| HostError::Io(PathError::new(&partial, source)))?;
-    std::fs::rename(&partial, &final_path).map_err(|source| HostError::Io(PathError::new(&partial, source)))
+    std::fs::write(&partial, rendered).at(&partial)?;
+    Ok(std::fs::rename(&partial, &final_path).at(&partial)?)
   }
 
   /// The oldest unclaimed id. Ids are timestamp-prefixed, so name order is
   /// arrival order.
   pub(super) fn next_request_id(&self) -> Result<Option<String>, PathError> {
     let directory = self.requests();
-    let entries = std::fs::read_dir(&directory).map_err(|source| PathError::new(&directory, source))?;
 
     let mut ids: Vec<String> = Vec::new();
-    for entry in entries {
-      let entry = entry.map_err(|source| PathError::new(&directory, source))?;
-      let name = entry.file_name().to_string_lossy().into_owned();
+    for entry in std::fs::read_dir(&directory).at(&directory)? {
+      let name = entry.at(&directory)?.file_name();
+      let name = name.to_string_lossy();
+
       if let Some(id) = name.strip_suffix(REQUEST_SUFFIX) {
         ids.push(id.to_string());
       }
     }
 
-    ids.sort();
-    Ok(ids.into_iter().next())
+    // The oldest, rather than sorting the lot and taking the head of it.
+    Ok(ids.into_iter().min())
   }
 }
 

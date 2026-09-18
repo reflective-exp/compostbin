@@ -1,4 +1,4 @@
-use crate::error::{ImageError, PathError};
+use crate::error::{At, ImageError};
 use crate::manifest::Manifest;
 use crate::session::Session;
 use apple_container::builder::Builder;
@@ -36,7 +36,7 @@ pub const GUEST_PORTS_NAME: &str = "compostbin-ports";
 /// than growing the base for everyone.
 pub fn build(session: &Session, builder: &impl Builder) -> Result<i32, ImageError> {
   let context = context(session);
-  std::fs::create_dir_all(&context).map_err(|source| ImageError::Io(PathError::new(&context, source)))?;
+  std::fs::create_dir_all(&context).at(&context)?;
 
   // The Dockerfile `COPY`s every script, so a context without one fails the build.
   for (name, contents) in [
@@ -46,7 +46,7 @@ pub fn build(session: &Session, builder: &impl Builder) -> Result<i32, ImageErro
     (GUEST_PORTS_NAME, GUEST_PORTS),
   ] {
     let path = context.join(name);
-    std::fs::write(&path, contents).map_err(|source| ImageError::Io(PathError::new(&path, source)))?;
+    std::fs::write(&path, contents).at(&path)?;
   }
 
   builder.start_builder(Some(BUILD_MEMORY))?;
@@ -66,9 +66,9 @@ pub fn build(session: &Session, builder: &impl Builder) -> Result<i32, ImageErro
   }
 
   let context = project_context(session);
-  std::fs::create_dir_all(&context).map_err(|source| ImageError::Io(PathError::new(&context, source)))?;
+  std::fs::create_dir_all(&context).at(&context)?;
   let path = context.join(DOCKERFILE_NAME);
-  std::fs::write(&path, dockerfile).map_err(|source| ImageError::Io(PathError::new(&path, source)))?;
+  std::fs::write(&path, dockerfile).at(&path)?;
 
   Ok(builder.build(&BuildSpec {
     context,

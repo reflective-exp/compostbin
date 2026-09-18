@@ -1,8 +1,9 @@
+use std::fmt;
 use std::path::PathBuf;
 
 /// A `container build` invocation. The Dockerfile is not named: it is written
 /// into `context` as `Dockerfile`, where the CLI looks by default.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildSpec {
   pub context: PathBuf,
   pub memory: Option<String>,
@@ -26,7 +27,7 @@ impl BuildSpec {
   }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EnvVar {
   /// `--env NAME`, inheriting the value from the host environment.
   Inherit(String),
@@ -34,17 +35,18 @@ pub enum EnvVar {
   Set { name: String, value: String },
 }
 
-impl EnvVar {
-  fn to_argument(&self) -> String {
+/// Exactly what follows `--env` on the command line.
+impl fmt::Display for EnvVar {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Self::Inherit(name) => name.clone(),
-      Self::Set { name, value } => format!("{name}={value}"),
+      Self::Inherit(name) => formatter.write_str(name),
+      Self::Set { name, value } => write!(formatter, "{name}={value}"),
     }
   }
 }
 
 /// A `container exec` invocation against an already-running container.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecSpec {
   pub arguments: Vec<String>,
   pub env: Vec<EnvVar>,
@@ -60,7 +62,7 @@ impl ExecSpec {
 
     for variable in &self.env {
       argv.push("--env".to_string());
-      argv.push(variable.to_argument());
+      argv.push(variable.to_string());
     }
 
     if self.interactive {
@@ -83,22 +85,23 @@ impl ExecSpec {
   }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Mount {
   pub readonly: bool,
   pub source: PathBuf,
   pub target: PathBuf,
 }
 
-impl Mount {
-  fn to_argument(&self) -> String {
-    let source = self.source.display();
-    let target = self.target.display();
+/// Exactly what follows `--volume` on the command line.
+impl fmt::Display for Mount {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{}:{}", self.source.display(), self.target.display())?;
+
     if self.readonly {
-      format!("{source}:{target}:ro")
-    } else {
-      format!("{source}:{target}")
+      formatter.write_str(":ro")?;
     }
+
+    Ok(())
   }
 }
 
@@ -111,7 +114,7 @@ impl Mount {
 /// creation. Containerization takes it as configuration of its own. Saying
 /// which we mean here is what stops the framework engine from mounting a
 /// socket as a filesystem, which is not a relay and not much of a mount.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SocketRelay {
   pub source: PathBuf,
   pub target: PathBuf,
@@ -119,7 +122,7 @@ pub struct SocketRelay {
 
 /// A `container run` invocation. Mounts keep their declared order, which matters
 /// when one mounted path nests inside another.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunSpec {
   pub arguments: Vec<String>,
   pub cpus: Option<u32>,
@@ -150,7 +153,7 @@ impl RunSpec {
 
     for variable in &self.env {
       argv.push("--env".to_string());
-      argv.push(variable.to_argument());
+      argv.push(variable.to_string());
     }
 
     if let Some(memory) = &self.memory {
@@ -163,7 +166,7 @@ impl RunSpec {
 
     for mount in &self.mounts {
       argv.push("--volume".to_string());
-      argv.push(mount.to_argument());
+      argv.push(mount.to_string());
     }
 
     // Also `--volume`: the CLI reads a source that is already a socket and

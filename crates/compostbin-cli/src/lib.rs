@@ -17,7 +17,7 @@ use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What the relay says, in the terms a user would look for.
@@ -43,7 +43,7 @@ fn report_port(event: PortEvent) {
 /// the first connection to find it down must not draw over the session to say
 /// so. It still has to be somewhere, because a port that never comes up looks
 /// exactly the same from the guest.
-fn log_port(log: &std::path::Path) -> impl Fn(PortEvent) + Sync + '_ {
+fn log_port(log: &Path) -> impl Fn(PortEvent) + Sync + '_ {
   move |event| {
     use std::io::Write;
 
@@ -398,7 +398,7 @@ fn select(_session: &Session) -> Result<unsupported::Engine, Box<dyn Error>> {
 
 /// Writes back whichever file the new entry belongs to, leaving the other
 /// untouched.
-fn save_manifest(session: &Session, manifest_path: &std::path::Path, local: bool) -> Result<(), Box<dyn Error>> {
+fn save_manifest(session: &Session, manifest_path: &Path, local: bool) -> Result<(), Box<dyn Error>> {
   if local {
     session.manifest.save_local(manifest_path)?;
   } else {
@@ -408,10 +408,6 @@ fn save_manifest(session: &Session, manifest_path: &std::path::Path, local: bool
   Ok(())
 }
 
-fn load_session(
-  manifest_path: &std::path::Path,
-  resolver: PathResolver,
-  project_dir: &PathBuf,
-) -> Result<Session, Box<dyn Error>> {
+fn load_session(manifest_path: &Path, resolver: PathResolver, project_dir: &Path) -> Result<Session, Box<dyn Error>> {
   Ok(Session::new(Manifest::load(manifest_path)?, resolver, project_dir))
 }

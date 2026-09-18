@@ -7,6 +7,7 @@ pub mod danger;
 pub mod paths;
 
 use std::collections::{BTreeSet, VecDeque};
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// Everything the session mounts lands under this one guest directory, so no
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub const WORKSPACE_TARGET: &str = "/workspace";
 
 /// Why a host path is in the workspace — all `ls` needs to explain a mount.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Origin {
   /// A `[[paths]]` entry: mounted because it was asked for by name.
   Explicit,
@@ -28,7 +29,7 @@ pub enum Origin {
   Root,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
   pub guest: PathBuf,
   pub host: PathBuf,
@@ -39,17 +40,25 @@ pub struct Entry {
 /// A host symlink inside a mounted tree whose target lies outside every mounted
 /// tree. It reads perfectly well on the host and is dead in the container, so
 /// the path exists and simply is not there.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Escape {
   pub link: PathBuf,
   pub target: PathBuf,
+}
+
+/// The link and where it points, which is the whole of what `doctor` has to
+/// say about one — and is this type's shape rather than the reporter's.
+impl fmt::Display for Escape {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{} -> {}", self.link.display(), self.target.display())
+  }
 }
 
 /// What a walk of the mounted trees found. `exhausted` matters as much as the
 /// escapes: a root with a `target/` or `node_modules` under it has no useful
 /// bound, so the walk stops rather than costing a minute of `doctor`, and says so
 /// instead of reporting a clean tree it never finished reading.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Escapes {
   pub escapes: Vec<Escape>,
   pub exhausted: bool,
@@ -67,7 +76,7 @@ pub const WALK_LIMIT: usize = 50_000;
 /// of a mounted tree dangles in the container. So each entry is its own bind
 /// mount, assembled in the argv — which is why adding a path requires recreating
 /// the container.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Workspace {
   entries: Vec<Entry>,
 }

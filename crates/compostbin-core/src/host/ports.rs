@@ -40,7 +40,7 @@ pub const SOCKET_SUFFIX: &str = ".sock";
 
 /// One declared port: the socket the guest reaches through, and the host
 /// service behind it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Forward {
   pub listen: PathBuf,
   pub upstream: SocketAddr,
@@ -79,7 +79,7 @@ impl Bound {
 
 /// What the relay has to say, left to the caller to print: core does not own
 /// the terminal.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PortEvent {
   /// Bound, and so ready to be mounted into a container.
   Listening(Forward),
@@ -227,6 +227,16 @@ fn connect(
 /// The two ends of a relayed connection: a unix socket to the guest, a TCP
 /// stream to the service. Only four operations differ between them, and the
 /// copying below is the same either way.
+/// The two ends of a relayed connection: a unix socket to the guest, a TCP
+/// stream to the service. Only four operations differ between them, and the
+/// copying below is the same either way.
+///
+/// `read_some` and `write_some` restate `Read` and `Write` for `&Self`, which
+/// both types already implement. Hoisting them into a `for<'a> &'a Self: Read +
+/// Write` bound on the trait does not carry to `splice` and `send`: a
+/// higher-ranked where-clause is not an implied bound, so all three callers
+/// would have to name the type parameter and restate it. That costs more than
+/// the delegation it saves.
 trait Stream: Sync {
   fn read_some(&self, buffer: &mut [u8]) -> io::Result<usize>;
   fn write_some(&self, data: &[u8]) -> io::Result<usize>;

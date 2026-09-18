@@ -1,4 +1,4 @@
-use crate::error::PathError;
+use crate::error::{At, PathError};
 use std::path::{Path, PathBuf};
 
 /// Resolves manifest path strings against an explicit working directory and home
@@ -17,7 +17,7 @@ impl PathResolver {
   }
 
   pub fn from_env() -> Result<Self, PathError> {
-    let cwd = std::env::current_dir().map_err(|source| PathError::new(".", source))?;
+    let cwd = std::env::current_dir().at(".")?;
     let home = std::env::var_os("HOME").ok_or_else(|| {
       PathError::new(
         "$HOME",
@@ -32,9 +32,7 @@ impl PathResolver {
   /// filesystem. Fails if the path does not exist.
   pub fn canonicalize(&self, raw: &str) -> Result<PathBuf, PathError> {
     let resolved = self.resolve(raw);
-    resolved
-      .canonicalize()
-      .map_err(|source| PathError::new(resolved, source))
+    resolved.canonicalize().at(&resolved)
   }
 
   /// Expands a leading `~` and makes the result absolute. `~user` is *not*

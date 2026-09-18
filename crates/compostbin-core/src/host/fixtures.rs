@@ -14,7 +14,7 @@ pub fn commands(entries: &[(&str, &[&str], bool)]) -> BTreeMap<String, HostComma
         name.to_string(),
         HostCommand {
           arguments: *arguments,
-          argv: argv.iter().map(|word| word.to_string()).collect(),
+          argv: argv.iter().copied().map(str::to_string).collect(),
           deny: Vec::new(),
           // The pipe path, where the streams stay separate and can be asserted
           // on independently.
@@ -46,7 +46,8 @@ pub fn allowlist() -> BTreeMap<String, HostCommand> {
     .expect("the command was just inserted")
     .deny = ["--config", "--manifest-path", "-Z"]
     .iter()
-    .map(|flag| flag.to_string())
+    .copied()
+    .map(str::to_string)
     .collect();
   commands
 }

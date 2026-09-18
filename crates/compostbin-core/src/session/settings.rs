@@ -4,7 +4,7 @@
 //! belong to the session. Only what the user maintains once, on the host, and
 //! expects to find in every container.
 
-use crate::error::PathError;
+use crate::error::{At, PathError};
 use std::ffi::{CString, OsStr};
 use std::fs::{File, Metadata, OpenOptions};
 use std::io;
@@ -38,7 +38,8 @@ const MAX_DEPTH: usize = 32;
 pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<Vec<String>, PathError> {
   let mut names: Vec<String> = HOST_CLAUDE_SETTINGS
     .iter()
-    .map(|name| name.to_string())
+    .copied()
+    .map(str::to_string)
     .collect();
   for name in extra {
     if !names.contains(name) {
@@ -66,8 +67,8 @@ pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<
     }
 
     if opened.is_none() {
-      std::fs::create_dir_all(session_home).map_err(|error| PathError::new(session_home, error))?;
-      opened = Some(open_directory(session_home).map_err(|error| PathError::new(session_home, error))?);
+      std::fs::create_dir_all(session_home).at(session_home)?;
+      opened = Some(open_directory(session_home).at(session_home)?);
     }
     let home = opened.as_ref().expect("opened above");
     let destination = session_home.join(&name);
@@ -102,7 +103,7 @@ fn remove(path: &Path) -> Result<(), PathError> {
     std::fs::remove_file(path)
   };
 
-  removed.map_err(|error| PathError::new(path, error))
+  removed.at(path)
 }
 
 /// Creates `name` inside `parent`. `destination` only names it in errors: a path
@@ -112,11 +113,10 @@ fn copy_tree(source: &Path, parent: &OwnedFd, name: &OsStr, destination: &Path, 
     return Ok(());
   }
 
-  let directory = make_directory(parent, name).map_err(|error| PathError::new(destination, error))?;
+  let directory = make_directory(parent, name).at(destination)?;
 
-  let entries = std::fs::read_dir(source).map_err(|error| PathError::new(source, error))?;
-  for entry in entries {
-    let entry = entry.map_err(|error| PathError::new(source, error))?;
+  for entry in std::fs::read_dir(source).at(source)? {
+    let entry = entry.at(source)?;
     let child = entry.path();
     let name = entry.file_name();
     let target = destination.join(&name);
@@ -142,10 +142,9 @@ fn copy_file(
   name: &OsStr,
   destination: &Path,
 ) -> Result<(), PathError> {
-  let mut from = File::open(source).map_err(|error| PathError::new(source, error))?;
-  let mut to =
-    create_file(parent, name, metadata.permissions().mode()).map_err(|error| PathError::new(destination, error))?;
-  io::copy(&mut from, &mut to).map_err(|error| PathError::new(destination, error))?;
+  let mut from = File::open(source).at(source)?;
+  let mut to = create_file(parent, name, metadata.permissions().mode()).at(destination)?;
+  io::copy(&mut from, &mut to).at(destination)?;
   Ok(())
 }
 

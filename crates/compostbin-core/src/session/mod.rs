@@ -10,7 +10,7 @@ pub mod image;
 pub mod record;
 pub mod settings;
 
-use crate::error::{PathError, SessionError};
+use crate::error::{At, PathError, SessionError};
 use crate::host::{Forward, GUEST_PORTS_TARGET, GUEST_SPOOL_TARGET, Spool};
 use crate::manifest::{Manifest, PathEntry, SESSIONS_DIR};
 use crate::session::briefing::{MANAGED_SETTINGS_DIR, MANAGED_SETTINGS_TARGET};
@@ -20,7 +20,7 @@ use crate::workspace::paths::{PathResolver, root_containing};
 use crate::workspace::{Origin, Workspace};
 use apple_container::engine::Engine;
 use apple_container::model::{EnvVar, ExecSpec, Mount, RunSpec, SocketRelay};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Where Claude's home is mounted inside the container, which runs as `claude`.
 pub const CLAUDE_HOME_TARGET: &str = "/home/claude/.claude";
@@ -51,39 +51,31 @@ pub const CLIPBOARD_DISPLAY: &str = "compostbin-clipboard";
 ///
 /// A symlink is removed rather than followed, so a link planted where a mount
 /// source belongs cannot make this clear something else.
-fn clear(target: &PathBuf) -> Result<(), PathError> {
-  let kind = std::fs::symlink_metadata(target)
-    .map_err(|source| PathError::new(target, source))?
-    .file_type();
+fn clear(target: &Path) -> Result<(), PathError> {
+  let kind = std::fs::symlink_metadata(target).at(target)?.file_type();
 
   if !kind.is_dir() {
-    return std::fs::remove_file(target).map_err(|source| PathError::new(target, source));
+    return std::fs::remove_file(target).at(target);
   }
 
-  let entries = std::fs::read_dir(target).map_err(|source| PathError::new(target, source))?;
-
-  for entry in entries {
-    let entry = entry.map_err(|source| PathError::new(target, source))?;
+  for entry in std::fs::read_dir(target).at(target)? {
+    let entry = entry.at(target)?;
     let path = entry.path();
 
-    let outcome = if entry
-      .file_type()
-      .map_err(|source| PathError::new(&path, source))?
-      .is_dir()
-    {
+    let outcome = if entry.file_type().at(&path)?.is_dir() {
       std::fs::remove_dir_all(&path)
     } else {
       std::fs::remove_file(&path)
     };
 
-    outcome.map_err(|source| PathError::new(&path, source))?;
+    outcome.at(&path)?;
   }
 
   Ok(())
 }
 
 /// What `add` did, and therefore what the caller must do next.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AddOutcome {
   /// Already inside a mounted root — visible in the container right now.
   AlreadyMounted { root: PathBuf },
@@ -186,7 +178,7 @@ impl Session {
       if !state.exists() {
         return Ok(Vec::new());
       }
-      std::fs::remove_dir_all(&state).map_err(|source| PathError::new(&state, source))?;
+      std::fs::remove_dir_all(&state).at(&state)?;
       return Ok(vec![state]);
     }
 
@@ -405,7 +397,8 @@ impl Session {
     if !self.manifest.host.has_ports() {
       return KEEPALIVE_COMMAND
         .iter()
-        .map(|word| word.to_string())
+        .copied()
+        .map(str::to_string)
         .collect();
     }
 

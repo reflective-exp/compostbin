@@ -1,4 +1,4 @@
-use crate::error::{ManifestError, PathError};
+use crate::error::{At, ManifestError};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -54,7 +54,7 @@ impl Manifest {
   }
 
   fn parse(path: &Path) -> Result<Self, ManifestError> {
-    let text = std::fs::read_to_string(path).map_err(|source| ManifestError::Io(PathError::new(path, source)))?;
+    let text = std::fs::read_to_string(path).at(path)?;
 
     toml::from_str(&text).map_err(|source| ManifestError::Parse {
       path: path.to_path_buf(),
@@ -65,10 +65,10 @@ impl Manifest {
   /// Missing is the normal case — most checkouts have no local manifest — so
   /// only a file that exists and does not parse is an error.
   fn parse_local(path: &Path) -> Result<Vec<PathEntry>, ManifestError> {
-    let text = match std::fs::read_to_string(path) {
+    let text = match std::fs::read_to_string(path).at(path) {
       Ok(text) => text,
-      Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-      Err(source) => return Err(ManifestError::Io(PathError::new(path, source))),
+      Err(error) if error.is_not_found() => return Ok(Vec::new()),
+      Err(error) => return Err(error.into()),
     };
 
     let local: LocalManifest = toml::from_str(&text).map_err(|source| ManifestError::Parse {
@@ -100,10 +100,8 @@ impl Manifest {
     };
 
     if local.paths.is_empty() {
-      return match std::fs::remove_file(&path) {
-        Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
-          Err(ManifestError::Io(PathError::new(&path, source)))
-        }
+      return match std::fs::remove_file(&path).at(&path) {
+        Err(error) if !error.is_not_found() => Err(error.into()),
         _ => Ok(()),
       };
     }
@@ -114,10 +112,10 @@ impl Manifest {
     })?;
 
     if let Some(parent) = path.parent() {
-      std::fs::create_dir_all(parent).map_err(|source| ManifestError::Io(PathError::new(parent, source)))?;
+      std::fs::create_dir_all(parent).at(parent)?;
     }
 
-    std::fs::write(&path, rendered).map_err(|source| ManifestError::Io(PathError::new(&path, source)))
+    Ok(std::fs::write(&path, rendered).at(&path)?)
   }
 
   /// Creates the parent directory, so `init` works in a project with no `.config`.
@@ -128,10 +126,10 @@ impl Manifest {
     })?;
 
     if let Some(parent) = path.parent() {
-      std::fs::create_dir_all(parent).map_err(|source| ManifestError::Io(PathError::new(parent, source)))?;
+      std::fs::create_dir_all(parent).at(parent)?;
     }
 
-    std::fs::write(path, rendered).map_err(|source| ManifestError::Io(PathError::new(path, source)))
+    Ok(std::fs::write(path, rendered).at(path)?)
   }
 }
 
@@ -252,7 +250,7 @@ impl HostConfig {
         .entry(CLIPBOARD_COMMAND.to_string())
         .or_insert_with(|| HostCommand {
           arguments: false,
-          argv: CLIPBOARD_ARGV.iter().map(|word| word.to_string()).collect(),
+          argv: CLIPBOARD_ARGV.iter().copied().map(str::to_string).collect(),
           deny: Vec::new(),
           tty: false,
         });

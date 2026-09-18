@@ -3,9 +3,10 @@
 use crate::error::Refusal;
 use crate::manifest::HostCommand;
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 /// The name of an allowlisted command, plus any arguments the guest appended.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
   pub arguments: Vec<String>,
   pub command: String,
@@ -38,8 +39,15 @@ impl Request {
 
     Ok(rendered)
   }
+}
 
-  pub fn parse(text: &str) -> Result<Self, Refusal> {
+/// The other half of `render`, and the only way a request is ever built from
+/// the wire: `text.parse()` at the agent, which is what the guest's shell
+/// script wrote into the spool.
+impl FromStr for Request {
+  type Err = Refusal;
+
+  fn from_str(text: &str) -> Result<Self, Refusal> {
     let mut lines = text.lines();
     let command = lines.next().unwrap_or_default().to_string();
 
@@ -204,7 +212,7 @@ mod tests {
     let rendered = request.render().expect("should render");
 
     assert_eq!(rendered, "test-one\n-p\ncompostbin-core\n");
-    assert_eq!(Request::parse(&rendered).expect("should parse"), request);
+    assert_eq!(rendered.parse::<Request>().expect("should parse"), request);
   }
 
   /// A newline would parse as a further argument, so it is refused at the writer.
