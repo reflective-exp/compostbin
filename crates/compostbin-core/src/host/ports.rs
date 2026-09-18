@@ -12,6 +12,7 @@ use apple_container::engine::Engine;
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -172,20 +173,56 @@ pub fn watch(container: &str, engine: &impl Engine, stop: &AtomicBool, appear: D
 pub fn relay(bound: &[Bound], stop: &AtomicBool, report: &(dyn Fn(PortEvent) + Sync)) {
   // Outside the scope, so connection threads can borrow them.
   let refused: Vec<AtomicBool> = bound.iter().map(|_| AtomicBool::new(false)).collect();
+  // Built once: `poll` overwrites `revents` and leaves the rest alone.
+  let mut waiting: Vec<libc::pollfd> = bound
+    .iter()
+    .map(|bound| libc::pollfd {
+      fd: bound.listener.as_raw_fd(),
+      events: libc::POLLIN,
+      revents: 0,
+    })
+    .collect();
 
   std::thread::scope(|scope| {
     while !stop.load(Ordering::Relaxed) {
+      // Woken by a connection rather than swept for once an interval, which
+      // cost every guest connection up to `POLL_INTERVAL` before it was taken.
+      if !ready_to_accept(&mut waiting, POLL_INTERVAL) {
+        continue;
+      }
+
       for (bound, refused) in bound.iter().zip(&refused) {
-        // Every connection waiting, not one per poll.
+        // Every connection waiting, not one per wake.
         while let Ok((guest, _)) = bound.listener.accept() {
           let forward = bound.forward.clone();
           scope.spawn(move || connect(guest, forward, refused, stop, report));
         }
       }
-
-      std::thread::sleep(POLL_INTERVAL);
     }
   });
+}
+
+/// Waits for a connection on any listener. `false` means the deadline passed,
+/// which is the caller's chance to re-check `stop`. A blocking `accept` would
+/// not do: it takes one socket, and only a connection ends it.
+fn ready_to_accept(waiting: &mut [libc::pollfd], timeout: Duration) -> bool {
+  // SAFETY: `waiting` is a live slice of the length passed, and each descriptor
+  // belongs to a listener the caller holds across the call.
+  let ready = unsafe {
+    libc::poll(
+      waiting.as_mut_ptr(),
+      waiting.len() as libc::nfds_t,
+      timeout.as_millis() as libc::c_int,
+    )
+  };
+
+  // `EINTR` is the likely error and looking again answers them all, but
+  // returning immediately would spin — so wait out the interval `poll` did not.
+  if ready < 0 {
+    std::thread::sleep(timeout);
+  }
+
+  ready > 0
 }
 
 /// One guest connection, relayed until both directions have ended.
@@ -416,6 +453,19 @@ mod tests {
     stream.write_all(&received).expect("echo");
   }
 
+  /// The same, `connections` times and blocking on accept: the test below times
+  /// the relay's own accept, so its upstream must add no poll of its own.
+  fn serve_echoes(listener: &TcpListener, connections: usize) {
+    for _ in 0..connections {
+      let Ok((mut stream, _)) = listener.accept() else { return };
+      let mut received = Vec::new();
+
+      if stream.read_to_end(&mut received).is_ok() {
+        let _ = stream.write_all(&received);
+      }
+    }
+  }
+
   fn round_trip(socket: &Path, message: &str) -> String {
     let mut guest = UnixStream::connect(socket).expect("connect to the relay");
     guest.write_all(message.as_bytes()).expect("send");
@@ -520,6 +570,40 @@ mod tests {
       assert_eq!(round_trip(&forward.listen, "hello"), "hello");
 
       stop.store(true, Ordering::Relaxed);
+    });
+  }
+
+  /// The bug this prevents: connections were swept for once an interval, so each
+  /// waited up to `POLL_INTERVAL` to be accepted. Timed because prompt and
+  /// eventual differ only in duration; the budget is a quarter of one sweep each.
+  #[test]
+  fn accepts_without_waiting_for_a_sweep() {
+    const CONNECTIONS: u32 = 10;
+
+    let directory = TempDir::new().expect("temp dir");
+    let (upstream, address) = echo_once();
+    let forward = forward(&directory, address);
+    let stop = AtomicBool::new(false);
+    let events = Mutex::new(Vec::new());
+    let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
+
+    std::thread::scope(|scope| {
+      let _stop = StopOnDrop(&stop);
+      scope.spawn(|| relay(&bound, &stop, &record(&events)));
+      scope.spawn(|| serve_echoes(&upstream, CONNECTIONS as usize));
+
+      let started = Instant::now();
+      for _ in 0..CONNECTIONS {
+        assert_eq!(round_trip(&forward.listen, "hello"), "hello");
+      }
+      let elapsed = started.elapsed();
+
+      stop.store(true, Ordering::Relaxed);
+
+      assert!(
+        elapsed < POLL_INTERVAL * CONNECTIONS / 4,
+        "{CONNECTIONS} round trips took {elapsed:?}, so each waited for a sweep rather than waking one"
+      );
     });
   }
 
