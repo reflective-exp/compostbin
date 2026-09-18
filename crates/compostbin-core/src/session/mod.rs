@@ -449,16 +449,21 @@ impl Session {
       .collect()
   }
 
+  /// `[container] env`, passed through from the host.
+  fn inherited_env(&self) -> Vec<EnvVar> {
+    self
+      .manifest
+      .container
+      .env
+      .iter()
+      .map(|name| EnvVar::Inherit(name.clone()))
+      .collect()
+  }
+
   pub fn run_spec(&self) -> RunSpec {
     RunSpec {
       arguments: self.process(),
-      env: self
-        .manifest
-        .container
-        .env
-        .iter()
-        .map(|name| EnvVar::Inherit(name.clone()))
-        .collect(),
+      env: self.inherited_env(),
       image: self.image(),
       mounts: self.mounts(),
       name: self.container_name(),
@@ -664,6 +669,9 @@ impl Session {
     Ok(0)
   }
 
+  /// An exec doesn't inherit the boot environment, so `[container] env` is
+  /// repeated here, first, so the variables below override it.
+  ///
   /// `IS_SANDBOX=1` tells Claude it is already sandboxed.
   ///
   /// `CLAUDE_CONFIG_DIR` moves `.claude.json` — the account, the onboarding
@@ -675,7 +683,8 @@ impl Session {
   /// all: on Linux it looks for `wl-copy` only when there is a display to copy
   /// to. There is none, but the guest's `wl-copy` sends to the host's.
   pub fn exec_spec(&self, arguments: &[String]) -> ExecSpec {
-    let mut env = vec![
+    let mut env = self.inherited_env();
+    env.extend([
       EnvVar::Set {
         name: "CLAUDE_CONFIG_DIR".to_string(),
         value: CLAUDE_HOME_TARGET.to_string(),
@@ -684,7 +693,7 @@ impl Session {
         name: "IS_SANDBOX".to_string(),
         value: "1".to_string(),
       },
-    ];
+    ]);
 
     if self.manifest.host.clipboard {
       env.push(EnvVar::Set {
@@ -1148,6 +1157,7 @@ source   = "~/.cargo/registry"
       ExecSpec {
         arguments: vec!["claude".to_string(), "--continue".to_string()],
         env: vec![
+          EnvVar::Inherit("ANTHROPIC_API_KEY".to_string()),
           EnvVar::Set {
             name: "CLAUDE_CONFIG_DIR".to_string(),
             value: "/home/claude/.claude".to_string(),
