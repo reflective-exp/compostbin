@@ -1,12 +1,10 @@
 //! Every domain's failures, since all of them reach the same CLI.
 //!
-//! Variants come in two shapes, and the difference decides what `source` says.
-//! A variant that only widens a type — `SessionError::Io`, say — delegates
-//! `Display` to what it holds, so reporting it *and* naming it as the source
-//! would print the same sentence twice down a chain; those forward the inner
-//! error's own source, skipping the level they add. A variant that says
-//! something of its own names what it holds as the source, because the two
-//! sentences are then different.
+//! A variant that only widens a type (`SessionError::Io`, say) delegates
+//! `Display` to what it holds, so it forwards the inner error's `source` rather
+//! than naming the inner error, which would print the same sentence twice down
+//! a chain. A variant with a message of its own names what it holds as the
+//! source.
 
 use compostbin_engine::error::EngineError;
 use std::error::Error;
@@ -85,7 +83,7 @@ impl From<PathError> for ImageError {
 
 /// A TOML file compostbin owns — the project manifest, or a session's mount
 /// record — that could not be read, parsed, or written. Every variant names the
-/// file, since the CLI may be looking at a manifest the user did not expect.
+/// file, since it may not be the manifest the user expected.
 #[derive(Debug)]
 pub enum ManifestError {
   Io(PathError),
@@ -129,8 +127,7 @@ impl From<PathError> for ManifestError {
 }
 
 /// A session that could not be prepared or created, or whose mount record could
-/// not be written. One error because they are one step: `run`
-/// seeds, creates, and records what it created the container with.
+/// not be written. One error because `run` does all three as one step.
 #[derive(Debug)]
 pub enum SessionError {
   Credential(CredentialError),
@@ -156,7 +153,7 @@ impl Error for SessionError {
       Self::Credential(error) => error.source(),
       Self::Engine(error) => error.source(),
       Self::Io(error) => error.source(),
-      // Says something of its own, so what it holds really is the source.
+      // Has its own message, so the inner error is the source.
       Self::Record(error) => Some(error),
     }
   }
@@ -186,9 +183,8 @@ impl From<ManifestError> for SessionError {
   }
 }
 
-/// A filesystem error that remembers which path caused it. `std::io::Error`
-/// alone says "No such file or directory" without naming the file, which is
-/// useless in `add` and `doctor` output.
+/// A filesystem error that names its path, which `std::io::Error` alone does
+/// not.
 #[derive(Debug)]
 pub struct PathError {
   path: PathBuf,
@@ -207,9 +203,8 @@ impl PathError {
     &self.path
   }
 
-  /// Whether nothing was there at all. Several callers treat that as an
-  /// ordinary outcome — no local manifest, no record, no spool yet — rather
-  /// than as a failure.
+  /// Whether nothing was there. Several callers treat that as ordinary (no
+  /// local manifest, no record, no spool yet) rather than a failure.
   pub fn is_not_found(&self) -> bool {
     self.source.kind() == io::ErrorKind::NotFound
   }
@@ -227,11 +222,9 @@ impl Error for PathError {
   }
 }
 
-/// Names the path a filesystem call failed on, which `io::Error` does not.
-///
-/// Every `std::fs` call in compostbin goes through this: `.at(&path)?` rather
-/// than a closure rebuilding the same `PathError` by hand. The `?` then does
-/// the rest, since every error type that can hold one converts from it.
+/// Attaches the failing path to an `io::Result`: `.at(&path)?`. Every `std::fs`
+/// call in compostbin goes through this, and every error type that holds a
+/// `PathError` converts from it, so `?` does the rest.
 pub trait At<T> {
   fn at(self, path: impl Into<PathBuf>) -> Result<T, PathError>;
 }
@@ -249,7 +242,7 @@ pub enum Refusal {
   /// Declared without `arguments = true`.
   ArgumentsNotAllowed(String),
   DeniedArgument(String),
-  /// An empty `argv` names nothing to run.
+  /// Declared with an empty `argv`.
   EmptyCommand(String),
   EmptyRequest,
   NewlineInArgument(String),

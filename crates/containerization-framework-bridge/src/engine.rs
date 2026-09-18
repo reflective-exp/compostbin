@@ -1,18 +1,13 @@
 //! `Engine`, backed by Containerization.framework.
 //!
-//! A container lives *in* this process rather than in a daemon's, and two
-//! consequences run through everything below.
+//! A container lives *in* this process, not a daemon. So:
 //!
-//! The first is that `run` does not return to a caller that can walk away. The
-//! VM lives exactly as long as this process, so `run` also starts the control
-//! socket, which is how `shell` in another terminal reaches it.
-//!
-//! The second is that there is no register to ask. Nothing keeps a list of
-//! containers, so the question "is this container up?" is answered by whether
-//! anything answers on its control socket — one per container, in a directory
-//! named after it under the engine's runtime directory.
+//! - The VM lives exactly as long as this process; `run` also starts the
+//!   control socket through which `shell` in another terminal reaches it.
+//! - Nothing lists containers. A container is up iff something answers on its
+//!   control socket (one per container, under the runtime directory).
 
-use crate::store::Store;
+use crate::store::{INITFS_REFERENCE, Store};
 use crate::{checked, control, ffi, spec, terminal};
 use compostbin_engine::engine::Engine;
 use compostbin_engine::error::EngineError;
@@ -21,19 +16,17 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Set by the SIGWINCH handler. One flag for the process is enough: a terminal
-/// attached twice is not a thing compostbin does.
+/// Set by the SIGWINCH handler. One per process: a process attaches at most
+/// one terminal.
 static RESIZED: AtomicBool = AtomicBool::new(false);
 
-/// The exec id `run` attaches under. `shell` gets `attach-<n>` from the control
-/// socket, so the two never collide.
+/// `run`'s exec id; can't collide with `shell`'s `attach-<n>`.
 const OWNER_ATTACH: &str = "attach-owner";
 
-/// What the bridge reads as "run this without a terminal".
 const NO_TERMINAL: RawFd = -1;
 
 pub struct FrameworkEngine {
-  /// One directory per container, named after it, holding its control socket.
+  /// One directory per container, holding its control socket.
   runtime_dir: PathBuf,
   store: Store,
 }
@@ -55,53 +48,31 @@ impl FrameworkEngine {
     ffi::compostbin_is_running(name)
   }
 
-  fn failed(action: &'static str, error: impl std::fmt::Display) -> EngineError {
-    EngineError::failed(action, error)
-  }
-
   /// Runs a guest process against a terminal, as the owner of the VM.
-  fn attach(name: &str, id: &str, spec: &ExecSpec, terminal: RawFd) -> i32 {
+  fn attach(name: &str, id: &str, request: &control::Request, terminal: RawFd) -> i32 {
     ffi::compostbin_exec(
       name,
       id,
-      &spec::lines(&spec.arguments),
-      &spec::environment(&spec.env),
-      spec.user.as_deref().unwrap_or(""),
-      &spec
-        .workdir
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "/".to_string()),
+      &spec::lines(&request.arguments),
+      &spec::lines(&request.environment),
+      request.user.as_deref().unwrap_or(""),
+      &request.working_directory,
       terminal,
     )
   }
 
-  /// Serves `shell` and anything else that attaches from another terminal, for
-  /// as long as the VM lives.
-  ///
-  /// Detached, and never joined: it ends when the process does, which is the
-  /// same moment the VM it serves goes away.
+  /// Serves attaches from other terminals on a detached thread, never joined:
+  /// it ends with the process, as does the VM.
   fn serve_control_socket(&self, name: String) -> Result<(), EngineError> {
     let path = self.socket(&name);
-    let listener = control::bind(&path).map_err(|error| Self::failed("bind the control socket", error))?;
+    let listener = control::bind(&path).map_err(|error| EngineError::failed("bind the control socket", error))?;
 
     std::thread::spawn(move || {
       control::serve(
         &listener,
-        |request, terminal, id| {
-          // Everything comes from the client, already resolved: it read the
-          // same manifest, and this process must not substitute its own
-          // environment for the one the caller meant.
-          ffi::compostbin_exec(
-            &name,
-            id,
-            &spec::lines(&request.arguments),
-            &spec::lines(&request.environment),
-            request.user.as_deref().unwrap_or(""),
-            &request.working_directory,
-            terminal,
-          )
-        },
+        // Use the client's resolved request as-is; never substitute this
+        // process's environment.
+        |request, terminal, id| Self::attach(&name, id, request, terminal),
         |id, terminal| {
           let _ = ffi::compostbin_resize(id, terminal);
         },
@@ -117,68 +88,50 @@ impl Engine for FrameworkEngine {
     let descriptor = std::io::stdin().as_raw_fd();
     let attached = terminal::is_tty(descriptor);
 
-    // Raw for as long as the guest is attached, and restored by the drop
-    // however this returns. Without it the host tty keeps echoing and line
-    // buffering on top of the guest's own pty, which reads as every character
-    // doubled and nothing happening until return.
+    // Raw while attached, restored on drop. See `terminal` for why.
     let _raw = if attached {
-      Some(terminal::Raw::acquire(descriptor).map_err(|error| Self::failed("raw mode", error))?)
+      Some(terminal::Raw::acquire(descriptor).map_err(|error| EngineError::failed("raw mode", error))?)
     } else {
       None
     };
 
-    // The owner attaches directly; anyone else asks the owner to. The guest
-    // gets the same terminal either way — the difference is only which process
-    // is holding the VM.
-    if self.owns(&spec.name) {
-      watch_for_resize();
-
-      // A duplicate, because the Swift side closes what it is given and this
-      // process needs to keep its own stdin. A descriptor that is not a
-      // terminal is not handed over at all: the guest runs without one, which
-      // is what `compostbin run > log` should do.
-      let lent = if attached {
-        terminal::lend(descriptor).map_err(|error| Self::failed("lend the terminal", error))?
-      } else {
-        NO_TERMINAL
-      };
-
-      let code = Self::attach(&spec.name, OWNER_ATTACH, spec, lent);
-
-      return checked(code).map_err(|error| Self::failed("exec", error));
-    }
-
     let request = control::Request {
       arguments: spec.arguments.clone(),
-      environment: spec::environment(&spec.env)
-        .lines()
-        .map(str::to_string)
-        .collect(),
+      environment: spec::environment(&spec.env),
       user: spec.user.clone(),
-      working_directory: spec
-        .workdir
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "/".to_string()),
+      working_directory: spec::working_directory(spec.workdir.as_deref()),
     };
 
     watch_for_resize();
 
-    if !attached {
-      return Err(Self::failed("attach", "a session can only be attached from a terminal"));
+    // The owner attaches directly; anyone else asks the owner to.
+    if self.owns(&spec.name) {
+      // A duplicate, since Swift closes what it's given and we keep stdin. A
+      // non-terminal isn't handed over; the guest runs without one.
+      let lent = if attached {
+        terminal::lend(descriptor).map_err(|error| EngineError::failed("lend the terminal", error))?
+      } else {
+        NO_TERMINAL
+      };
+
+      let code = Self::attach(&spec.name, OWNER_ATTACH, &request, lent);
+
+      return checked(code).map_err(|error| EngineError::failed("exec", error));
     }
 
-    // This process's own terminal, not a duplicate: sending a descriptor over
-    // the socket copies it, and the owner takes its own duplicate of what
-    // arrives. Ours stays ours.
+    if !attached {
+      return Err(EngineError::failed(
+        "attach",
+        "a session can only be attached from a terminal",
+      ));
+    }
+
+    // Not duplicated: `SCM_RIGHTS` already copies it, and the owner dups again.
     control::request(&self.socket(&spec.name), &request, descriptor, &resized)
-      .map_err(|error| Self::failed("attach", error))
+      .map_err(|error| EngineError::failed("attach", error))
   }
 
-  /// Read from the store's own index rather than asked of anything.
-  ///
-  /// There is no daemon to ask: what a session can run is what `compostbin
-  /// build` has already put on disk, and the index is where it goes.
+  /// Read from the store's index; there is no daemon to ask.
   fn images(&self) -> Result<Vec<String>, EngineError> {
     self
       .store
@@ -186,54 +139,47 @@ impl Engine for FrameworkEngine {
       .map_err(|error| EngineError::unavailable("read the image index", error))
   }
 
-  fn run(&self, spec: &RunSpec) -> Result<String, EngineError> {
-    // Every previous run left a container directory behind: the VM dies with its
-    // process, so nothing gets the chance to tidy up afterwards. So a run always
-    // begins on a fresh clone of the image's rootfs, which is what
-    // `Session::start` deleting a stopped container already meant.
+  fn run(&self, spec: &RunSpec) -> Result<(), EngineError> {
+    // The VM dies with its process, so nothing cleans up the previous run's
+    // container directory. Start from a fresh rootfs clone, matching
+    // `Session::start`'s delete-stopped-container semantics.
     let _ = std::fs::remove_dir_all(self.store.container_dir(&spec.name));
 
     let code = ffi::compostbin_boot(
       &spec.name,
       &self.store.root().display().to_string(),
       &self.store.kernel().display().to_string(),
-      self.store.initfs_reference(),
+      INITFS_REFERENCE,
       &spec.image,
       spec.resources.cpus as i32,
       spec.resources.memory_in_bytes,
-      &spec::mounts(&spec.mounts),
-      &spec::sockets(&spec.sockets),
-      &spec::environment(&spec.env),
+      &spec::lines(&spec::mounts(&spec.mounts)),
+      &spec::lines(&spec::sockets(&spec.sockets)),
+      &spec::lines(&spec::environment(&spec.env)),
       &spec::lines(&spec.arguments),
-      &spec
-        .workdir
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "/".to_string()),
+      &spec::working_directory(spec.workdir.as_deref()),
       &spec::nat_address(&spec.name),
       spec::NAT_GATEWAY,
     );
 
-    checked(code).map_err(|error| Self::failed("boot", error))?;
-    self.serve_control_socket(spec.name.clone())?;
-
-    Ok(spec.name.clone())
+    checked(code).map_err(|error| EngineError::failed("boot", error))?;
+    self.serve_control_socket(spec.name.clone())
   }
 
   fn is_running(&self, name: &str) -> Result<bool, EngineError> {
-    // Either we hold it, or whoever does is answering on the socket. A socket
-    // file with nothing behind it is a container that died with its owner.
+    // A socket file with nothing answering is a container that died with its
+    // owner.
     Ok(control::served(&self.socket(name)))
   }
 
   fn is_unpacked(&self, image: &str) -> Result<bool, EngineError> {
     let code = ffi::compostbin_is_unpacked(&self.store.root().display().to_string(), image);
 
-    Ok(checked(code).map_err(|error| Self::failed("find the image", error))? == 1)
+    Ok(checked(code).map_err(|error| EngineError::failed("find the image", error))? == 1)
   }
 
-  /// Names both halves of what boots a session, because they are pinned
-  /// separately and a mismatch is a runtime failure rather than a build one.
+  /// Names both boot artefacts: pinned separately, and a mismatch fails only
+  /// at runtime.
   fn version(&self) -> Result<Option<String>, EngineError> {
     Ok(Some(format!(
       "Containerization {}, kernel {}",
@@ -260,10 +206,8 @@ extern "C" fn note_resize(_signal: libc::c_int) {
   RESIZED.store(true, Ordering::Relaxed);
 }
 
-/// Whether the window has changed size since this was last asked.
-///
-/// Does not block: the caller polls it, and needs to be able to stop polling
-/// when its attach ends.
+/// Whether the window changed size since last asked. Non-blocking, so the
+/// poller can stop when its attach ends.
 fn resized() -> bool {
   RESIZED.swap(false, Ordering::Relaxed)
 }

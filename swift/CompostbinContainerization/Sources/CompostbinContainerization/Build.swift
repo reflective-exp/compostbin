@@ -2,24 +2,18 @@
 // Building an image.
 //
 // Pull the base, unpack it to a writable ext4 block, boot it, run each step as an
-// exec, export the block back to a tar, and ingest that tar as a single-layer
-// image. All of it is Containerization API, in this process, with nothing to start
-// first.
+// exec, export the block to a tar, and ingest that as a single-layer image. All
+// in-process through Containerization, with no daemon.
 //
-// The image is one layer however many steps went into it. The cache is block
-// snapshots, not layers: a rebuild resumes from the deepest one still matching.
-// See `Cache.swift`.
+// The image is one layer regardless of step count. The cache is block
+// snapshots, not layers: a rebuild resumes from the deepest matching one. See
+// `Cache.swift`.
 //
 // A build also removes stale builder rootfs and unreferenced blobs.
 //
-// The step that deserves suspicion is the export: a rootfs leaves as ext4 and
-// comes back as a tar, so users, modes, symlinks, hardlinks and extended
-// attributes all have to survive libarchive's pax format and EXT4Reader's reading
-// of the inodes. A session run on the built image is what says they did.
-//
-// Unlike every other bridged call, the plan crosses as JSON rather than as
-// newline-separated lines: a build step is arbitrary shell and may contain
-// newlines, which the line encoding cannot carry.
+// The export is the fragile step: users, modes, symlinks, hardlinks and extended
+// attributes must survive EXT4Reader's inode reading and libarchive's pax
+// format. Only a session on the built image verifies they did.
 //===----------------------------------------------------------------------===//
 
 import Containerization
@@ -32,10 +26,10 @@ import SystemPackage
 
 /// A step's shell script, and who runs it.
 struct BuildStep: Decodable {
-    /// What the build log calls it.
+    /// The step's label in the build log.
     var name: String
-    /// The guest user, as the image names it. Root when absent — which is what
-    /// `packages` and `run_as_root` need.
+    /// The guest user, as the image names it. Root when absent, as `packages`
+    /// and `run_as_root` need.
     var user: String?
     var script: String
     /// Unsalted; see `Keys`.
@@ -43,8 +37,8 @@ struct BuildStep: Decodable {
 }
 
 struct BuildPlan: Decodable {
-    /// The builder container's id. Its own directory under the store, removed
-    /// before and after the build.
+    /// The builder container's id; its store directory is removed before and
+    /// after the build.
     var name: String
     var storeRoot: String
     var kernelPath: String
@@ -56,12 +50,12 @@ struct BuildPlan: Decodable {
     var cpus: Int
     var memoryInBytes: UInt64
     var rootfsSizeInBytes: UInt64
-    /// A host directory the steps can read, mounted read-only. This is what
-    /// stands in for `COPY` — a step copies out of it.
+    /// A host directory mounted read-only for the steps; the stand-in for
+    /// `COPY`.
     var context: String?
     var steps: [BuildStep]
-    /// `NAME=VALUE`, written into the image's own config and visible to every
-    /// step, as `ENV` is.
+    /// `NAME=VALUE`, written into the image config and visible to every step,
+    /// like `ENV`.
     var environment: [String]
     /// The user and directory the finished image runs as.
     var user: String?
@@ -85,17 +79,15 @@ enum Build {
         }
 
         let root = URL(filePath: plan.storeRoot)
-        // Our own, because `ImageStore.contentStore` is internal to
-        // Containerization and the ingest below needs it. The same directory the
-        // store would have created for itself, so the blobs land where every
-        // other reader looks for them.
+        // Our own because `ImageStore.contentStore` is internal and `ingest`
+        // needs it. Same directory the store would use, so readers find the
+        // blobs.
         let contentStore = try LocalContentStore(path: root.appending(path: "content"))
         let imageStore = try ImageStore(path: root, contentStore: contentStore)
         let platform = Platform.current
 
-        // Pulled here rather than left to `create`, because the base's own
-        // config is what the finished image inherits, and its digest salts
-        // every cache key.
+        // Pulled up front: the finished image inherits the base's config, and
+        // its digest salts every cache key.
         let base = try await imageStore.get(reference: plan.base, pull: true)
         let baseConfig = try? await base.config(for: platform).config
         let environment = merge(baseConfig?.env ?? [], plan.environment)
@@ -114,8 +106,7 @@ enum Build {
             return
         }
 
-        let containerDirectory = root.appending(components: "containers", plan.name)
-        let rootfsPath = containerDirectory.appending(path: "rootfs.ext4")
+        let (containerDirectory, rootfsPath) = container(plan.name, in: root)
 
         try? FileManager.default.removeItem(at: containerDirectory)
         sweepBuilders(in: root, keeping: plan.name)
@@ -153,15 +144,15 @@ enum Build {
             contentStore: contentStore
         )
 
-        // A reference that already exists is the ordinary case — this is a
-        // rebuild — and `create` will not replace one.
+        // `create` will not replace an existing reference, which a rebuild
+        // always has.
         try? await imageStore.delete(reference: plan.tag)
         try await imageStore.create(description: .init(reference: plan.tag, descriptor: descriptor))
 
         cache.save(image: descriptor, as: keys.image)
 
-        // Not `manager.delete`: there is no manager on a fully cached build, and
-        // its only extra is releasing a network interface, of which there is none.
+        // Not `manager.delete`: a fully cached build has no manager, and its only
+        // extra work is releasing a network interface, which there isn't.
         try? FileManager.default.removeItem(at: containerDirectory)
 
         await reclaim(imageStore, root: root)
@@ -226,17 +217,8 @@ enum Build {
 
         let mounts: [Containerization.Mount] =
             plan.context.map { [.share(source: $0, destination: contextDestination, options: ["ro"])] } ?? []
-        let interface = NATInterface(
-            ipv4Address: try CIDRv4(plan.ipv4Address),
-            ipv4Gateway: try IPv4Address(plan.ipv4Gateway)
-        )
-
-        let block = Containerization.Mount.block(
-            format: "ext4",
-            source: rootfs.absolutePath(),
-            destination: "/",
-            options: []
-        )
+        let nat = try NAT(address: plan.ipv4Address, gateway: plan.ipv4Gateway)
+        let block = Containerization.Mount.ext4Root(rootfs)
 
         for index in steps {
             let container = try await manager.create(
@@ -247,18 +229,16 @@ enum Build {
             ) { config in
                 config.cpus = plan.cpus
                 config.memoryInBytes = plan.memoryInBytes
-                // A keepalive, exactly as a session's boot process is: the steps
-                // are execs, and each one needs the container to outlive it. The
-                // base image's own `Cmd` would exit immediately.
+                // A keepalive, as in a session: steps are execs and need the
+                // container to outlive them. The base's `Cmd` would exit.
                 config.process.arguments = ["/bin/sh", "-c", "while :; do sleep 86400; done"]
                 config.process.user = .init()
                 config.process.workingDirectory = "/"
                 config.process.environmentVariables = environment
                 config.mounts += mounts
-                // `apt-get` and `claude.ai/install.sh` need the network, so a
-                // build gets the same NAT a session does.
-                config.interfaces = [interface]
-                config.dns = DNS(nameservers: [plan.ipv4Gateway])
+                // Same NAT as a session: `apt-get` and `claude.ai/install.sh`
+                // need the network.
+                nat.join(&config)
             }
 
             try await container.create()
@@ -288,12 +268,12 @@ enum Build {
 
     /// Removes rootfs left by failed builds and by tags since renamed.
     ///
-    /// Only marked directories — sessions share `containers` — and only when the
-    /// owning pid is gone, since builds in other projects share this store.
+    /// Only marked directories (sessions share `containers`), and only when the
+    /// owning pid is gone (builds in other projects share this store).
     private static func sweepBuilders(in root: URL, keeping current: String) {
-        let containers = root.appending(path: "containers")
         let directories =
-            (try? FileManager.default.contentsOfDirectory(at: containers, includingPropertiesForKeys: nil)) ?? []
+            (try? FileManager.default.contentsOfDirectory(at: containers(in: root), includingPropertiesForKeys: nil))
+            ?? []
 
         for directory in directories where directory.lastPathComponent != current {
             let marker = directory.appending(path: builderMarker)
@@ -312,9 +292,8 @@ enum Build {
         }
     }
 
-    /// Deletes blobs no image references — above all the previous build's
-    /// multi-gigabyte layer, orphaned by the re-tag — and the unpacked rootfs
-    /// of images that are gone.
+    /// Deletes unreferenced blobs (chiefly the previous build's multi-gigabyte
+    /// layer, orphaned by the re-tag) and unpacked rootfs of removed images.
     ///
     /// Only after `create`: until then this build's own blobs are unreferenced.
     /// Failure is logged, not thrown; the image is already usable.
@@ -340,10 +319,9 @@ enum Build {
 
     /// Runs one step to completion, throwing when it fails.
     ///
-    /// `bash -euo pipefail` rather than Docker's `sh -c`: every script here is
-    /// generated from a manifest or from compostbin's own Dockerfile, both of
-    /// which already chain with `&&`, and a step that fails silently in the
-    /// middle would be baked into the image.
+    /// `bash -euo pipefail` rather than Docker's `sh -c`: the generated scripts
+    /// already chain with `&&`, and a silent mid-step failure would be baked
+    /// into the image.
     private static func step(
         _ step: BuildStep,
         index: Int,
@@ -375,12 +353,10 @@ enum Build {
     /// Exports the built rootfs and writes it into the store as a single-layer
     /// image, returning the index descriptor the reference points at.
     ///
-    /// The layer is an uncompressed tar, which is not what a registry would
-    /// want but is exactly right here: nothing pushes this image, and an
-    /// uncompressed blob makes the layer digest and the diffID the same value —
-    /// so both are correct without a second pass over the bytes. (Note the
-    /// standing `TODO` in Containerization's own `InitImage.create`, which
-    /// writes a gzip layer's compressed digest as its diffID.)
+    /// The layer is an uncompressed tar: nothing pushes this image, and an
+    /// uncompressed blob's digest is also its diffID, so both are correct in
+    /// one pass. (Containerization's `InitImage.create` has a standing `TODO`
+    /// for writing a gzip layer's compressed digest as its diffID.)
     private static func ingest(
         rootfs: URL,
         plan: BuildPlan,
@@ -474,8 +450,8 @@ enum Build {
     }
 }
 
-/// A build log, written to this process's stderr as the guest produces it.
-/// Locked so that stdout and stderr chunks never interleave mid-write.
+/// Streams the build log to stderr. Locked so stdout and stderr chunks never
+/// interleave mid-write.
 private final class FileWriter: Writer, Sendable {
     private let handle: Mutex<FileHandle>
 
@@ -495,9 +471,8 @@ private final class FileWriter: Writer, Sendable {
     func close() throws {}
 }
 
-/// Somewhere for an escaping closure to leave its result. `ingest` takes a
-/// `@Sendable` body and has nothing to return through, and a `Mutex` alone
-/// cannot be captured by one.
+/// Carries a result out of `ingest`'s `@Sendable` body, which cannot return one
+/// or capture a bare `Mutex`.
 private final class Box<Value: Sendable>: Sendable {
     private let stored = Mutex<Value?>(nil)
 

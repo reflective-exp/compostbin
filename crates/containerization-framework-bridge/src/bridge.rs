@@ -1,8 +1,7 @@
 //! The functions the Swift package exports, as Rust sees them.
 //!
-//! Its own file because `build.rs` hands this one to swift-bridge's parser,
-//! which refuses a `cfg` on the bridge module: the gate is on `mod bridge` in
-//! `lib.rs` instead.
+//! swift-bridge's parser (fed this file by `build.rs`) refuses a `cfg` on the
+//! bridge module, so the gate is on `mod bridge` in `lib.rs`.
 
 #[swift_bridge::bridge]
 pub(crate) mod ffi {
@@ -36,12 +35,12 @@ pub(crate) mod ffi {
       terminal: i32,
     ) -> i32;
 
-    // `plan` is JSON, alone among these: it nests, and a build step's script may
-    // hold the newline the other calls use as a separator. swift-bridge cannot
-    // parse a doc comment in here, hence this one.
+    // `plan` is JSON: it nests, and a step's script may contain the newline the
+    // other calls use as a separator. (swift-bridge can't parse doc comments
+    // here.)
     fn compostbin_build(plan: &str) -> i32;
 
-    // Also JSON: it carries the kernel's URL and where to put it.
+    // JSON: the kernel's URL and destination.
     fn compostbin_provision(spec: &str) -> i32;
 
     fn compostbin_resize(id: &str, terminal: i32) -> i32;

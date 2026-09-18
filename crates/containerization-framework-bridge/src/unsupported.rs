@@ -1,8 +1,5 @@
-//! The engine and the builder off macOS: the same names and constructors,
-//! failing at the first thing asked of them.
-//!
-//! compostbin only runs on macOS, but it has to compile inside its own Debian
-//! guest, where `cargo check` is how a session checks its work.
+//! Non-macOS engine and builder: same names and constructors, failing on first
+//! use, so the workspace compiles on Linux.
 
 use crate::store::Store;
 use compostbin_engine::builder::Builder;
@@ -40,7 +37,7 @@ impl Engine for FrameworkEngine {
     Err(unsupported())
   }
 
-  fn run(&self, _spec: &RunSpec) -> Result<String, EngineError> {
+  fn run(&self, _spec: &RunSpec) -> Result<(), EngineError> {
     Err(unsupported())
   }
 

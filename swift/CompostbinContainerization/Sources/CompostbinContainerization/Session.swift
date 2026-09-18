@@ -1,11 +1,10 @@
 //===----------------------------------------------------------------------===//
 // Booting a session's VM, and running processes in it.
 //
-// Shaped after `cctl`'s RunCommand, with the differences that matter to
-// compostbin: the image is read from the store rather than pulled, the boot
-// process is a keepalive rather than the workload, and the terminal a process is
-// attached to is whichever one asked — the owner's own, or one handed over a
-// control socket by `compostbin shell`.
+// Modeled on `cctl`'s RunCommand, except: the image is read from the store, not
+// pulled; the boot process is a keepalive, not the workload; and a process
+// attaches to whichever terminal asked (the owner's, or one `compostbin shell`
+// passed over the control socket).
 //===----------------------------------------------------------------------===//
 
 import Containerization
@@ -13,7 +12,7 @@ import ContainerizationExtras
 import ContainerizationOCI
 import ContainerizationOS
 import Foundation
-// For `FilePermissions`, which is how a relayed socket's mode is set.
+// For `FilePermissions` (relayed socket mode).
 import SystemPackage
 
 /// What `RunSpec` carries, flattened for the bridge.
@@ -43,18 +42,51 @@ struct ExecRequest {
     var id: String
     var arguments: [String]
     var environment: [String]
-    /// The guest user, as the image names it. The image's own user when absent.
+    /// The guest user, as the image names it. The image's default when absent.
     var user: String?
     var workingDirectory: String
     /// The terminal to attach. `-1` runs the process without one.
     var terminal: Int32
 }
 
+/// Virtualization's built-in NAT, as a guest joins it.
+///
+/// Static, since nothing hands out leases: vminitd sets the address directly.
+/// The Rust side chooses it; see `spec::nat_address`.
+struct NAT {
+    let interface: NATInterface
+    let gateway: String
+
+    init(address: String, gateway: String) throws {
+        interface = NATInterface(ipv4Address: try CIDRv4(address), ipv4Gateway: try IPv4Address(gateway))
+        self.gateway = gateway
+    }
+
+    /// Sets the guest's only interface, resolving through the gateway.
+    func join(_ config: inout LinuxContainer.Configuration) {
+        config.interfaces = [interface]
+        config.dns = DNS(nameservers: [gateway])
+    }
+}
+
+/// The store's `containers` directory, shared by sessions and builders.
+func containers(in root: URL) -> URL {
+    root.appending(path: "containers")
+}
+
+/// A container's directory (its rootfs and the library's boot log) and the
+/// rootfs within it.
+func container(_ name: String, in root: URL) -> (directory: URL, rootfs: URL) {
+    let directory = containers(in: root).appending(path: name)
+
+    return (directory, directory.appending(path: "rootfs.ext4"))
+}
+
 enum Session {
     static func boot(_ spec: BootSpec) async throws {
-        // First, so that an unsigned build says so rather than failing later in
-        // whatever Virtualization call happens to come first — which moves
-        // around as this code changes, and never names the cause.
+        // First, so an unsigned build says so instead of failing in whichever
+        // Virtualization call comes first, with an error that never names the
+        // cause.
         guard Entitlement.hasVirtualization else {
             throw BridgeError.unentitled
         }
@@ -62,12 +94,10 @@ enum Session {
         let root = URL(filePath: spec.storeRoot)
         let kernel = Kernel(path: URL(filePath: spec.kernelPath), platform: .linuxArm)
 
-        // No `Network`: the interface is built below instead. `VmnetNetwork`
-        // is what `cctl` uses and what `ContainerManager` would allocate from,
-        // but creating a vmnet network from an ordinary process fails with
-        // VMNET_MEM_FAILURE — the privilege to do it is why the `container`
-        // CLI runs its vmnet plugin as a separate helper. Virtualization's own
-        // NAT needs nothing we do not already have.
+        // No `Network`; the interface is built below. `VmnetNetwork` (what
+        // `cctl` uses) fails with VMNET_MEM_FAILURE from an unprivileged
+        // process, which is why the `container` CLI runs vmnet as a separate
+        // helper. Virtualization's own NAT needs no extra privilege.
         var manager = try await ContainerManager(
             kernel: kernel,
             initfsReference: spec.initfsReference,
@@ -75,30 +105,20 @@ enum Session {
             network: nil
         )
 
-        // Not `create(reference:)`, which unpacks the image into a new rootfs
-        // on every run. The container directory is ours to make on this path,
-        // and the library writes its boot log there.
+        // Not `create(reference:)`, which unpacks a new rootfs every run. On
+        // this path we must create the container directory; the library writes
+        // its boot log there.
         let image = try await manager.imageStore.get(reference: spec.imageReference)
-        let containerDirectory = root.appending(components: "containers", spec.name)
-        try FileManager.default.createDirectory(at: containerDirectory, withIntermediateDirectories: true)
-        let rootfs = try await Unpacked(store: root).rootfs(
-            for: image,
-            at: containerDirectory.appending(path: "rootfs.ext4")
-        )
+        let paths = container(spec.name, in: root)
+        try FileManager.default.createDirectory(at: paths.directory, withIntermediateDirectories: true)
+        let rootfs = try await Unpacked(store: root).rootfs(for: image, at: paths.rootfs)
 
         let mounts = try spec.mounts.map(share)
         let sockets = try spec.sockets.map(relay)
+        let nat = try NAT(address: spec.ipv4Address, gateway: spec.ipv4Gateway)
 
-        // Static, because nothing hands out a lease: `Interface` wants an
-        // address up front and vminitd sets it directly. Which address is the
-        // Rust side's decision — see `spec::nat_address`.
-        let interface = NATInterface(
-            ipv4Address: try CIDRv4(spec.ipv4Address),
-            ipv4Gateway: try IPv4Address(spec.ipv4Gateway)
-        )
-
-        // `networking: false` leaves the interfaces alone: with no `Network` on
-        // the manager there is nothing for it to allocate, and ours is set here.
+        // `networking: false`: the manager has no `Network` to allocate from,
+        // and the interface is set here.
         let container = try await manager.create(
             spec.name,
             image: image,
@@ -112,14 +132,13 @@ enum Session {
             config.process.environmentVariables += spec.environment
             config.mounts += mounts
             config.sockets = sockets
-            config.interfaces = [interface]
-            config.dns = DNS(nameservers: [spec.ipv4Gateway])
+            nat.join(&config)
         }
 
         try await container.create()
         try await container.start()
 
-        // Kept for `exec`, which needs the user it names.
+        // Kept for `exec`, which needs the image's user.
         let imageConfig = try? await image.config(for: .current).config
 
         Sessions.shared.insert(
@@ -131,25 +150,18 @@ enum Session {
     /// `source\tdestination` — the wire form of
     /// `apple_container::model::SocketRelay`.
     ///
-    /// `.into`, always: compostbin's ports are host services the guest reaches,
-    /// never the other way round.
+    /// Always `.into`: the guest reaches host services, never the reverse.
     ///
-    /// The mode is the same 0666 the CLI path ends up with. There it is
-    /// incidental — the host socket's mode copied verbatim onto a guest socket
-    /// owned by root, which the unprivileged `claude` could not otherwise open.
-    /// Here it is a choice, and a narrower one becomes possible as soon as the
-    /// guest-side owner is known. The confinement is the session directory
-    /// either way, not the mode.
+    /// Mode 0666 matches what the CLI path gets incidentally (the host mode
+    /// copied onto a root-owned guest socket), which lets the unprivileged
+    /// `claude` open it. It could narrow once the guest-side owner is known.
+    /// Confinement comes from the session directory, not the mode.
     private static func relay(_ socket: String) throws -> UnixSocketConfiguration {
-        let fields = socket.split(separator: "\t", omittingEmptySubsequences: false)
-
-        guard fields.count == 2 else {
-            throw BridgeError.malformed("socket", socket)
-        }
+        let parts = try fields(socket, count: 2, kind: "socket")
 
         return UnixSocketConfiguration(
-            source: URL(filePath: String(fields[0])),
-            destination: URL(filePath: String(fields[1])),
+            source: URL(filePath: String(parts[0])),
+            destination: URL(filePath: String(parts[1])),
             permissions: FilePermissions(rawValue: 0o666),
             direction: .into
         )
@@ -157,25 +169,32 @@ enum Session {
 
     /// `source\tdestination\tro?` — the wire form of `apple_container::model::Mount`.
     private static func share(_ mount: String) throws -> Containerization.Mount {
-        let fields = mount.split(separator: "\t", omittingEmptySubsequences: false)
-
-        guard fields.count == 3 else {
-            throw BridgeError.malformed("mount", mount)
-        }
+        let parts = try fields(mount, count: 3, kind: "mount")
 
         return .share(
-            source: String(fields[0]),
-            destination: String(fields[1]),
-            options: fields[2] == "ro" ? ["ro"] : []
+            source: String(parts[0]),
+            destination: String(parts[1]),
+            options: parts[2] == "ro" ? ["ro"] : []
         )
+    }
+
+    /// A tab-separated line's fields, throwing unless there are exactly `count`.
+    private static func fields(_ line: String, count: Int, kind: String) throws -> [Substring] {
+        let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+
+        guard fields.count == count else {
+            throw BridgeError.malformed(kind, line)
+        }
+
+        return fields
     }
 
     /// Runs a process to completion in an already-booted session and returns its
     /// exit code.
     ///
-    /// The terminal is a descriptor rather than `Terminal.current` because the
-    /// caller is not always this process: `compostbin shell` passes its own tty
-    /// across the control socket, and from here the two cases are identical.
+    /// Takes a descriptor rather than `Terminal.current` because
+    /// `compostbin shell` passes its tty over the control socket; from here the
+    /// two cases are identical.
     static func exec(_ request: ExecRequest) async throws -> Int32 {
         guard let booted = Sessions.shared.get(request.name) else {
             throw BridgeError.notBooted(request.name)
@@ -183,28 +202,25 @@ enum Session {
 
         let imageConfig = booted.imageConfig
 
-        // `setInitState: false`: the terminal's attributes belong to whoever
-        // handed it over — they put it in raw mode and they must put it back.
-        // The descriptor, though, is ours: it is a duplicate made for this
-        // attach, and closing it below is what stops us reading.
+        // `setInitState: false`: the caller set raw mode and restores it. The
+        // descriptor is ours, a duplicate for this attach; closing it stops our
+        // reads.
         let terminal = request.terminal < 0 ? nil : try Terminal(descriptor: request.terminal, setInitState: false)
 
-        // Not on the exit path alone: an error between here and the wait would
-        // otherwise leave a reader on a terminal someone is still typing at.
+        // `defer`, so an error before the wait doesn't leave a reader on a
+        // terminal someone is still typing at.
         defer { try? terminal?.close() }
 
         let process = try await booted.container.exec(request.id) { config in
-            // Seeded from the image, because `exec` is not: a bare
-            // configuration runs as uid 0 with nothing but a default PATH,
-            // which would attach Claude as root to an image whose whole point
-            // is that it ends `USER claude`.
+            // Seeded from the image: a bare exec config runs as uid 0 with only
+            // a default PATH, attaching Claude as root to an image that ends
+            // `USER claude`.
             if let imageConfig {
                 let fallback = config.environmentVariables
                 config = .init(from: imageConfig)
 
-                // Seeding replaces the environment wholesale, and an image that
-                // declares no PATH would leave the guest unable to find
-                // anything. Debian's does; not every base image would.
+                // Seeding replaces the environment; keep the default PATH if the
+                // image declares none.
                 if !config.environmentVariables.contains(where: { $0.hasPrefix("PATH=") }) {
                     config.environmentVariables += fallback
                 }
@@ -241,13 +257,11 @@ enum Session {
 
     /// Re-reads the size from the attached terminal and tells the guest.
     ///
-    /// Takes the descriptor rather than a size: the fd *is* the terminal that
-    /// changed, so asking it is both simpler and immune to a stale size racing
-    /// a second resize.
+    /// Takes the descriptor rather than a size, so a stale size can't race a
+    /// second resize.
     static func resize(id: String, terminal: Int32) async throws {
         guard let process = Sessions.shared.process(id) else {
-            // The process ended between the SIGWINCH and this call. Nothing to
-            // resize, and nothing wrong.
+            // The process ended after the SIGWINCH; not an error.
             return
         }
 

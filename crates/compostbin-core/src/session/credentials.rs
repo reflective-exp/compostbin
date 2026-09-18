@@ -22,6 +22,17 @@ pub trait CredentialSource {
   fn read(&self) -> Result<Option<String>, CredentialError>;
 }
 
+/// Holds whatever token a test gives it; `None` is a Keychain with nothing in it.
+#[cfg(test)]
+pub(crate) struct FakeSource(pub Option<String>);
+
+#[cfg(test)]
+impl CredentialSource for FakeSource {
+  fn read(&self) -> Result<Option<String>, CredentialError> {
+    Ok(self.0.clone())
+  }
+}
+
 pub struct Keychain;
 
 /// `security` exits 44 when the item is simply absent, which is not a failure.
@@ -92,14 +103,6 @@ mod tests {
   use tempfile::TempDir;
 
   const SECRET: &str = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat-test"}}"#;
-
-  struct FakeSource(Option<String>);
-
-  impl CredentialSource for FakeSource {
-    fn read(&self) -> Result<Option<String>, CredentialError> {
-      Ok(self.0.clone())
-    }
-  }
 
   fn found() -> FakeSource {
     FakeSource(Some(SECRET.to_string()))

@@ -1,16 +1,12 @@
 use std::fmt;
 use std::path::PathBuf;
 
-/// One step of a build: a shell script, and who runs it.
-///
-/// A `RUN` line, in other words — but named, because the name is what the build
-/// log shows, and a build whose log is a wall of shell is a build nobody reads.
+/// One build step: a named `RUN`. The name is what the build log shows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildStep {
   pub name: String,
   pub script: String,
-  /// The guest user, as the image being built names it. `None` is root, which is
-  /// what installing packages needs.
+  /// The guest user, as the image names it. `None` is root.
   pub user: Option<String>,
 }
 
@@ -32,25 +28,19 @@ impl BuildStep {
   }
 }
 
-/// An image to build: a base, a sequence of steps, and what the result runs as.
-///
-/// Structured, because what composes it is structured: a project's additions come
-/// from manifest fields, and a builder that runs the steps itself has no reason to
-/// be handed a script to parse.
+/// An image to build: a base, steps, and what the result runs as.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildPlan {
-  /// The image the steps run on top of, registry-qualified: nothing resolves a
-  /// bare `debian:stable-slim` into `docker.io/library/…`.
+  /// Registry-qualified: nothing expands `debian:stable-slim` to
+  /// `docker.io/library/…`.
   pub base: String,
   /// Whether to start from cached snapshots. Off still writes them.
   pub cache: bool,
-  /// A host directory the steps may read, mounted read-only. This is what a
-  /// `COPY` is: a step installs out of it.
+  /// A read-only host directory steps install from (the `COPY` equivalent).
   pub context: Option<PathBuf>,
-  /// `NAME=VALUE`, visible to every step and written into the image's config —
-  /// `ENV`, in both of its meanings.
+  /// `NAME=VALUE`, visible to every step and written into the image config.
   pub environment: Vec<String>,
-  /// What the builder runs with, not what a session does.
+  /// The builder's own resources, not a session's.
   pub resources: Resources,
   pub steps: Vec<BuildStep>,
   /// What the built image is registered as.
@@ -76,8 +66,7 @@ impl BuildPlan {
   }
 }
 
-/// What a VM is given. Always stated by the caller, never defaulted by an
-/// engine: a session's size is the manifest's, and a build's is its own.
+/// What a VM is given. Always set by the caller, never defaulted by an engine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Resources {
   pub cpus: u32,
@@ -86,8 +75,7 @@ pub struct Resources {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EnvVar {
-  /// Carried into the guest with whatever value the host has. Dropped when the
-  /// host does not set it, so the guest can tell unset from empty.
+  /// The host's value; dropped if unset, so the guest can tell unset from empty.
   Inherit(String),
   Set {
     name: String,
@@ -106,7 +94,7 @@ pub struct ExecSpec {
   pub name: String,
   /// Whether it gets a terminal.
   pub tty: bool,
-  /// The guest user, as the image names it. `None` is the image's own user.
+  /// The guest user, as the image names it. `None` is the image's default.
   pub user: Option<String>,
   pub workdir: Option<PathBuf>,
 }
@@ -118,8 +106,7 @@ pub struct Mount {
   pub target: PathBuf,
 }
 
-/// `source:target`, and `:ro` when it is read-only. How a mount reads in
-/// `doctor`'s drift report, which is the one place a mount has to be a sentence.
+/// `source:target[:ro]`, as `doctor`'s drift report shows it.
 impl fmt::Display for Mount {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(formatter, "{}:{}", self.source.display(), self.target.display())?;
@@ -132,19 +119,16 @@ impl fmt::Display for Mount {
   }
 }
 
-/// A host unix socket carried into the guest, rather than mounted there.
-///
-/// Its own field rather than a `Mount` that happens to point at a socket: a relay
-/// is configuration, not a filesystem, and mounting a socket as one relays
-/// nothing and is not much of a mount either.
+/// A host unix socket relayed into the guest. Not a `Mount`: mounting a socket
+/// relays nothing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SocketRelay {
   pub source: PathBuf,
   pub target: PathBuf,
 }
 
-/// A container to create and start. Mounts keep their declared order, which
-/// matters when one mounted path nests inside another.
+/// A container to create and start. Mounts keep declared order, which matters
+/// for nested paths.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunSpec {
   pub arguments: Vec<String>,
@@ -153,8 +137,7 @@ pub struct RunSpec {
   pub mounts: Vec<Mount>,
   pub name: String,
   pub resources: Resources,
-  /// Relayed after the mounts. Nothing nests inside a socket, so the order
-  /// between the two groups does not matter the way it does within `mounts`.
+  /// Relayed after the mounts; nothing nests in a socket, so that's safe.
   pub sockets: Vec<SocketRelay>,
   pub workdir: Option<PathBuf>,
 }

@@ -1,8 +1,8 @@
 use crate::error::{At, PathError};
 use std::path::{Path, PathBuf};
 
-/// Resolves manifest path strings against an explicit working directory and home
-/// directory, so resolution is deterministic and independent of the environment.
+/// Resolves manifest path strings against an explicit working and home
+/// directory, so resolution does not depend on the environment.
 pub struct PathResolver {
   cwd: PathBuf,
   home: PathBuf,
@@ -35,8 +35,8 @@ impl PathResolver {
     resolved.canonicalize().at(&resolved)
   }
 
-  /// Expands a leading `~` and makes the result absolute. `~user` is *not*
-  /// expanded — unlike a shell, we treat it as a literal relative path.
+  /// Expands a leading `~` and makes the result absolute. Unlike a shell,
+  /// `~user` is not expanded but treated as a literal relative path.
   pub fn resolve(&self, raw: &str) -> PathBuf {
     if raw == "~" || raw == "~/" {
       return self.home.clone();

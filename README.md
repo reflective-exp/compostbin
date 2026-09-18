@@ -2,17 +2,17 @@
 
 Run Claude Code in a container.
 
-This project uses Apple's
+compostbin uses Apple's
 [Containerization](https://github.com/apple/containerization) framework to
 attempt to contain Claude, building the image as well as running it. The current
-directory is bind-mounted into the runtime, so that edits land directly in the
-host with no syncing or copying.
+directory is bind-mounted into the guest, so edits land directly on the host with
+no syncing.
 
-Claude can only reach what is mounted; builds and tests may be configured to
-allow Claude Code to execute specific commands on the host--with no need to
-duplicate the development toolchain in debian.
+Claude can only reach what is mounted. Builds and tests can be configured as
+host commands Claude may run, so the toolchain need not be duplicated in the
+Debian image.
 
-This project currently only runs on macOS.
+macOS only.
 
 ## Install
 
@@ -24,8 +24,8 @@ compostbin doctor
 
 ## Usage
 
-Every command runs from the root of a project, and reads that project's manifest
-at `.config/compostbin.toml`. A first session is four commands:
+Every command runs from a project root and reads its manifest at
+`.config/compostbin.toml`. A first session:
 
 ``` sh
 compostbin init         # write the manifest
@@ -38,31 +38,29 @@ Everything a session can see lands under `/workspace` in the guest.
 
 ### init
 
-`compostbin init` writes a default `.config/compostbin.toml`. It is checked into
-the project it configures; see [Configuration](#configuration).
-
-Additional configuration may be written into `.config/compostbin.local.toml`--this
-file may be added to `.gitignore` to ensure the configuration is local-only.
+`compostbin init` writes a default `.config/compostbin.toml`, meant to be checked
+in; see [Configuration](#configuration). Uncommitted settings go in
+`.config/compostbin.local.toml`; see [Local configuration](#local-configuration).
 
 ### build
 
-`compostbin build` builds the base image: debian, Claude Code, and the handful of
-tools a session needs. One image serves every project, so it is built rarely.
+`compostbin build` builds the base image: Debian, Claude Code, and the tools a
+session needs. One image serves every project (unless project-specific overrides
+are configured), so it is rarely rebuilt.
 
-The first build provisions the store at `~/.cache/compostbin/images`, downloading a
-kernel from
-[Kata Containers](https://github.com/kata-containers/kata-containers/releases) and
-pulling the `vminit` image from ghcr.io.
+The first build provisions the store at `~/.cache/compostbin/images`, downloading
+a kernel from
+[Kata Containers](https://github.com/kata-containers/kata-containers/releases)
+and pulling the `vminit` image from ghcr.io.
 
-When the manifest has an `[image]` table, a second image is built on top of the
-base with the additions. Extra language toolchains, private CAs, or other
-project-specific tools may be configured there.
+If the manifest has an `[image]` table, a project image is built on top of the
+base with those additions (language toolchains, private CAs, other tools).
 
 Each build runs every step: there is no build cache.
 
 ### doctor
 
-`compostbin doctor` checks whether a session would work. It checks:
+`compostbin doctor` checks whether a session would work:
 
 - what runs containers, and whether its image store can be read
 - whether the base image has been built
@@ -77,18 +75,18 @@ Each build runs every step: there is no build cache.
 
 ### run
 
-`compostbin run` starts the container and attaches to Claude inside it. Anything after
-`--` is passed straight through to `claude`:
+`compostbin run` starts the container and attaches Claude. Arguments after `--`
+pass through to `claude`:
 
 ``` sh
 compostbin run -- --continue --model opus
 ```
 
-The session's Claude home outlives the container, so `--continue` resumes the
-conversation from the last run. That home is per-project, and the session's
-`CLAUDE_CONFIG_DIR` points at it.
+The session's Claude home is per-project, outlives the container, and is the
+session's `CLAUDE_CONFIG_DIR`, so `--continue` resumes the last run's
+conversation.
 
-While Claude is attached, compostbin serves that session's host commands; both
+compostbin serves the session's host commands while Claude is attached; both
 stop when Claude exits.
 
 ### shell
@@ -99,41 +97,38 @@ unprivileged `claude` user, in the project's directory under `/workspace`.
 
 ### add
 
-`compostbin add <path>` records another host path in the manifest as a
-`[[paths]]` entry, so the next container mounts it.
+`compostbin add <path>` records a host path as a `[[paths]]` entry, so the next
+container mounts it.
 
 ``` sh
 compostbin add ../libfoo --readonly
 ```
 
-A path already inside a `[workspace] roots` tree is mounted already: `add` says
-so, records nothing, and ignores `--readonly`. Anything else needs the container
-recreated: exit the running session, then `compostbin run -- --continue` picks
-the conversation back up with the new mount.
+A path inside a `[workspace] roots` tree is already mounted: `add` says so,
+records nothing, and ignores `--readonly`. Any other path needs the container
+recreated: exit the session, then `compostbin run -- --continue` resumes the
+conversation with the new mount.
 
 `--local` records the entry in `.config/compostbin.local.toml`.
 
-`add` refuses a path that is obviously a mistake — `~`, `/`, `~/.ssh`, anything
-holding credentials — unless you pass `--force`. It is a guardrail against a
-slip rather than a boundary: the container runs with your own privileges either
-way.
+Without `--force`, `add` refuses obvious mistakes: `~`, `/`, `~/.ssh`, anything
+holding credentials. This is a guardrail, not a boundary; the container runs
+with your privileges either way.
 
 ### ls
 
-`compostbin ls` lists what the session mounts: each host path, where it appears
-in the guest, and why it is there — the project directory, a workspace root, an
-explicit `[[paths]]` entry, or a local one.
+`compostbin ls` lists each mounted host path, its guest location, and its source:
+the project directory, a workspace root, a `[[paths]]` entry, or a local one.
 
 ### clean
 
-`compostbin clean` removes a session's transient state. With `--all` it also
-removes the Claude home, discarding old conversations, and the session's
-credentials.
+`compostbin clean` removes a session's transient state. `--all` also removes the
+Claude home (discarding old conversations) and the session's credentials.
 
 ## Configuration
 
 `.config/compostbin.toml` declares what the project needs. Every table is
-optional; a manifest that says nothing gets the defaults.
+optional.
 
 ``` toml
 [project]
@@ -148,9 +143,8 @@ env    = ["GITHUB_TOKEN"]
 # A failing line stops the session.
 setup  = ["direnv allow"]
 
-# Trees whose contents may be mounted. Empty by default: mounting a whole
-# workspace read-write is opt-in. The directory you run compostbin in is
-# mounted regardless.
+# Trees whose contents may be mounted. Empty by default, so mounting a whole
+# workspace read-write is opt-in. The current directory is always mounted.
 [workspace]
 roots = ["~/workspace"]
 
@@ -159,9 +153,8 @@ roots = ["~/workspace"]
 readonly = true
 source   = "~/.cargo/registry"
 
-# Added to this project's image only, on top of the shared base. `packages`
-# install as root, then `run_as_root` lines, then the image drops to the
-# `claude` user the session runs as and `run` lines follow.
+# This project's image only, on top of the shared base. Order: `packages`
+# (as root), `run_as_root` lines, then `run` lines as the `claude` user.
 [image]
 packages    = ["ca-certificates", "direnv"]
 run         = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
@@ -170,8 +163,8 @@ run_as_root = ["update-ca-certificates"]
 
 ### Local configuration
 
-`.config/compostbin.local.toml` holds local uncommitted configuration. This
-file is intended to be added to `.gitignore`.
+`.config/compostbin.local.toml` holds uncommitted configuration; add it to
+`.gitignore`.
 
 ``` toml
 [[paths]]
@@ -187,8 +180,8 @@ Local configuration currently only supports `[[paths]]`.
 ### Signing in
 
 Your Claude Code token is read from the login Keychain and seeded into the
-session, so a container is logged in the way your host is. Failing that, set
-`ANTHROPIC_API_KEY` or log in interactively once — the login persists with the
+session, so the container is logged in as your host is. Otherwise, set
+`ANTHROPIC_API_KEY` or log in interactively once; the login persists with the
 Claude home.
 
 ``` toml
@@ -198,14 +191,13 @@ seed_from_keychain = true
 shared             = ["agents"]
 ```
 
-Your own `~/.claude/CLAUDE.md`, `settings.json` and `skills` are copied in on
-every run. The host stays authoritative: edit them there, and the next session
-has them.
+Your `~/.claude/CLAUDE.md`, `settings.json` and `skills` are copied in on every
+run. The host copies are authoritative; edit them there.
 
 ### Host commands
 
-The container carries no toolchain. Instead the guest may ask the host to run
-specific declared commands:
+The container carries no toolchain; the guest asks the host to run declared
+commands instead:
 
 ``` toml
 [host]
@@ -223,19 +215,19 @@ deny      = ["--config", "--manifest-path", "-Z"]
 tty       = true
 ```
 
-Inside the session, `compostbin-host test` runs it on the host and behaves as
-though the guest shell had run it: stdin goes in, stdout and stderr come back,
-its exit status is yours. The guest sends the name, never a command line.
+Inside the session, `compostbin-host test` runs it on the host as if run
+locally: stdin goes in, stdout and stderr come back, and its exit status is
+returned. The guest sends only the name, never a command line.
 
-- `arguments` lets the guest append its own arguments; off by default, so a
-  command is exact unless deliberately widened.
+- `arguments` lets the guest append arguments. Off by default, so a command is
+  exact unless deliberately widened.
 - `deny` refuses guest arguments that would point a widened command at other
-  code or configuration. Nothing is denied by default, because which flags do
-  that depends on the toolchain. `--config` also refuses `--config=x`; a
-  single-letter `-Z` also refuses the joined `-Zx`.
-- `tty` runs the command under a pty, so colour and progress work. A terminal is
-  one device, so this merges stdout and stderr.
-- The spool is only created/mounted when `[host.commands]` is present.
+  code or configuration. Empty by default, since the relevant flags depend on
+  the toolchain. `--config` also refuses `--config=x`; a single-letter `-Z` also
+  refuses the joined `-Zx`.
+- `tty` runs the command under a pty, so colour and progress work. This merges
+  stdout and stderr.
+- The spool is only created and mounted when `[host.commands]` is present.
 
 ### Host ports
 
@@ -247,19 +239,18 @@ Host services on fixed ports, such as MCP servers, reach the guest at its own
 ports = [7001, 7002]
 ```
 
-Each port is relayed through a unix socket in the session's own directory,
-carried into this container and no other: nothing listens on a network address,
-and **no other container on this Mac can reach a forwarded port**. Changing
-ports takes a restart, since the relays are set up when the VM starts.
+Each port is relayed through a unix socket in the session directory, carried
+into this container only: nothing listens on a network address, and **no other
+container on this Mac can reach a forwarded port**. Changing ports takes a
+restart, since relays are set up when the VM starts.
 
-`run` holds the sockets for as long as the session lives, on a thread beside the
-host-command agent. Both end when Claude exits, which is also when the VM goes.
+`run` holds the sockets for the session's lifetime, on a thread beside the
+host-command agent. Both end when Claude exits, as does the VM.
 
-A declared port whose host service has not started yet is an ordinary state —
-starting one through `compostbin-host` is a reason it would refuse for a while —
-so once Claude is attached the relay writes to `ports.log` in the session
-directory rather than to the terminal, which by then is Claude's. `doctor` is
-what says a port has nothing behind it.
+A port whose host service hasn't started yet (e.g. one started later via
+`compostbin-host`) is normal, so once Claude is attached the relay logs to
+`ports.log` in the session directory instead of Claude's terminal. `doctor`
+reports ports with nothing behind them.
 
 ### Clipboard
 
@@ -270,65 +261,60 @@ Copying inside the session can reach the macOS clipboard:
 clipboard = true
 ```
 
-The image's `pbcopy`, `xclip`, `xsel` and `wl-copy` all send what they read to
-the host's `pbcopy`, through the host-command channel — so Claude's own copy
-(`/copy`, copying a response) lands on your Mac's clipboard, as does
-`some-command | pbcopy` in `compostbin shell`. The session gets a
-`WAYLAND_DISPLAY`, since that is what makes Claude look for `wl-copy` at all.
+The image's `pbcopy`, `xclip`, `xsel` and `wl-copy` forward their input to the
+host's `pbcopy` over the host-command channel, so Claude's `/copy` (or copying a
+response) and `some-command | pbcopy` in `compostbin shell` reach your Mac's
+clipboard. The session sets `WAYLAND_DISPLAY`, which is what makes Claude look
+for `wl-copy`.
 
-It is write-only: nothing on the host clipboard reaches the guest. It is off by
-default, and requires a restart on change.
+Write-only: the host clipboard never reaches the guest. Off by default; changes
+take a restart.
 
 ### What the session is told
 
-From the inside a container looks like an ordinary Debian box: nothing in it
-says the toolchain is missing on purpose, or that `compostbin-host` is the way
-out. So each session is briefed on itself — where it is, and every command it
-may ask the host for, rendered from `[host.commands]` rather than written by
-hand, so the two cannot drift apart.
+Inside, a container looks like an ordinary Debian box, with no hint that the
+toolchain is missing on purpose or that `compostbin-host` exists. So each
+session gets a briefing: where it is, and every command it may ask the host
+for, rendered from `[host.commands]` so the two cannot drift.
 
-The briefing is mounted read-only at `/etc/claude-code`, Claude's managed
-settings, and a `SessionStart` hook prints it at the top of every session.
-Managed settings outrank `~/.claude/settings.json`, which stays yours:
-compostbin copies it from the host and never writes to it.
+The briefing is mounted read-only at `/etc/claude-code` (Claude's managed
+settings), and a `SessionStart` hook prints it at the start of every session.
+Managed settings outrank `~/.claude/settings.json`, which compostbin copies
+from the host and never writes to.
 
 The briefing is written when the container is created, so an edited
-`[host.commands]` reaches the session by the restart that serves it.
+`[host.commands]` takes effect on restart.
 
 ## Containerization.framework
 
-A session is a virtual machine this process owns, through
-[Containerization](https://github.com/apple/containerization). Builds go through
-the same library — see [Building images](#building-images).
+A session is a virtual machine owned by the compostbin process, through
+[Containerization](https://github.com/apple/containerization). Builds use the
+same library; see [Building images](#building-images).
 
-`Engine` has no `build`: image building is `compostbin_engine::builder`, a
-separate thing a session never does.
+`Engine` has no `build`: image building is `compostbin_engine::builder`,
+separate from sessions.
 
 ### Who owns the VM
 
-A `LinuxContainer` dies with the process that created it. So `compostbin run`
-**is** the thing holding the session, and `shell` is a client of it.
+A `LinuxContainer` dies with the process that created it, so `compostbin run`
+**is** the session, and `shell` is its client. There is no `compostbin stop`:
+leaving the session ends the VM, and `compostbin clean` removes what it left
+behind.
 
-It is also why there is no `compostbin stop`: nothing outlives `run` to be
-stopped. Leaving the session ends the VM, and `compostbin clean` is what removes
-what it left behind.
+`run` and `shell` talk over a unix socket in the session's state directory. What
+crosses is the client's **terminal**, not its bytes: the request carries the
+client's tty descriptor via `SCM_RIGHTS`, and `run` hands it to the guest
+process as stdio. The guest talks to the real terminal, nothing relays
+keystrokes, and attaching works the same whether the terminal is `run`'s own or
+came over the socket. The socket carries only the request, a nudge on each
+window resize, and the exit code.
 
-They talk over a unix socket in the session's state directory, and what crosses
-it is the client's **terminal**, not its bytes: the request is sent with
-`SCM_RIGHTS` carrying the client's own tty descriptor, and `run` hands that
-descriptor straight to the guest process as its stdio. So the guest talks to the
-real terminal, nothing relays keystrokes, and the code that attaches a process
-is identical whether the terminal came from `run`'s own process or across the
-socket. The socket then carries only what a descriptor cannot: the request, a
-nudge on each window resize, and the exit code coming back.
-
-The consequence to know about: when `run` exits, the VM goes with it, and a
-`shell` attached to it ends too.
+When `run` exits, the VM ends, and so does any attached `shell`.
 
 ### Building images
 
-A build is a `BuildPlan` — a base, a sequence of named steps, and what the
-finished image runs as — which the builder executes:
+A build executes a `BuildPlan` (a base, named steps, and what the finished image
+runs as):
 
 1. pull the base into the store, unpack it to a writable `rootfs.ext4`;
 2. boot that block with a keepalive process, the same NAT a session gets (`apt`
@@ -339,75 +325,69 @@ finished image runs as — which the builder executes:
 5. ingest that tar as a single-layer image — layer, config, manifest, index — and
    register it under the plan's tag.
 
-The layer is an **uncompressed** tar (`imageLayer`, not `imageLayerGzip`), which
-makes the layer digest and the diffID the same value. Nothing pushes these images,
-so there is nothing to gain from compressing them.
+The layer is an **uncompressed** tar (`imageLayer`, not `imageLayerGzip`), so the
+layer digest equals the diffID. Nothing pushes these images, so compression
+gains nothing.
 
-Every build runs every step, and the result is a single layer. `base_plan` is the
-base image's definition; `project_plan` composes a project's additions out of
-manifest fields.
+`base_plan` defines the base image; `project_plan` composes a project's
+additions from manifest fields.
 
-The export reads the inodes and writes pax with `schily` xattrs, which is what
-carries uids, modes, symlinks, hardlinks and extended attributes into the layer.
+The export reads the inodes and writes pax with `schily` xattrs, carrying uids,
+modes, symlinks, hardlinks and extended attributes into the layer.
 
 ### Host ports are relayed, not mounted
 
 `[host] ports` puts one unix socket per port in the session directory and gives
-the guest the other end. Containerization takes that as configuration —
-`UnixSocketConfiguration`, with a direction and a mode of its own — rather than
-as a filesystem.
+the guest the other end. Containerization configures this as a
+`UnixSocketConfiguration` (with its own direction and mode), not a filesystem.
 
-So `RunSpec` says which it means: `mounts` for filesystems, `sockets` for
-relays. Sockets go in `config.sockets`, where a socket mounted as a filesystem —
-which is not a relay, and not much of a mount — cannot happen by accident.
+So `RunSpec` keeps them apart: `mounts` for filesystems, `sockets` for relays,
+which go in `config.sockets` so a socket can't be mounted as a filesystem by
+accident.
 
 ### Attached processes are seeded from the image
 
-`ContainerManager.create` builds the container's first process from the image
-config, so the keepalive runs as `claude`. `LinuxContainer.exec` does not: it
-starts from a bare configuration, which is uid 0 with nothing but a default
-`PATH`. Since compostbin attaches Claude with `exec` rather than as the
-container's first process, taking that default runs the session as root in an image
-whose config names `claude` — and gives it `HOME=/root`, because the runtime
-resolves `HOME` from the passwd entry of whatever user the process ends up as.
+`ContainerManager.create` builds the first process from the image config, so
+the keepalive runs as `claude`. `LinuxContainer.exec` starts from a bare
+configuration: uid 0 with only a default `PATH`. Since compostbin attaches
+Claude with `exec`, that default would run the session as root with
+`HOME=/root` (the runtime resolves `HOME` from the process user's passwd entry)
+in an image whose config names `claude`.
 
-So the session's image config is kept from the boot that read it, and every
-attach seeds itself from it before applying the session's own arguments and
-environment.
+So the image config is kept from boot, and every attach seeds itself from it
+before applying the session's arguments and environment.
 
 The Swift side lives in `swift/CompostbinContainerization`, bridged to Rust by
 `crates/containerization-framework-bridge` with
-[swift-bridge](https://github.com/chinedufn/swift-bridge). Building it needs
-Xcode 26 and macOS 26; `cargo build` drives `swift build` through the bridge
-crate's `build.rs`.
+[swift-bridge](https://github.com/chinedufn/swift-bridge). It needs Xcode 26
+and macOS 26; `cargo build` runs `swift build` from the bridge crate's
+`build.rs`.
 
-Two more things are load-bearing and neither is obvious:
+Two non-obvious requirements:
 
 - **The binary must be signed.** Virtualization.framework refuses every call
-  without the `com.apple.security.virtualization` entitlement, and a signature
-  does not survive a rebuild — so `bin/dev/sign` runs after every build, and
+  without the `com.apple.security.virtualization` entitlement, and a rebuild
+  drops the signature, so `bin/dev/sign` runs after every build;
   `bin/dev/start` does both.
 
-  It signs with `DEVELOPMENT_TEAM`, which `.envrc` requires and
-  `.local/envrc` supplies. That is a team id — the certificate's OU — and
-  `codesign --sign` matches common names, where a team id does not appear, so
-  `bin/dev/identity` resolves it to an identity by reading the certificate.
-  Without it the binary is signed ad hoc, which is enough for
-  the entitlement but gives the binary a new code identity on every rebuild;
-  the keychain notices, and compostbin reads Claude's credentials from there,
-  so an ad-hoc build re-prompts for access each time it is rebuilt.
+  It signs with `DEVELOPMENT_TEAM`, which `.envrc` requires and `.local/envrc`
+  supplies. That is a team id (the certificate's OU), which never appears in
+  the common name `codesign --sign` matches, so `bin/dev/identity` resolves it
+  by reading the certificate. Without it the binary is signed ad hoc: enough
+  for the entitlement, but each rebuild gets a new code identity, so the
+  keychain holding Claude's credentials re-prompts for access.
 
-- **The store is disposable.** `~/.cache/compostbin/images`, in
+- **The store is disposable.** `~/.cache/compostbin/images` uses
   Containerization's `ImageStore` layout: an image index in `state.json`, blobs
   under `content/`, the kernel under `kernels/`, one unpacked rootfs per
-  container under `containers/`. `ContainerManager` opens that directory as-is.
-  `compostbin build` provisions whatever is missing, so nothing in it has to be
+  container under `containers/`. `ContainerManager` opens it as-is.
+  `compostbin build` provisions whatever is missing, so nothing in it must be
   kept and `clean` never touches it.
 
 The `vminit` reference pinned in
 `crates/containerization-framework-bridge/src/store.rs` and the package version
-pinned in `swift/CompostbinContainerization/Package.swift` are one protocol —
-the guest agent and the library that talks to it — and have to move together.
+pinned in `swift/CompostbinContainerization/Package.swift` are two ends of one
+protocol (guest agent and library) and must move together.
 
 ## Development
 

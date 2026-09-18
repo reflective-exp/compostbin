@@ -8,14 +8,11 @@ import Security
 enum Entitlement {
     static let virtualization = "com.apple.security.virtualization"
 
-    /// Virtualization.framework refuses every call without the entitlement, and
-    /// says so in terms that describe the process rather than what to do about
-    /// it. Asking first turns that into an answer.
+    /// Virtualization.framework refuses every call without the entitlement,
+    /// with an error that doesn't say how to fix it. Checking first lets us.
     ///
-    /// Worth asking on every boot rather than trusting the build: a signature
-    /// does not survive a rebuild, so the ordinary way to arrive here without
-    /// the entitlement is `cargo build` followed by running the binary — which
-    /// is exactly what anyone iterating does.
+    /// Checked on every boot: a rebuild drops the signature, so a plain
+    /// `cargo build` then run arrives here unentitled.
     static var hasVirtualization: Bool {
         guard let task = SecTaskCreateFromSelf(nil) else {
             return false

@@ -1,15 +1,14 @@
 //! Generates the FFI glue, builds the Swift package, and tells cargo how to
 //! link it.
 //!
-//! Only on macOS. Everywhere else the crate has no bridge to link — the engine
-//! and builder are stand-ins, in `unsupported.rs` — and this does nothing, so the
-//! workspace still checks from inside a compostbin session's Debian guest.
+//! macOS only. Elsewhere the engine and builder are stand-ins
+//! (`unsupported.rs`) and this does nothing, so the workspace still checks on
+//! Linux.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-/// The name swift-bridge gives the generated header directory, and so the path
-/// `bridging-header.h` imports.
+/// swift-bridge's generated header directory; `bridging-header.h` imports it.
 const BRIDGE: &str = "compostbin-containerization";
 const PACKAGE: &str = "CompostbinContainerization";
 
@@ -35,23 +34,16 @@ fn is_release() -> bool {
 
 /// Makes swift-bridge's generated `@_cdecl` shims public.
 ///
-/// They are emitted as internal functions. A release build compiles the package
-/// whole-module with optimisation, and an internal function that nothing inside
-/// the module calls is dead code — so both shims, and the functions behind them,
-/// are stripped from the archive and the binary fails to link against two
-/// undefined `__swift_bridge__$…` symbols. Debug builds do not optimise, which
-/// is the only reason this is not visible from `cargo test`.
-///
-/// Public is what they already are in substance: they are the library's entire
-/// reason to exist, and the only thing that calls them is on the other side of
-/// the C ABI, where the optimiser cannot see it.
+/// They are emitted internal. A release build optimises whole-module, sees no
+/// caller inside the module (the callers are across the C ABI), and strips
+/// them, leaving two undefined `__swift_bridge__$…` symbols at link time.
+/// Debug builds don't optimise, so `cargo test` never shows it.
 fn publish_bridge_shims(generated: &std::path::Path) {
   let path = generated.join(BRIDGE).join(format!("{BRIDGE}.swift"));
   let source = std::fs::read_to_string(&path).expect("swift-bridge should have just written the glue");
   let published = source.replace("\nfunc __swift_bridge__", "\npublic func __swift_bridge__");
 
-  // A silent no-op here would come back as an unexplained release-only link
-  // failure, so fail where the cause is legible instead.
+  // A silent no-op would resurface as an unexplained release-only link failure.
   if published == source {
     panic!(
       "no `func __swift_bridge__` to publish in {}; swift-bridge's output has changed shape",
@@ -62,13 +54,10 @@ fn publish_bridge_shims(generated: &std::path::Path) {
   std::fs::write(&path, published).expect("the generated glue should be writable");
 }
 
-/// Copies freshly generated glue into the package, skipping files whose
-/// contents have not changed.
+/// Copies generated glue into the package, skipping unchanged files.
 ///
-/// swift-bridge rewrites its output every run and SwiftPM keys incrementality
-/// off mtimes, so rewriting identical bytes is enough to make `swift build`
-/// recompile the module — and to make cargo rerun this script, which watches
-/// the directory it would be writing into.
+/// SwiftPM and cargo's `rerun-if-changed` both key off mtimes, so rewriting
+/// identical bytes would recompile the module and rerun this script.
 fn sync_generated(staged: &std::path::Path, generated: &std::path::Path) {
   std::fs::create_dir_all(generated).expect("the generated directory should be creatable");
 
@@ -93,9 +82,8 @@ fn sync_generated(staged: &std::path::Path, generated: &std::path::Path) {
 
 /// Compiles the Swift package to a static library.
 ///
-/// The bridging header is named by the package's own `swiftSettings` rather
-/// than passed here as `-Xswiftc`, which SwiftPM would apply to every target in
-/// the dependency graph.
+/// The bridging header is set in the package's `swiftSettings`, not via
+/// `-Xswiftc`, which SwiftPM would apply to every target in the graph.
 fn compile_swift() {
   let mut command = Command::new("swift");
 
@@ -125,9 +113,8 @@ fn swift_build_dir() -> PathBuf {
 
 /// System libraries Containerization's `CArchive` target links against.
 ///
-/// SwiftPM records them as the package's own `linkerSettings`, which govern how
-/// SwiftPM links — not how cargo does. Linking the static library into a Rust
-/// binary leaves every `archive_*` symbol undefined unless we repeat them here.
+/// Its `linkerSettings` only apply when SwiftPM links; without repeating them
+/// here every `archive_*` symbol is undefined in the Rust binary.
 const SYSTEM_LIBRARIES: [&str; 5] = ["archive", "z", "bz2", "lzma", "iconv"];
 
 /// The Swift runtime the static library depends on but does not carry.
@@ -143,14 +130,13 @@ fn link_swift_runtime() {
   println!("cargo:rustc-link-search={developer}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx/");
   println!("cargo:rustc-link-search=/usr/lib/swift");
 
-  // The Swift runtime is dynamic — libswift_Concurrency.dylib above all — and
-  // the static library records it as `@rpath/...`. Without an rpath the binary
-  // links but will not launch, which surfaces as every CLI test failing in dyld
-  // rather than as a build error.
+  // The Swift runtime (notably libswift_Concurrency) is dynamic and referenced
+  // as `@rpath/...`. Without an rpath the binary links but fails in dyld at
+  // launch.
   println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
   println!("cargo:rustc-link-lib=framework=Virtualization");
-  // For `SecTaskCopyValueForEntitlement`, which is how the Swift side checks
-  // that this build was signed before it tries to start a VM.
+  // `SecTaskCopyValueForEntitlement`: the Swift side checks the build is
+  // signed before starting a VM.
   println!("cargo:rustc-link-lib=framework=Security");
 
   for library in SYSTEM_LIBRARIES {

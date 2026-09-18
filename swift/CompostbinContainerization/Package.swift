@@ -3,19 +3,17 @@
 import Foundation
 import PackageDescription
 
-// Set here rather than as a `-Xswiftc` flag on `swift build`, which SwiftPM
-// applies to every target it compiles: that makes swift-bridge's regenerated
-// header an input to swift-nio, gRPC and Containerization too, and a minute of
-// rebuilding out of every change to the Rust bridge.
+// Scoped to this target: a `-Xswiftc` flag would apply to every target, making
+// swift-bridge's regenerated header an input to swift-nio, gRPC and
+// Containerization, so each Rust bridge change costs a minute of rebuilding.
 //
-// Absolute, because the flag reaches the compiler verbatim and nothing promises
-// what its working directory will be.
+// Absolute, because the flag reaches the compiler verbatim and its working
+// directory is unspecified.
 let bridgingHeader = "\(URL(fileURLWithPath: #filePath).deletingLastPathComponent().path)/Sources/CompostbinContainerization/bridging-header.h"
 
-// Pinned exactly, not `from:`. The initfs image in the `container` CLI's store
-// is built by a specific Containerization release — `vminit:0.45.0` — and the
-// guest agent it carries speaks that release's protocol. A library newer than
-// the initfs on disk is a runtime mismatch, not a compile error.
+// Pinned exactly: the initfs in the `container` CLI's store (`vminit:0.45.0`)
+// carries a guest agent speaking that release's protocol. A newer library is a
+// runtime mismatch, not a compile error.
 let containerization: Version = "0.45.0"
 
 let package = Package(

@@ -1,12 +1,10 @@
 //===----------------------------------------------------------------------===//
 // Images unpacked once, under `unpacked` in the image store.
 //
-// A session's rootfs is an ext4 block the guest writes to, so every run needs its
-// own. Unpacking one from the image reads and rewrites the whole layer —
-// gigabytes, on every `run`. Instead each image is unpacked once, keyed by its
-// digest, and a session gets a clone of that: free to make on APFS, and costing
-// only the blocks the session goes on to change. Off APFS the clone falls back
-// to a copy, which is still cheaper than an unpack.
+// Each run needs its own writable ext4 rootfs, and unpacking rewrites gigabytes.
+// So each image is unpacked once, keyed by digest, and a session gets a clone:
+// free on APFS, costing only the blocks it changes. Off APFS it falls back to a
+// copy, still cheaper than an unpack.
 //
 // `Build` evicts an entry once no image in the store has its digest.
 //===----------------------------------------------------------------------===//
@@ -15,12 +13,17 @@ import Containerization
 import ContainerizationOS
 import Foundation
 
+extension Containerization.Mount {
+    /// An ext4 image file as the guest's root filesystem.
+    static func ext4Root(_ image: URL) -> Self {
+        .block(format: "ext4", source: image.absolutePath(), destination: "/", options: [])
+    }
+}
+
 struct Unpacked {
-    /// What `ContainerManager` gives a rootfs it unpacks itself. Sparse, so a
-    /// ceiling rather than a cost.
+    /// `ContainerManager`'s own default. Sparse, so a ceiling, not a cost.
     static let capacityInBytes = 8.gib()
-    /// An unpack is minutes at most. A partial older than this was left by a
-    /// process that died mid-unpack.
+    /// An unpack takes minutes at most; an older partial was abandoned.
     static let abandonedAfter: TimeInterval = 60 * 60
 
     /// The image store's root.
@@ -32,8 +35,8 @@ struct Unpacked {
         root.appending(path: "\(digest.replacing(":", with: "-")).ext4")
     }
 
-    /// Whether the image is unpacked already, so its next run skips the unpack.
-    /// Asked by the Rust side before a run, which says so when it will not.
+    /// Whether the image is already unpacked. The Rust side asks before a run
+    /// so it can announce an unpack.
     func holds(_ reference: String) async throws -> Bool {
         let image = try await ImageStore(path: store).get(reference: reference)
 
@@ -55,12 +58,12 @@ struct Unpacked {
 
         try Cache.clone(source, to: destination)
 
-        return .block(format: "ext4", source: destination.absolutePath(), destination: "/", options: [])
+        return .ext4Root(destination)
     }
 
     /// Unpacked aside and moved into place, so an interrupted unpack is never
-    /// found, and under a name of its own, so two sessions first booting the
-    /// same image never write to one file.
+    /// found; under a unique name, so two sessions first booting the same image
+    /// never share a file.
     private func unpack(_ image: Image, to destination: URL) async throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
@@ -73,14 +76,12 @@ struct Unpacked {
         do {
             try FileManager.default.moveItem(at: partial, to: destination)
         } catch where FileManager.default.fileExists(atPath: destination.path(percentEncoded: false)) {
-            // Another session unpacked the same image first; its copy is as
-            // good as ours.
+            // Another session unpacked it first; its copy is equivalent.
         }
     }
 
-    /// Removes every entry whose digest no image in the store has, and every
-    /// abandoned partial. A running session holds a clone, never the entry, so
-    /// nothing in use goes with them.
+    /// Removes entries no stored image references, and abandoned partials.
+    /// Running sessions hold clones, never entries, so nothing in use is lost.
     func evict(keeping digests: some Sequence<String>) {
         let kept = Set(digests.map { path($0).lastPathComponent })
         let cutoff = Date.now.addingTimeInterval(-Self.abandonedAfter)

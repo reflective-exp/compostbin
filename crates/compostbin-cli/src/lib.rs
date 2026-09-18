@@ -47,8 +47,8 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
     } => {
       let canonical = resolver.canonicalize(&path.display().to_string())?;
 
-      // A guardrail against a slip rather than a boundary — the container runs
-      // with the user's own privileges either way — hence `--force`.
+      // A guardrail against slips, not a security boundary (the container has
+      // the user's privileges anyway), hence `--force`.
       if let Some(danger) = danger(&canonical, &resolver)
         && !force
       {
@@ -104,8 +104,8 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
     Command::Ls => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
 
-      // Host path, then where it appears in the container, then why: in-root
-      // rather than explicit is what decides whether `add` needed a restart.
+      // Origin matters: in-root vs explicit decides whether `add` needed a
+      // restart.
       for entry in session.workspace().entries() {
         let origin = match entry.origin {
           Origin::Explicit => "explicit",
@@ -149,6 +149,9 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 }
 
 /// Builds the base image, and the project's own when the manifest adds to it.
+///
+/// Provisions the store (kernel and init image) first so there's no separate
+/// setup command to remember.
 fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn Error>> {
   println!(
     "building {} into {}",
@@ -156,32 +159,19 @@ fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn Error
     image::store(session).display()
   );
 
-  if image::adds_to_the_base(&session.manifest) {
+  if !session.manifest.image.is_empty() {
     println!("then {}", session.image());
   }
 
-  build_images(session, cache)?;
-
-  Ok(0)
-}
-
-/// Builds with the framework builder, provisioning the store first.
-///
-/// `provision` is part of building rather than a command of its own: a store
-/// that has never been used needs a kernel and an init image before anything can
-/// boot, and a separate step for that is exactly the `container system start`
-/// this replaced.
-fn build_images(session: &Session, cache: bool) -> Result<(), Box<dyn Error>> {
   let builder = FrameworkBuilder::new(Store::at(image::store(session)));
 
   builder.provision()?;
   image::build(session, &builder, cache)?;
 
-  Ok(())
+  Ok(0)
 }
 
-/// Prints every check, exiting non-zero when any of them failed so `doctor` is
-/// usable as a precondition in a script.
+/// Prints every check; non-zero if any failed, so scripts can gate on it.
 fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
   let checks = doctor::diagnose(
     session,
@@ -195,13 +185,8 @@ fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
   Ok(i32::from(checks.iter().any(|check| check.status == Status::Fail)))
 }
 
-/// The engine a session runs on.
-///
-/// One implementation: Containerization.framework, in this process. Nothing else
-/// is installed, started, or asked — which is why the store has to be ready
-/// before a session can begin, and why the error says to build.
-///
-/// Each container's control socket goes in its own session directory.
+/// The engine a session runs on: Containerization.framework, in-process.
+/// Nothing else provides images, so the store must be ready first.
 fn select(session: &Session) -> Result<FrameworkEngine, Box<dyn Error>> {
   let store = Store::at(image::store(session));
 
@@ -210,8 +195,7 @@ fn select(session: &Session) -> Result<FrameworkEngine, Box<dyn Error>> {
   Ok(FrameworkEngine::new(session.resolve(SESSIONS_DIR), store))
 }
 
-/// Writes back whichever file the new entry belongs to, leaving the other
-/// untouched.
+/// Writes back only the file the new entry belongs to.
 fn save_manifest(session: &Session, manifest_path: &Path, local: bool) -> Result<(), Box<dyn Error>> {
   if local {
     session.manifest.save_local(manifest_path)?;

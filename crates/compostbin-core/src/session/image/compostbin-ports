@@ -1,13 +1,12 @@
 #!/bin/sh
 # The guest half of host port forwarding, and the container's own process when
-# the manifest declares [host] ports: each one on this guest's localhost is
-# relayed to a unix socket, where compostbin listens on the host's behalf.
+# the manifest declares [host] ports: each port on this guest's localhost is
+# relayed to a unix socket where compostbin listens on the host's behalf.
 # A shell script for the same reason as compostbin-host.
 #
-# The sockets are not mounted files. `container` turns a socket passed as
-# --volume into a relay of its own, so what is here is an end it created at
-# start; nothing on a network address is involved, and no other container can
-# reach these.
+# The sockets are not mounted files: `container` turns a socket passed as
+# --volume into its own relay, and these are the ends it created at start. No
+# network address is involved, and no other container can reach them.
 set -eu
 
 sockets=/run/compostbin/ports

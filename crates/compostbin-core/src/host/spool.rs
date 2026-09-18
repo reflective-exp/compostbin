@@ -1,10 +1,9 @@
-//! The request/response directory tree, on whichever side of the mount the
-//! caller happens to be.
+//! The request/response directory tree, from either side of the mount.
 
 use crate::error::{At, HostError, PathError};
 use crate::host::request::Request;
 use crate::host::{PARTIAL_SUFFIX, REQUEST_SUFFIX, REQUESTS_DIR, RESPONSES_DIR, RUNNING_DIR};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct Spool {
   root: PathBuf,
@@ -38,11 +37,9 @@ impl Spool {
 
   /// Empties the spool without unlinking it, and recreates whatever is missing.
   ///
-  /// The directories themselves have to survive: a running container's mount is
-  /// attached to the inode, so a spool removed and recreated at the same path
-  /// leaves the guest holding a directory nothing writes to any more — a
-  /// channel that is present, empty, and dead for as long as the container
-  /// lives. Emptying is the only kind of cleaning a live mount survives.
+  /// The directories must survive: a running container's mount is attached to
+  /// the inode, so a spool removed and recreated at the same path leaves the
+  /// guest holding a dead directory for as long as the container lives.
   pub fn empty(&self) -> Result<(), PathError> {
     self.create()?;
 
@@ -60,13 +57,12 @@ impl Spool {
   /// Clears whatever the last container left in flight, returning what it
   /// removed.
   ///
-  /// A guest client removes its own files on the way out, but a killed one leaves
-  /// chunks and a claim that nothing will ever collect. Creating the container is
-  /// the safe moment to sweep them: every client that could be waiting died with
-  /// the container before it.
+  /// A killed guest client leaves chunks and a claim nothing will collect.
+  /// Creating the container is the safe moment to sweep them: every client that
+  /// could be waiting died with the previous container.
   ///
-  /// Requests are deliberately not swept — one submitted between `create` and the
-  /// container starting is live, and dropping it would hang its client.
+  /// Requests are not swept: one submitted between `create` and the container
+  /// starting is live, and dropping it would hang its client.
   pub fn sweep(&self) -> Result<Vec<PathBuf>, PathError> {
     let mut removed = Vec::new();
 
@@ -96,11 +92,7 @@ impl Spool {
   /// Writes a request the way the guest does: `.partial` first, then rename.
   pub fn submit(&self, id: &str, request: &Request) -> Result<(), HostError> {
     let rendered = request.render()?;
-    let partial = self.requests().join(format!("{id}{PARTIAL_SUFFIX}"));
-    let final_path = self.requests().join(format!("{id}{REQUEST_SUFFIX}"));
-
-    std::fs::write(&partial, rendered).at(&partial)?;
-    Ok(std::fs::rename(&partial, &final_path).at(&partial)?)
+    Ok(publish(&self.requests(), &format!("{id}{REQUEST_SUFFIX}"), rendered)?)
   }
 
   /// The oldest unclaimed id. Ids are timestamp-prefixed, so name order is
@@ -118,9 +110,17 @@ impl Spool {
       }
     }
 
-    // The oldest, rather than sorting the lot and taking the head of it.
     Ok(ids.into_iter().min())
   }
+}
+
+/// Writes `<name>.partial`, then renames it to `name`, so a reader across the
+/// mount never finds the file incomplete.
+pub(super) fn publish(directory: &Path, name: &str, contents: impl AsRef<[u8]>) -> Result<(), PathError> {
+  let partial = directory.join(format!("{name}{PARTIAL_SUFFIX}"));
+
+  std::fs::write(&partial, contents).at(&partial)?;
+  std::fs::rename(&partial, directory.join(name)).at(&partial)
 }
 
 #[cfg(test)]

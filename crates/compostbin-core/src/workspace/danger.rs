@@ -1,15 +1,14 @@
 //! Which host paths should probably not be mounted at all.
 //!
-//! Policy rather than plumbing: `paths` decides what a manifest string means,
-//! this decides what to say about the answer. `add` refuses on either verdict
-//! without `--force`; `doctor` reports both, a manifest being hand-editable.
+//! `add` refuses on either verdict without `--force`; `doctor` reports both,
+//! since a manifest can be hand-edited.
 
 use crate::workspace::paths::PathResolver;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Paths whose contents are secrets: mounting one, or anything above it, hands
-/// the container the keys to accounts the session has no business touching.
+/// Paths whose contents are secrets. Mounting one, or anything inside it, hands
+/// the container credentials it has no business holding.
 pub const SENSITIVE_PATHS: [&str; 7] = [
   "/etc",
   "/private/etc",
@@ -19,8 +18,8 @@ pub const SENSITIVE_PATHS: [&str; 7] = [
   "~/.ssh",
   "~/Library/Keychains",
 ];
-/// Paths not secret in themselves, but covering a whole account or machine — so
-/// mounting one mounts everything below it, the paths above included.
+/// Paths not secret in themselves, but covering a whole account or machine,
+/// `SENSITIVE_PATHS` included.
 pub const BROAD_PATHS: [&str; 6] = ["/", "/Users", "~", "~/Desktop", "~/Documents", "~/Downloads"];
 
 /// Why a path should probably not be mounted.
@@ -45,9 +44,8 @@ impl fmt::Display for Danger {
   }
 }
 
-/// Judges an already-resolved host path. A short list of obvious mistakes rather
-/// than a containment boundary: the container runs with the user's own
-/// privileges either way, so this guards against a slip, not against the user.
+/// Judges an already-resolved host path. Guards against obvious slips, not a
+/// containment boundary: the container runs with the user's own privileges.
 pub fn danger(path: &Path, resolver: &PathResolver) -> Option<Danger> {
   if let Some(sensitive) = SENSITIVE_PATHS
     .iter()

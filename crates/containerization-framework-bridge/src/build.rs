@@ -1,26 +1,23 @@
 //! Building images.
 //!
-//! Pull the base, unpack it to a writable ext4 block, boot that, run each step in
-//! it, export the block back to a tar, and write the tar into the store as a
-//! single-layer image. All of it through Containerization, in this process, with
-//! nothing to start first.
+//! Pull the base, unpack it to a writable ext4 block, boot it, run each step,
+//! export the block to a tar, and store that as a single-layer image — all
+//! in-process through Containerization.
 //!
-//! A rebuild runs only the steps whose inputs changed: the rootfs is snapshotted
-//! after each step under a `compostbin_engine::cache` key, and the next build
-//! resumes from the deepest match. The image is still one layer.
+//! The rootfs is snapshotted after each step under a `compostbin_engine::cache`
+//! key; a rebuild resumes from the deepest match. The image is still one layer.
 //!
 //! A build also removes stale builder rootfs and unreferenced blobs.
 
-use crate::store::{KERNEL_IN_ARCHIVE, KERNEL_URL, Store};
+use crate::store::{INITFS_REFERENCE, KERNEL_IN_ARCHIVE, KERNEL_URL, Store};
 use crate::{checked, ffi, spec};
 use compostbin_engine::builder::Builder;
-use compostbin_engine::cache;
+use compostbin_engine::cache::{self, Keys};
 use compostbin_engine::error::EngineError;
 use compostbin_engine::model::{BuildPlan, BuildStep};
 use serde::Serialize;
 
-/// The rootfs the base image is unpacked into. Sparse, so this is a ceiling
-/// rather than an allocation — but everything a build installs has to fit.
+/// Sparse, so a ceiling rather than an allocation — but every build must fit.
 const ROOTFS_SIZE_IN_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// A step, as the Swift side reads it.
@@ -45,8 +42,7 @@ impl<'a> Step<'a> {
   }
 }
 
-/// The plan, plus everything the plan does not say and a boot needs: where the
-/// store is, what boots the builder, and what address it takes.
+/// The plan plus what a boot needs beyond it: store, boot artefacts, address.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Wire<'a> {
@@ -71,62 +67,14 @@ struct Wire<'a> {
   use_cache: bool,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProvisionWire<'a> {
-  store_root: String,
-  kernel_path: String,
-  kernel_url: &'static str,
-  kernel_in_archive: &'static str,
-  initfs_reference: &'a str,
-}
-
-pub struct FrameworkBuilder {
-  store: Store,
-}
-
-impl FrameworkBuilder {
-  pub fn new(store: Store) -> Self {
-    Self { store }
-  }
-
-  /// Puts the kernel and the init image in the store, downloading and pulling
-  /// whatever is not already there.
-  ///
-  /// Idempotent, and cheap when there is nothing to do, so `build` can simply
-  /// call it first rather than leave it to a separate command that has to be
-  /// remembered.
-  pub fn provision(&self) -> Result<(), EngineError> {
-    let wire = ProvisionWire {
-      store_root: self.store.root().display().to_string(),
-      kernel_path: self.store.kernel().display().to_string(),
-      kernel_url: KERNEL_URL,
-      kernel_in_archive: KERNEL_IN_ARCHIVE,
-      initfs_reference: self.store.initfs_reference(),
-    };
-
-    checked(ffi::compostbin_provision(&Self::json(
-      "provision the image store",
-      &wire,
-    )?))
-    .map(|_| ())
-    .map_err(|error| EngineError::failed("provision the image store", error))
-  }
-
-  fn json(action: &str, wire: &impl Serialize) -> Result<String, EngineError> {
-    serde_json::to_string(wire).map_err(|error| EngineError::failed(action.to_string(), error))
-  }
-}
-
-impl Builder for FrameworkBuilder {
-  fn build(&self, plan: &BuildPlan) -> Result<(), EngineError> {
+impl<'a> Wire<'a> {
+  fn new(store_root: String, kernel_path: String, plan: &'a BuildPlan, keys: &'a Keys) -> Self {
     let name = builder_name(&plan.tag);
-    let action = format!("build {}", plan.tag);
-    let keys = cache::keys(plan)?;
-    let wire = Wire {
-      store_root: self.store.root().display().to_string(),
-      kernel_path: self.store.kernel().display().to_string(),
-      initfs_reference: self.store.initfs_reference(),
+
+    Self {
+      store_root,
+      kernel_path,
+      initfs_reference: INITFS_REFERENCE,
       base: &plan.base,
       tag: &plan.tag,
       cpus: plan.resources.cpus as i32,
@@ -147,7 +95,63 @@ impl Builder for FrameworkBuilder {
       base_key: &keys.base,
       use_cache: plan.cache,
       name,
+    }
+  }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProvisionWire {
+  store_root: String,
+  kernel_path: String,
+  kernel_url: &'static str,
+  kernel_in_archive: &'static str,
+  initfs_reference: &'static str,
+}
+
+pub struct FrameworkBuilder {
+  store: Store,
+}
+
+impl FrameworkBuilder {
+  pub fn new(store: Store) -> Self {
+    Self { store }
+  }
+
+  /// Fetches the kernel and init image into the store if missing. Idempotent
+  /// and cheap, so `build` always calls it first.
+  pub fn provision(&self) -> Result<(), EngineError> {
+    let wire = ProvisionWire {
+      store_root: self.store.root().display().to_string(),
+      kernel_path: self.store.kernel().display().to_string(),
+      kernel_url: KERNEL_URL,
+      kernel_in_archive: KERNEL_IN_ARCHIVE,
+      initfs_reference: INITFS_REFERENCE,
     };
+
+    checked(ffi::compostbin_provision(&Self::json(
+      "provision the image store",
+      &wire,
+    )?))
+    .map(|_| ())
+    .map_err(|error| EngineError::failed("provision the image store", error))
+  }
+
+  fn json(action: &str, wire: &impl Serialize) -> Result<String, EngineError> {
+    serde_json::to_string(wire).map_err(|error| EngineError::failed(action.to_string(), error))
+  }
+}
+
+impl Builder for FrameworkBuilder {
+  fn build(&self, plan: &BuildPlan) -> Result<(), EngineError> {
+    let action = format!("build {}", plan.tag);
+    let keys = cache::keys(plan)?;
+    let wire = Wire::new(
+      self.store.root().display().to_string(),
+      self.store.kernel().display().to_string(),
+      plan,
+      &keys,
+    );
 
     checked(ffi::compostbin_build(&Self::json(&action, &wire)?))
       .map(|_| ())
@@ -155,9 +159,8 @@ impl Builder for FrameworkBuilder {
   }
 }
 
-/// The builder container's id, and so the name of its directory in the store.
-/// Derived from the tag so two builds at once cannot share a rootfs, and stable
-/// so a rebuild reuses the same directory.
+/// The builder container's id (and store directory). From the tag, so
+/// concurrent builds don't share a rootfs and a rebuild reuses its directory.
 fn builder_name(tag: &str) -> String {
   let slug: String = tag
     .chars()
@@ -201,35 +204,15 @@ mod tests {
   }
 
   fn wire(plan: &BuildPlan) -> serde_json::Value {
-    let name = builder_name(&plan.tag);
     // No step names the context mount, so the nonexistent context isn't read.
     let keys = cache::keys(plan).expect("a plan with no context to read should key");
 
-    serde_json::to_value(Wire {
-      store_root: "/store".to_string(),
-      kernel_path: "/store/kernels/default.kernel-arm64".to_string(),
-      initfs_reference: "vminit:0",
-      base: &plan.base,
-      tag: &plan.tag,
-      cpus: plan.resources.cpus as i32,
-      memory_in_bytes: plan.resources.memory_in_bytes,
-      rootfs_size_in_bytes: ROOTFS_SIZE_IN_BYTES,
-      context: plan.context.as_ref().map(|path| path.display().to_string()),
-      steps: plan
-        .steps
-        .iter()
-        .zip(&keys.steps)
-        .map(|(step, key)| Step::new(step, key))
-        .collect(),
-      environment: &plan.environment,
-      user: plan.user.as_deref(),
-      working_directory: plan.workdir.as_ref().map(|path| path.display().to_string()),
-      ipv4_address: spec::nat_address(&name),
-      ipv4_gateway: spec::NAT_GATEWAY,
-      base_key: &keys.base,
-      use_cache: plan.cache,
-      name,
-    })
+    serde_json::to_value(Wire::new(
+      "/store".to_string(),
+      "/store/kernels/default.kernel-arm64".to_string(),
+      plan,
+      &keys,
+    ))
     .expect("a plan should serialize")
   }
 
@@ -241,9 +224,7 @@ mod tests {
     );
   }
 
-  /// The Swift side decodes by property name, so the keys are the contract. A
-  /// renamed field is a runtime decode failure rather than a compile error, which
-  /// is what this is here to catch.
+  /// Swift decodes by property name; a renamed field fails only at runtime.
   #[test]
   fn writes_the_plan_with_the_keys_swift_decodes() {
     let json = wire(&plan());

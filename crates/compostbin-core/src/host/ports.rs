@@ -21,10 +21,9 @@ use std::time::Duration;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const BUFFER_SIZE: usize = 16 * 1024;
 
-/// The guest end of the relay is `root:root` with this socket's mode copied
-/// verbatim, and the session runs as `claude`: anything short of
-/// world-accessible is refused inside the container. The session directory is
-/// what confines these, not the socket mode.
+/// The guest end of the relay is `root:root` with this mode copied, and the
+/// session runs as `claude`, so anything narrower is refused inside the
+/// container. The session directory confines these, not the socket mode.
 pub const SOCKET_MODE: u32 = 0o666;
 pub const SOCKET_SUFFIX: &str = ".sock";
 
@@ -61,12 +60,6 @@ pub struct Bound {
   listener: UnixListener,
 }
 
-impl Bound {
-  pub fn forward(&self) -> &Forward {
-    &self.forward
-  }
-}
-
 /// What the relay has to say, left to the caller to print: core does not own
 /// the terminal.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -93,17 +86,15 @@ impl std::fmt::Display for PortEvent {
   }
 }
 
-/// Whether something is already accepting on this socket — another agent
-/// serving the same session. A refused connection means a socket left behind by
-/// one that died, and a missing one means nothing has bound it yet; neither is
-/// anybody's.
+/// Whether another agent is already accepting on this socket. A refused
+/// connection (a socket left by a dead agent) or a missing socket means no.
 pub fn served(forward: &Forward) -> bool {
   UnixStream::connect(&forward.listen).is_ok()
 }
 
 /// Binds every forward, reporting each as it comes up. All or nothing: a
-/// container started with only some of its sockets would forward only some of
-/// its ports, and no restart short of recreating it would fix that.
+/// container started with some sockets missing forwards only some ports until
+/// it is recreated.
 pub fn bind_all(forwards: &[Forward], report: &(dyn Fn(PortEvent) + Sync)) -> io::Result<Vec<Bound>> {
   let mut bound = Vec::with_capacity(forwards.len());
 
@@ -156,8 +147,7 @@ pub fn relay(bound: &[Bound], stop: &AtomicBool, report: &(dyn Fn(PortEvent) + S
 
   std::thread::scope(|scope| {
     while !stop.load(Ordering::Relaxed) {
-      // Woken by a connection rather than swept for once an interval, which
-      // cost every guest connection up to `POLL_INTERVAL` before it was taken.
+      // Woken by a connection, so accepting never waits out `POLL_INTERVAL`.
       if !ready_to_accept(&mut waiting, POLL_INTERVAL) {
         continue;
       }
@@ -174,8 +164,8 @@ pub fn relay(bound: &[Bound], stop: &AtomicBool, report: &(dyn Fn(PortEvent) + S
 }
 
 /// Waits for a connection on any listener. `false` means the deadline passed,
-/// which is the caller's chance to re-check `stop`. A blocking `accept` would
-/// not do: it takes one socket, and only a connection ends it.
+/// so the caller can re-check `stop`; a blocking `accept` watches one socket and
+/// never times out.
 fn ready_to_accept(waiting: &mut [libc::pollfd], timeout: Duration) -> bool {
   // SAFETY: `waiting` is a live slice of the length passed, and each descriptor
   // belongs to a listener the caller holds across the call.
@@ -187,8 +177,8 @@ fn ready_to_accept(waiting: &mut [libc::pollfd], timeout: Duration) -> bool {
     )
   };
 
-  // `EINTR` is the likely error and looking again answers them all, but
-  // returning immediately would spin — so wait out the interval `poll` did not.
+  // Retrying handles any error (likely `EINTR`), but returning at once would
+  // spin, so wait out the interval `poll` did not.
   if ready < 0 {
     std::thread::sleep(timeout);
   }
@@ -233,18 +223,12 @@ fn connect(
 }
 
 /// The two ends of a relayed connection: a unix socket to the guest, a TCP
-/// stream to the service. Only four operations differ between them, and the
-/// copying below is the same either way.
-/// The two ends of a relayed connection: a unix socket to the guest, a TCP
-/// stream to the service. Only four operations differ between them, and the
-/// copying below is the same either way.
+/// stream to the service.
 ///
-/// `read_some` and `write_some` restate `Read` and `Write` for `&Self`, which
-/// both types already implement. Hoisting them into a `for<'a> &'a Self: Read +
-/// Write` bound on the trait does not carry to `splice` and `send`: a
-/// higher-ranked where-clause is not an implied bound, so all three callers
-/// would have to name the type parameter and restate it. That costs more than
-/// the delegation it saves.
+/// `read_some` and `write_some` restate `Read` and `Write` for `&Self`. A
+/// `for<'a> &'a Self: Read + Write` bound instead would not carry to `splice`
+/// and `send` (a higher-ranked where-clause is not an implied bound), so every
+/// caller would have to restate it.
 trait Stream: Sync {
   fn read_some(&self, buffer: &mut [u8]) -> io::Result<usize>;
   fn write_some(&self, data: &[u8]) -> io::Result<usize>;
@@ -507,8 +491,7 @@ mod tests {
     assert!(served(&forward));
   }
 
-  /// The socket another agent is still serving: this is what keeps a second
-  /// `run` from unbinding the session's live relay.
+  /// Keeps a second `run` from unbinding the session's live relay.
   #[test]
   fn served_is_true_only_while_something_accepts() {
     let directory = TempDir::new().expect("temp dir");
@@ -544,9 +527,8 @@ mod tests {
     });
   }
 
-  /// The bug this prevents: connections were swept for once an interval, so each
-  /// waited up to `POLL_INTERVAL` to be accepted. Timed because prompt and
-  /// eventual differ only in duration; the budget is a quarter of one sweep each.
+  /// Accepting must not wait for a `POLL_INTERVAL` sweep. Timed because prompt
+  /// and eventual differ only in duration; the budget is a quarter interval each.
   #[test]
   fn accepts_without_waiting_for_a_sweep() {
     const CONNECTIONS: u32 = 10;

@@ -20,9 +20,9 @@ impl Request {
     }
   }
 
-  /// One field per line, command first: the writer is a shell script, and what
-  /// `printf '%s\n'` emits has no escaping to get wrong. The cost is that an
-  /// argument may not contain a newline.
+  /// One field per line, command first: the writer is a shell script, and
+  /// `printf '%s\n'` has no escaping to get wrong. So no argument may contain a
+  /// newline.
   pub fn render(&self) -> Result<String, Refusal> {
     for field in std::iter::once(&self.command).chain(self.arguments.iter()) {
       if field.contains('\n') {
@@ -41,9 +41,8 @@ impl Request {
   }
 }
 
-/// The other half of `render`, and the only way a request is ever built from
-/// the wire: `text.parse()` at the agent, which is what the guest's shell
-/// script wrote into the spool.
+/// The inverse of `render`, and the only way a request is built from what the
+/// guest wrote into the spool.
 impl FromStr for Request {
   type Err = Refusal;
 
@@ -62,9 +61,17 @@ impl FromStr for Request {
   }
 }
 
-/// The argv to run, or why the request is refused. Pure, so the allowlist
-/// decision is testable without a filesystem or a container.
-pub fn resolve(commands: &BTreeMap<String, HostCommand>, request: &Request) -> Result<Vec<String>, Refusal> {
+/// A request the allowlist admits.
+#[derive(Debug, Eq, PartialEq)]
+pub struct Resolved {
+  pub argv: Vec<String>,
+  /// The command's `tty` flag, not yet whether it gets one.
+  pub tty: bool,
+}
+
+/// What to run, or why the request is refused. Pure, so the allowlist decision
+/// is testable without a filesystem or a container.
+pub fn resolve(commands: &BTreeMap<String, HostCommand>, request: &Request) -> Result<Resolved, Refusal> {
   let Some(command) = commands.get(&request.command) else {
     return Err(Refusal::UnknownCommand(request.command.clone()));
   };
@@ -89,14 +96,13 @@ pub fn resolve(commands: &BTreeMap<String, HostCommand>, request: &Request) -> R
 
   let mut argv = command.argv.clone();
   argv.extend(request.arguments.iter().cloned());
-  Ok(argv)
+  Ok(Resolved { argv, tty: command.tty })
 }
 
-/// This does not stop the guest running code on the host: it can edit the repo,
-/// and a command that builds the repo runs whatever is there. It stops a guest
-/// argument from swapping in configuration the user never reviewed. Matches
-/// every spelling that reaches the same place — `--config` and `--config=x`, and
-/// for a single-letter flag the joined `-Zx` too.
+/// Stops a guest argument from swapping in configuration the user never
+/// reviewed. Not a sandbox: the guest can edit the repo, and a command that
+/// builds it runs whatever is there. Matches `--config`, `--config=x`, and for
+/// a single-letter flag the joined `-Zx`.
 fn is_denied(deny: &[String], argument: &str) -> bool {
   deny.iter().any(|denied| {
     let short = denied.len() == 2 && denied.starts_with('-') && denied != "--";
@@ -114,7 +120,9 @@ mod tests {
   #[test]
   fn resolves_an_allowlisted_command_to_its_manifest_argv() {
     assert_eq!(
-      resolve(&allowlist(), &Request::new("test", Vec::new())).expect("should resolve"),
+      resolve(&allowlist(), &Request::new("test", Vec::new()))
+        .expect("should resolve")
+        .argv,
       ["cargo", "nextest", "run", "--workspace"]
     );
   }
@@ -137,7 +145,9 @@ mod tests {
       Err(Refusal::ArgumentsNotAllowed("test".to_string()))
     );
     assert_eq!(
-      resolve(&allowlist(), &Request::new("test-one", filter)).expect("should resolve"),
+      resolve(&allowlist(), &Request::new("test-one", filter))
+        .expect("should resolve")
+        .argv,
       ["cargo", "nextest", "run", "my_test"]
     );
   }
@@ -168,7 +178,8 @@ mod tests {
         &allowlist(),
         &Request::new("test-one", vec!["--configured".to_string()])
       )
-      .expect("should resolve"),
+      .expect("should resolve")
+      .argv,
       ["cargo", "nextest", "run", "--configured"]
     );
   }
@@ -180,7 +191,9 @@ mod tests {
     let commands = fixtures::commands(&[("run", &["tool"], true)]);
 
     assert_eq!(
-      resolve(&commands, &Request::new("run", vec!["-Zanything".to_string()])).expect("should resolve"),
+      resolve(&commands, &Request::new("run", vec!["-Zanything".to_string()]))
+        .expect("should resolve")
+        .argv,
       ["tool", "-Zanything"]
     );
   }
@@ -201,7 +214,9 @@ mod tests {
     );
 
     assert_eq!(
-      resolve(&commands, &Request::new("run", vec!["--verbose".to_string()])).expect("should resolve"),
+      resolve(&commands, &Request::new("run", vec!["--verbose".to_string()]))
+        .expect("should resolve")
+        .argv,
       ["tool", "--verbose"]
     );
   }

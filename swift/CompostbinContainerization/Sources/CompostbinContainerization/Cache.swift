@@ -120,8 +120,8 @@ struct Cache {
         }
     }
 
-    /// Whether every blob a descriptor leads to is still in the store. `reclaim`
-    /// may have deleted them if the tag went away.
+    /// Whether every blob under a descriptor is still stored; `reclaim` deletes
+    /// them once the tag is gone.
     static func holds(_ descriptor: Descriptor, in contentStore: ContentStore) async -> Bool {
         guard let content = try? await contentStore.get(digest: descriptor.digest),
             let index: Index = try? content.decode()

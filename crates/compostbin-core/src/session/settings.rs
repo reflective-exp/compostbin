@@ -29,12 +29,11 @@ const MAX_DEPTH: usize = 32;
 /// the host's `~/.claude` into the session's home, overwriting what is there. An
 /// entry may be a file (`CLAUDE.md`) or a directory (`skills`), copied whole.
 ///
-/// The host is authoritative: an edit there must reach the next session rather
-/// than being shadowed by a stale copy, which is why a shared directory is
-/// replaced rather than merged — a skill deleted on the host disappears from the
-/// session too. Everything else in the session home — history, projects, the
-/// refreshed token — is session state and is never overwritten from here. Names
-/// are joined as single components, so a manifest cannot escape with `../`.
+/// The host is authoritative, so a shared directory is replaced rather than
+/// merged: a skill deleted on the host disappears from the session too.
+/// Everything else in the session home (history, projects, the refreshed token)
+/// is never touched. Names must be single components, so a manifest cannot
+/// escape with `../`.
 pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<Vec<String>, PathError> {
   let mut names: Vec<String> = HOST_CLAUDE_SETTINGS
     .iter()

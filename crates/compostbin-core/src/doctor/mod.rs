@@ -1,8 +1,7 @@
 //! What to say when something about a session is wrong.
 //!
-//! One submodule per subject: the engine, what is mounted, and the ways out of
-//! the container. `diagnose` is the whole public surface — the checks stay
-//! internal, so the order they run in is decided in one place.
+//! `diagnose` is the whole public surface; the checks stay internal so their
+//! order is decided in one place.
 
 mod engine;
 mod host;
@@ -22,17 +21,15 @@ pub enum Status {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Check {
   pub detail: String,
-  /// The findings behind `detail`, when a check is about several things at once
-  /// — missing paths, dead symlinks, allowlisted commands. Kept out of the
-  /// sentence: a reader scans them down a column, and comma-separated they are
-  /// unreadable at the width a path already takes.
+  /// The findings behind `detail` (missing paths, dead symlinks, allowlisted
+  /// commands), kept out of the sentence so they print one per line.
   pub items: Vec<String>,
   pub name: String,
   pub status: Status,
 }
 
-/// Every check, in a fixed order. `api_key_present` is passed in rather than
-/// read here so the whole diagnosis is a pure function of its inputs.
+/// Every check, in a fixed order. `api_key_present` is passed in so the
+/// diagnosis depends only on its inputs.
 pub fn diagnose(
   session: &Session,
   engine: &impl Engine,
@@ -55,8 +52,7 @@ pub fn diagnose(
   ]
 }
 
-/// The one constructor, so every check reads as a name, a verdict, and a
-/// sentence explaining it.
+/// A name, a verdict, and a sentence explaining it.
 fn check(name: &str, status: Status, detail: impl Into<String>) -> Check {
   Check {
     detail: detail.into(),
@@ -66,8 +62,8 @@ fn check(name: &str, status: Status, detail: impl Into<String>) -> Check {
   }
 }
 
-/// A check whose sentence is a heading over a list. The items print under the
-/// sentence, not inside it, so it must say what they are without naming any.
+/// A check whose sentence heads a list, so it must describe the items without
+/// naming any.
 fn listed(name: &str, status: Status, detail: impl Into<String>, items: Vec<String>) -> Check {
   Check {
     items,
@@ -75,28 +71,17 @@ fn listed(name: &str, status: Status, detail: impl Into<String>, items: Vec<Stri
   }
 }
 
-/// Every case is driven through `diagnose` rather than the check it is about:
-/// order and completeness are part of what `doctor` promises, and a test calling
-/// one check directly would not notice it being dropped.
+/// Every case goes through `diagnose`, so a check dropped from it fails a test.
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::error::CredentialError;
   use crate::manifest::Manifest;
-  use crate::session::credentials::CREDENTIALS_FILE_NAME;
+  use crate::session::credentials::{CREDENTIALS_FILE_NAME, FakeSource};
   use crate::session::record::Record;
   use crate::workspace::paths::PathResolver;
   use compostbin_engine::fake::RecordingEngine;
   use std::path::Path;
   use tempfile::TempDir;
-
-  struct FakeSource(Option<String>);
-
-  impl CredentialSource for FakeSource {
-    fn read(&self) -> Result<Option<String>, CredentialError> {
-      Ok(self.0.clone())
-    }
-  }
 
   fn in_keychain() -> FakeSource {
     FakeSource(Some("token".to_string()))
@@ -130,14 +115,13 @@ mod tests {
     format!("\"{}\"", path.join(suffix).display())
   }
 
-  /// The findings alone, for cases that only care a check named what it found.
-  /// Layout is the CLI's business, so nothing here rebuilds a printed line.
+  /// The findings alone; layout is the CLI's business.
   fn findings(check: &Check) -> String {
     check.items.join("\n")
   }
 
-  /// A session boots from what is on disk, so an unreadable store is the whole
-  /// of the failure: there is nothing to start.
+  /// A session boots from the store on disk, so an unreadable one leaves
+  /// nothing to start.
   #[test]
   fn reports_a_store_it_cannot_read() {
     let home = TempDir::new().expect("temp dir");
@@ -443,8 +427,7 @@ mod tests {
     );
   }
 
-  /// The session keeps the mount set it was created with, so something has to
-  /// say the manifest moved on.
+  /// The container keeps the mounts it was created with.
   #[test]
   fn warns_when_the_running_container_predates_a_manifest_change() {
     let home = TempDir::new().expect("temp dir");
@@ -500,8 +483,7 @@ mod tests {
     assert_eq!(check(&checks, "container mounts").status, Status::Ok);
   }
 
-  /// Nothing has been started, so there is no mount set to disagree with, and a
-  /// fresh checkout must not be told to stop a container that does not exist.
+  /// A fresh checkout must not be told to stop a container that does not exist.
   #[test]
   fn says_nothing_is_running_rather_than_warning() {
     let home = TempDir::new().expect("temp dir");

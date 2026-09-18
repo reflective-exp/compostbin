@@ -1,15 +1,14 @@
 //! What the container that is running now was actually started with.
 //!
 //! Mounts cannot be added to a running container, and `run` attaches to a live
-//! one rather than recreating it. So a manifest edited mid-session is ignored
-//! until the session exits and `run` creates it again, which without a record
-//! looks like a broken feature.
+//! one rather than recreating it, so a manifest edited mid-session takes effect
+//! only on the next create. Without a record that looks like a broken feature.
 //!
 //! Recorded by whoever creates the container rather than asked of the engine:
-//! the mounts we passed are already ours, and not every engine can say what a
-//! running container was created with.
+//! not every engine can say what a running container was created with.
 
-use crate::error::{At, ManifestError};
+use crate::error::ManifestError;
+use crate::manifest::{read_toml_if_present, write_toml};
 use compostbin_engine::model::{Mount, SocketRelay};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -37,12 +36,9 @@ impl RecordedMount {
     }
   }
 
-  /// Recorded beside the mounts, and in the same shape.
-  ///
-  /// A relayed socket is not a mount, but it is fixed at creation exactly as a
-  /// mount is, and `doctor` has to say so when a declared port arrives after
-  /// the container did. Keeping both in one list is also what keeps the record
-  /// file's format unchanged.
+  /// Recorded beside the mounts, in the same shape: a relayed socket is not a
+  /// mount, but it is fixed at creation just as one is, and `doctor` has to say
+  /// so when a port is declared after the container started.
   fn of_socket(socket: &SocketRelay) -> Self {
     Self {
       readonly: false,
@@ -86,33 +82,13 @@ impl Record {
   /// `None` when there is no record, which is not an error: a state directory
   /// cleaned mid-session leaves nothing to compare against.
   pub fn load(path: &Path) -> Result<Option<Self>, ManifestError> {
-    let text = match std::fs::read_to_string(path).at(path) {
-      Ok(text) => text,
-      Err(error) if error.is_not_found() => return Ok(None),
-      Err(error) => return Err(error.into()),
-    };
-
-    toml::from_str(&text)
-      .map(Some)
-      .map_err(|source| ManifestError::Parse {
-        path: path.to_path_buf(),
-        source,
-      })
+    read_toml_if_present(path)
   }
 
   /// Creates the state directory, since `run` may be creating this project's
   /// first container.
   pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
-    let rendered = toml::to_string(self).map_err(|source| ManifestError::Render {
-      path: path.to_path_buf(),
-      source,
-    })?;
-
-    if let Some(parent) = path.parent() {
-      std::fs::create_dir_all(parent).at(parent)?;
-    }
-
-    Ok(std::fs::write(path, rendered).at(path)?)
+    write_toml(path, self)
   }
 
   /// How the manifest's mounts differ from the ones the container really has.
@@ -120,11 +96,7 @@ impl Record {
   /// Matched by guest path, since that is what a session reaches for: a mount
   /// whose source moved is a *changed* mount rather than a removal and an add.
   pub fn drift(&self, wanted: &[Mount], sockets: &[SocketRelay]) -> Drift {
-    let wanted: Vec<RecordedMount> = wanted
-      .iter()
-      .map(RecordedMount::of)
-      .chain(sockets.iter().map(RecordedMount::of_socket))
-      .collect();
+    let wanted = Self::of(wanted, sockets).mounts;
     let mut drift = Drift::default();
 
     for mount in &wanted {

@@ -2,12 +2,10 @@
 #
 # Prints the codesigning identity belonging to a team id.
 #
-# `codesign --sign` matches against a certificate's common name, and a team id
-# does not appear there — an "Apple Development: Name (XXXXXXXXXX)" certificate
-# carries its own certificate id in that position, not the team's. The team id
-# is the OU, so finding it means reading the certificate rather than the name.
-#
-# Its own script so it can be run, and checked, without signing anything.
+# `codesign --sign` matches the certificate's common name, which does not
+# contain the team id: the parenthesized id in "Apple Development: Name
+# (XXXXXXXXXX)" is the certificate's own. The team id is the OU, so this reads
+# each certificate's subject.
 
 set -e
 
@@ -16,8 +14,8 @@ team="${1:?usage: bin/dev/identity <team-id>}"
 security find-identity -v -p codesigning |
   sed -n 's/^ *[0-9]*) \([0-9A-F][0-9A-F]*\) "\(.*\)"$/\1 \2/p' |
   while read -r hash name; do
-    # Both `subject=CN=…, OU=…` and `subject= /CN=…/OU=…` reduce to one field
-    # per line, whichever openssl is on PATH.
+    # Splits both `subject=CN=…, OU=…` and `subject= /CN=…/OU=…` (the two
+    # openssl output styles) into one field per line.
     organizational_unit="$(
       security find-certificate -c "$name" -p 2>/dev/null |
         openssl x509 -noout -subject 2>/dev/null |

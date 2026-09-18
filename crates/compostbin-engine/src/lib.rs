@@ -1,11 +1,8 @@
-//! What a session asks of whatever runs containers, and what a build asks of
-//! whatever builds images.
+//! The engine and builder traits, their models, and the build cache keys.
 //!
-//! Traits and models, plus what any builder would compute the same way — the
-//! build cache keys. Nothing platform-specific, so everything generic over them
-//! — which is most of `compostbin-core` — stays testable against the fakes here
-//! and compiles anywhere. The one implementation lives in
-//! `containerization-framework-bridge`, and runs only on macOS.
+//! Platform-free, so code generic over them (most of `compostbin-core`)
+//! compiles anywhere and tests against the fakes here. The implementation is
+//! in `containerization-framework-bridge`, macOS only.
 
 pub mod builder;
 pub mod cache;

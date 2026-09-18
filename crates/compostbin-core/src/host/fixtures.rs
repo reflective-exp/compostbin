@@ -1,5 +1,4 @@
-//! Fixtures shared by the submodule tests: the allowlist and the spool, which
-//! every side of the bridge needs to be tested at all.
+//! Allowlist and spool fixtures shared by the submodule tests.
 
 use crate::host::Spool;
 use crate::manifest::HostCommand;
@@ -16,8 +15,7 @@ pub fn commands(entries: &[(&str, &[&str], bool)]) -> BTreeMap<String, HostComma
           arguments: *arguments,
           argv: argv.iter().copied().map(str::to_string).collect(),
           deny: Vec::new(),
-          // The pipe path, where the streams stay separate and can be asserted
-          // on independently.
+          // Pipes keep the streams separate, so each can be asserted on.
           tty: false,
         },
       )

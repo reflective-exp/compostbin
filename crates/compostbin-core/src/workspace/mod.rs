@@ -1,7 +1,7 @@
 //! Which host paths a session can see, and where they land in the guest.
 //!
-//! `paths` beneath turns what the manifest says into host paths; `danger` on top
-//! decides which of those should not be mounted at all.
+//! `paths` turns manifest strings into host paths; `danger` decides which of
+//! those should not be mounted at all.
 
 pub mod danger;
 pub mod paths;
@@ -10,18 +10,16 @@ use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Everything the session mounts lands under this one guest directory, so no
-/// host path — and so no host username or directory layout — is visible inside
-/// the container.
+/// Everything the session mounts lands under this guest directory, so no host
+/// path (username, directory layout) is visible inside the container.
 pub const WORKSPACE_TARGET: &str = "/workspace";
 
-/// Why a host path is in the workspace — all `ls` needs to explain a mount.
+/// Why a host path is in the workspace, as `ls` explains it.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Origin {
-  /// A `[[paths]]` entry: mounted because it was asked for by name.
+  /// A `[[paths]]` entry.
   Explicit,
-  /// A `[[paths]]` entry from the uncommitted local manifest — this checkout's
-  /// own, not the project's.
+  /// A `[[paths]]` entry from the uncommitted local manifest.
   Local,
   /// The directory `compostbin` was invoked in.
   Project,
@@ -38,44 +36,41 @@ pub struct Entry {
 }
 
 /// A host symlink inside a mounted tree whose target lies outside every mounted
-/// tree. It reads perfectly well on the host and is dead in the container, so
-/// the path exists and simply is not there.
+/// tree: live on the host, dangling in the container.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Escape {
   pub link: PathBuf,
   pub target: PathBuf,
 }
 
-/// The link and where it points, which is the whole of what `doctor` has to
-/// say about one — and is this type's shape rather than the reporter's.
+/// `link -> target`, which is all `doctor` says about one.
 impl fmt::Display for Escape {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(formatter, "{} -> {}", self.link.display(), self.target.display())
   }
 }
 
-/// What a walk of the mounted trees found. `exhausted` matters as much as the
-/// escapes: a root with a `target/` or `node_modules` under it has no useful
-/// bound, so the walk stops rather than costing a minute of `doctor`, and says so
-/// instead of reporting a clean tree it never finished reading.
+/// What a walk of the mounted trees found. A root with a `target/` or
+/// `node_modules` under it can take a minute to walk, so the walk stops at a
+/// limit and sets `exhausted` rather than reporting a clean tree it never
+/// finished reading.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Escapes {
   pub escapes: Vec<Escape>,
   pub exhausted: bool,
 }
 
-/// Directory entries `escaping_symlinks` will look at before giving up. Large
-/// enough for an ordinary source tree, small enough to stay imperceptible.
+/// Directory entries `escaping_symlinks` looks at before giving up: enough for
+/// an ordinary source tree, few enough to stay imperceptible.
 pub const WALK_LIMIT: usize = 50_000;
 
 /// The host paths a session exposes, each with the `/workspace` path it appears
 /// at in the guest.
 ///
-/// Not a symlink farm. Assembling one tree out of many by symlinking the real
-/// projects into a session directory does not work: a host symlink pointing out
-/// of a mounted tree dangles in the container. So each entry is its own bind
-/// mount, assembled in the argv — which is why adding a path requires recreating
-/// the container.
+/// Each entry is its own bind mount, not a symlink into one mounted session
+/// directory, since a host symlink pointing out of a mounted tree dangles in
+/// the container. Mounts are fixed at creation, so adding a path requires
+/// recreating the container.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Workspace {
   entries: Vec<Entry>,
@@ -87,9 +82,8 @@ impl Workspace {
   }
 
   /// Adds `host` under a `/workspace` name derived from its basename, or at
-  /// `target` when one was declared. Later entries never take a name an earlier
-  /// one holds — a second `libfoo` becomes `libfoo-2` — so two projects sharing a
-  /// basename can both be mounted.
+  /// `target` when one was declared. A repeated basename is suffixed (`libfoo`,
+  /// `libfoo-2`), so both can be mounted.
   pub fn push(&mut self, host: impl Into<PathBuf>, target: Option<PathBuf>, origin: Origin, readonly: bool) {
     let host = host.into();
     let guest = match target {
@@ -109,8 +103,8 @@ impl Workspace {
     &self.entries
   }
 
-  /// The guest path for a host path in or under one of the entries. `None` when
-  /// nothing mounted covers it, which no guess can fix.
+  /// The guest path for a host path in or under one of the entries, or `None`
+  /// when nothing mounted covers it.
   pub fn guest_path(&self, host: &Path) -> Option<PathBuf> {
     self.entries.iter().find_map(|entry| {
       host
@@ -122,10 +116,9 @@ impl Workspace {
 
   /// Every symlink in a mounted tree that escapes every mounted tree.
   ///
-  /// Symlinks are found, never followed: a link to a directory is reported and
-  /// not descended into, which bounds the walk against cycles and matches what
-  /// the container sees. A link broken on the host too is skipped — equally
-  /// broken in both places is not a divergence.
+  /// Symlinks are never followed, which guards against cycles and matches what
+  /// the container sees. A link broken on the host too is skipped: it is not a
+  /// divergence.
   pub fn escaping_symlinks(&self, limit: usize) -> Escapes {
     let mut found = Escapes::default();
     let mut budget = limit;
@@ -164,8 +157,7 @@ impl Workspace {
     found
   }
 
-  /// Each mounted tree once: an entry inside another, or repeating one, is
-  /// already covered by the walk of the outer tree.
+  /// Each mounted tree once, dropping entries nested in or repeating another.
   fn outermost(&self) -> BTreeSet<PathBuf> {
     self
       .entries
@@ -182,8 +174,7 @@ impl Workspace {
   }
 
   /// `<basename>`, or `<basename>-2`, `-3`, … if taken. A path with no basename
-  /// (`/`) is named `root`, which `doctor` complains about long before it is
-  /// mounted.
+  /// (`/`) is named `root`; `doctor` flags mounting it anyway.
   fn unique_name(&self, host: &Path) -> String {
     let base = host
       .file_name()
@@ -293,8 +284,8 @@ mod tests {
     );
   }
 
-  /// The project directory usually sits inside a root, and a hand-edited
-  /// `[[paths]]` entry can too: its links are still one set of links.
+  /// The project, or a `[[paths]]` entry, often sits inside a root; its links
+  /// are reported once.
   #[test]
   fn walks_a_nested_entry_once() {
     let (_temp, root) = temp_root();

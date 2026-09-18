@@ -6,15 +6,14 @@ use crate::host::served;
 use crate::session::Session;
 use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialSource, KEYCHAIN_SERVICE};
 use compostbin_engine::engine::Engine;
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
-/// Loopback answers or refuses at once; this only bounds a service that accepts
-/// nothing, and `doctor` must not hang on one.
+/// Loopback answers or refuses at once; this only keeps `doctor` from hanging
+/// on a service that accepts nothing.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// Every allowlisted command runs on the host with the user's own privileges,
-/// so this is where that stops being invisible.
+/// Lists every allowlisted command, since each runs on the host as the user.
 pub fn allowlist(session: &Session) -> Check {
   if !session.manifest.host.has_commands() {
     return check(
@@ -43,22 +42,22 @@ pub fn allowlist(session: &Session) -> Check {
   )
 }
 
-/// Declared ports, and whether anything is actually listening behind each one.
-/// A forward whose service is down is not an error — the service may start
-/// later — but it is the likeliest reason a guest's `localhost:<port>` refuses,
-/// and nothing else would say so.
+/// Declared ports, and whether anything listens behind each. A down service is
+/// a warning, not an error (it may start later), but it is the likeliest reason
+/// a guest's `localhost:<port>` refuses.
 ///
-/// Reach is not reported because there is none to report: each port travels
-/// through a socket in the session directory, relayed into this container alone.
+/// Each port is relayed into this container alone, so there is no wider reach
+/// to report.
 pub fn ports(session: &Session, engine: &impl Engine) -> Check {
   if !session.manifest.host.has_ports() {
     return check("host ports", Status::Ok, "no [host] ports: nothing is forwarded");
   }
 
-  // The one failure the record cannot show: the container is up and mounted
-  // correctly, and the relay holding the other end of its sockets has died.
-  // Nothing rebinds its way back in, so this is the only warning of it.
-  if session.is_running(engine).unwrap_or(false) && !session.forwards().iter().all(served) {
+  // The container is up and mounted correctly, but the relay holding its
+  // sockets has died. The record cannot show this, and rebinding cannot fix it.
+  let forwards = session.forwards();
+
+  if session.is_running(engine).unwrap_or(false) && !forwards.iter().all(served) {
     return check(
       "host ports",
       Status::Warn,
@@ -69,12 +68,9 @@ pub fn ports(session: &Session, engine: &impl Engine) -> Check {
     );
   }
 
-  let probed: Vec<(u16, bool)> = session
-    .manifest
-    .host
-    .ports
+  let probed: Vec<(u16, bool)> = forwards
     .iter()
-    .map(|&port| (port, answering(port)))
+    .map(|forward| (forward.port(), answering(forward.upstream)))
     .collect();
 
   let idle = probed.iter().any(|(_, answering)| !answering);
@@ -97,8 +93,8 @@ pub fn ports(session: &Session, engine: &impl Engine) -> Check {
   )
 }
 
-fn answering(port: u16) -> bool {
-  TcpStream::connect_timeout(&SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port), PROBE_TIMEOUT).is_ok()
+fn answering(upstream: SocketAddr) -> bool {
+  TcpStream::connect_timeout(&upstream, PROBE_TIMEOUT).is_ok()
 }
 
 pub fn credentials(session: &Session, source: &impl CredentialSource, api_key_present: bool) -> Check {

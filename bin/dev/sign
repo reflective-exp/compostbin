@@ -3,15 +3,13 @@
 # Signs a built binary with the virtualization entitlement.
 #
 # Virtualization.framework refuses to start a VM without
-# `com.apple.security.virtualization`, and a signature does not survive a
-# rebuild, so every build path calls this.
+# `com.apple.security.virtualization`, and a rebuild drops the signature, so
+# every build path calls this.
 #
-# With DEVELOPMENT_TEAM set — .envrc requires it — the binary is signed with
-# that team's identity rather than ad hoc. Ad hoc is enough for the entitlement,
-# and is what Apple's own containerization and container Makefiles use, but it
-# gives the binary a new code identity on every rebuild. The keychain is what
-# notices: compostbin reads Claude's credentials from it, so an ad-hoc build
-# asks for access again every time it is rebuilt.
+# With DEVELOPMENT_TEAM set, signs with that team's identity instead of ad hoc.
+# Ad hoc satisfies the entitlement (Apple's containerization and container
+# Makefiles use it), but gives the binary a new code identity on every rebuild,
+# so the keychain prompts again for access to Claude's credentials.
 
 set -e
 

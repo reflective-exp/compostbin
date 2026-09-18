@@ -1,13 +1,11 @@
-//! How a diagnosis is printed. Core decides what is wrong and what to do about
-//! it, the same wherever it is reported; columns and indentation mean something
-//! only in a terminal, so they stop here.
+//! Terminal rendering of a diagnosis. Core decides what's wrong; layout is
+//! only meaningful in a terminal.
 
 use compostbin_core::doctor::{Check, Status};
 use std::fmt::{Display, Formatter, Result};
 
-/// Every check, as the terminal shows it. A newtype because `Display` cannot be
-/// implemented on core's `Check` here; it also makes the whole report one value
-/// a test can assert on.
+/// Every check, as the terminal shows it. A newtype for the orphan rule, and
+/// so the whole report is one assertable value.
 pub struct Diagnosis<'a>(pub &'a [Check]);
 
 impl Display for Diagnosis<'_> {
@@ -21,8 +19,8 @@ impl Display for Diagnosis<'_> {
 
       writeln!(formatter, "{label}  {}: {}", check.name, check.detail)?;
 
-      // Indented under the check rather than aligned past the label: a finding
-      // is usually a path, and padding costs it columns.
+      // Indented, not aligned past the label: findings are usually paths and
+      // need the columns.
       for item in &check.items {
         writeln!(formatter, "    {item}")?;
       }
@@ -53,7 +51,7 @@ mod tests {
     );
   }
 
-  /// Why `items` exists: a check about several paths is unreadable as one line.
+  /// A check about several paths is unreadable as one line.
   #[test]
   fn prints_each_finding_on_its_own_line_under_the_check() {
     assert_eq!(

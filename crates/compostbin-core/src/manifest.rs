@@ -1,10 +1,11 @@
 use crate::error::{At, ManifestError};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Session state, keyed by container name: Claude's home, which persists so
-/// `--continue` works, beside the spool, which `clean` removes.
+/// Session state, keyed by container name: Claude's home, kept so `--continue`
+/// works, beside transient state that `clean` empties.
 pub const SESSIONS_DIR: &str = "~/.local/state/compostbin/sessions";
 pub const DEFAULT_CONTAINER_CPUS: u32 = 4;
 pub const DEFAULT_CONTAINER_MEMORY: Memory = Memory::gibibytes(8);
@@ -12,9 +13,6 @@ pub const DEFAULT_HOST_CONCURRENCY: usize = 8;
 pub const DEFAULT_IMAGE: &str = "compostbin/base:latest";
 /// Checked in beside the project it configures.
 pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
-/// Beside the manifest, and deliberately not checked in: one developer's own
-/// `[[paths]]`, which the rest of the project has no reason to mount.
-pub const LOCAL_MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.local.toml";
 /// The host command `[host] clipboard` serves, and what the guest's `pbcopy`,
 /// `xclip`, `xsel` and `wl-copy` send.
 pub const CLIPBOARD_COMMAND: &str = "clipboard";
@@ -25,16 +23,14 @@ const CLIPBOARD_ARGV: &[&str] = &["pbcopy"];
 pub struct Manifest {
   pub claude: ClaudeConfig,
   pub container: ContainerConfig,
-  /// Skipped when empty, so a manifest that declares no host commands renders
-  /// no table.
+  /// Skipped when empty, so a manifest with no host access renders no table.
   #[serde(skip_serializing_if = "HostConfig::is_empty")]
   pub host: HostConfig,
-  /// Per-project additions to the base image, skipped when empty so a project
-  /// that needs nothing renders no table.
+  /// Per-project additions to the base image; skipped when empty.
   #[serde(skip_serializing_if = "ImageConfig::is_empty")]
   pub image: ImageConfig,
-  /// Both files' entries, each knowing which one it came from; rendering keeps
-  /// only the ones that belong to the file being written.
+  /// Both files' entries; rendering keeps only those belonging to the file
+  /// being written.
   #[serde(
     serialize_with = "PathEntry::serialize_shared",
     skip_serializing_if = "PathEntry::none_shared"
@@ -65,16 +61,9 @@ impl Manifest {
   /// Missing is the normal case — most checkouts have no local manifest — so
   /// only a file that exists and does not parse is an error.
   fn parse_local(path: &Path) -> Result<Vec<PathEntry>, ManifestError> {
-    let text = match std::fs::read_to_string(path).at(path) {
-      Ok(text) => text,
-      Err(error) if error.is_not_found() => return Ok(Vec::new()),
-      Err(error) => return Err(error.into()),
+    let Some(local) = read_toml_if_present::<LocalManifest>(path)? else {
+      return Ok(Vec::new());
     };
-
-    let local: LocalManifest = toml::from_str(&text).map_err(|source| ManifestError::Parse {
-      path: path.to_path_buf(),
-      source,
-    })?;
 
     Ok(
       local
@@ -86,8 +75,7 @@ impl Manifest {
   }
 
   /// Writes the local `[[paths]]` beside the manifest, leaving the committed
-  /// file alone. Removes the file when nothing local is left, so an emptied
-  /// overlay does not linger as an empty one.
+  /// file alone. Removes the local file when nothing local is left.
   pub fn save_local(&self, manifest_path: &Path) -> Result<(), ManifestError> {
     let path = local_path(manifest_path);
     let local = LocalManifest {
@@ -106,31 +94,44 @@ impl Manifest {
       };
     }
 
-    let rendered = toml::to_string(&local).map_err(|source| ManifestError::Render {
-      path: path.clone(),
-      source,
-    })?;
-
-    if let Some(parent) = path.parent() {
-      std::fs::create_dir_all(parent).at(parent)?;
-    }
-
-    Ok(std::fs::write(&path, rendered).at(&path)?)
+    write_toml(&path, &local)
   }
 
   /// Creates the parent directory, so `init` works in a project with no `.config`.
   pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
-    let rendered = toml::to_string(self).map_err(|source| ManifestError::Render {
+    write_toml(path, self)
+  }
+}
+
+/// `None` when the file is missing; a file that exists and does not parse is
+/// an error.
+pub(crate) fn read_toml_if_present<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, ManifestError> {
+  let text = match std::fs::read_to_string(path).at(path) {
+    Ok(text) => text,
+    Err(error) if error.is_not_found() => return Ok(None),
+    Err(error) => return Err(error.into()),
+  };
+
+  toml::from_str(&text)
+    .map(Some)
+    .map_err(|source| ManifestError::Parse {
       path: path.to_path_buf(),
       source,
-    })?;
+    })
+}
 
-    if let Some(parent) = path.parent() {
-      std::fs::create_dir_all(parent).at(parent)?;
-    }
+/// Creates the parent directory first.
+pub(crate) fn write_toml<T: Serialize>(path: &Path, value: &T) -> Result<(), ManifestError> {
+  let rendered = toml::to_string(value).map_err(|source| ManifestError::Render {
+    path: path.to_path_buf(),
+    source,
+  })?;
 
-    Ok(std::fs::write(path, rendered).at(path)?)
+  if let Some(parent) = path.parent() {
+    std::fs::create_dir_all(parent).at(parent)?;
   }
+
+  Ok(std::fs::write(path, rendered).at(path)?)
 }
 
 /// The uncommitted manifest beside a committed one: `[[paths]]` and nothing
@@ -153,14 +154,13 @@ fn local_path(manifest_path: &Path) -> PathBuf {
 #[serde(default, deny_unknown_fields)]
 pub struct ClaudeConfig {
   /// Overrides the per-session default under `SESSIONS_DIR`. Normally unset:
-  /// sharing one home between projects would make `--continue` resume whichever
-  /// project spoke last.
+  /// a home shared between projects makes `--continue` resume whichever ran
+  /// last.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub home: Option<String>,
   pub seed_from_keychain: bool,
-  /// Extra `~/.claude` entries — files or whole directories — this project wants
-  /// beyond the host settings every session already gets. Skipped when empty, so
-  /// a manifest says nothing about sharing until it has something to add.
+  /// Extra `~/.claude` entries (files or whole directories) beyond the host
+  /// settings every session already gets. Skipped when empty.
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub shared: Vec<String>,
 }
@@ -198,10 +198,9 @@ impl Default for ContainerConfig {
   }
 }
 
-/// A size in bytes, written the way a manifest writes it: `8G`, `512M`,
-/// `1024K`, or a bare number of bytes. Parsed as the manifest loads, so a typo
-/// is an error naming the file rather than a session quietly given some other
-/// size.
+/// A size in bytes, written `8G`, `512M`, `1024K`, or a bare byte count. Parsed
+/// as the manifest loads, so a typo is an error naming the file rather than a
+/// session quietly given some other size.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Memory(u64);
@@ -277,32 +276,30 @@ impl std::fmt::Display for Memory {
   }
 }
 
-/// Commands the guest may ask the host to run, keyed by the name it sends. A map
-/// because the name is a lookup key, and a `BTreeMap` because rendering
-/// alphabetically keeps diffs deterministic.
+/// The guest's paths to the host: commands, the clipboard, and ports.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HostConfig {
-  /// Lets the guest's clipboard tools write to the host's pasteboard, by serving
-  /// `clipboard` as though it were declared. Off by default: whatever the guest
-  /// copies, the user may later paste into a host terminal. Write-only, so
-  /// nothing on the host clipboard reaches the guest.
+  /// Lets the guest's clipboard tools write to the host's pasteboard by serving
+  /// `clipboard` as though declared. Off by default: whatever the guest copies,
+  /// the user may later paste into a host terminal. Write-only.
   ///
-  /// A bare value, so before `commands` for the same reason as `concurrency`.
+  /// A bare value, so before `commands` (see `concurrency`).
   #[serde(skip_serializing_if = "std::ops::Not::not")]
   pub clipboard: bool,
-  /// How many may run at once: subagents call `compostbin-host` independently,
-  /// and the bound stops a guest looping on submissions from spawning unlimited
-  /// work.
+  /// How many commands may run at once: subagents call `compostbin-host`
+  /// independently, and the bound stops a looping guest spawning unlimited work.
   ///
-  /// Declared before `commands`, against this table's alphabetical order, and it
-  /// must stay there: TOML cannot express a bare value after a table.
+  /// Must stay declared before `commands`, against alphabetical order: TOML
+  /// cannot express a bare value after a table.
   pub concurrency: usize,
   /// Host loopback ports the guest reaches at its own `localhost`, each relayed
   /// through a unix socket carried into this container alone. A bare value, so
-  /// before `commands` for the same reason as `concurrency`.
+  /// before `commands` (see `concurrency`).
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub ports: Vec<u16>,
+  /// Commands the guest may ask the host to run, keyed by the name it sends. A
+  /// `BTreeMap` so rendering is alphabetical and diffs deterministic.
   pub commands: BTreeMap<String, HostCommand>,
 }
 
@@ -375,9 +372,8 @@ pub struct HostCommand {
   pub tty: bool,
 }
 
-/// Per-project image additions, for what belongs to one project rather than
-/// every project. Non-empty means the session runs a derived image
-/// built `FROM` the base; empty means it runs the base image itself.
+/// Per-project image additions. Non-empty means the session runs a derived
+/// image built on the base; empty means it runs the base itself.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ImageConfig {
@@ -401,9 +397,8 @@ impl ImageConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathEntry {
-  /// Which file the entry came from, never written: an entry belongs to the
-  /// local manifest or the committed one, and the file it is written back to is
-  /// what says so.
+  /// Whether the entry came from the local manifest. Never serialized: the file
+  /// it is written back to says so.
   #[serde(skip)]
   pub local: bool,
   #[serde(default)]
@@ -426,9 +421,8 @@ impl PathEntry {
     Self::sort_by_source(entries.iter().collect()).serialize(serializer)
   }
 
-  /// The committed manifest's own entries. Local ones are dropped rather than
-  /// rendered, so saving a manifest loaded with an overlay writes back what it
-  /// read.
+  /// The committed manifest's own entries. Local ones are dropped, so saving a
+  /// manifest loaded with an overlay writes back what it read.
   fn serialize_shared<S: Serializer>(entries: &[PathEntry], serializer: S) -> Result<S::Ok, S::Error> {
     Self::sort_by_source(entries.iter().filter(|entry| !entry.local).collect()).serialize(serializer)
   }

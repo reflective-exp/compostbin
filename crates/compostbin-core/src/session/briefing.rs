@@ -1,15 +1,13 @@
 //! What a session is told about itself, mounted read-only as Claude's managed
 //! settings.
 //!
-//! A container looks like an ordinary Debian box from the inside: nothing about
-//! `/workspace` says the toolchain is missing on purpose, or that `compostbin-host`
-//! is the way out to the host. So the session says it, on every start, from the
-//! manifest — generated rather than written by hand, because prose repeating an
-//! allowlist drifts from it.
+//! From the inside a container looks like an ordinary Debian box: nothing says
+//! the toolchain is missing on purpose, or that `compostbin-host` is the way out
+//! to the host. So every start says it, generated from the manifest, because
+//! hand-written prose repeating an allowlist drifts from it.
 //!
-//! Managed settings rather than `settings.json`, which `settings::share` copies
-//! from the host's `~/.claude` and would overwrite; that file is the user's, and
-//! this is not.
+//! Managed settings rather than `settings.json`, which is the user's and which
+//! `settings::share` overwrites from the host.
 
 use crate::error::{At, PathError};
 use crate::manifest::{CLIPBOARD_COMMAND, MANIFEST_RELATIVE_PATH, Manifest};
@@ -77,8 +75,8 @@ pub fn briefing(manifest: &Manifest) -> String {
   let width = commands.keys().map(String::len).max().unwrap_or_default();
 
   for (name, command) in &commands {
-    // The argv is what actually runs, and knowing it is what makes the name
-    // mean something; the notes are the two ways a command differs from exact.
+    // The argv gives the name its meaning; the notes are the two ways a command
+    // can differ from exact.
     let mut notes = Vec::new();
     if command.arguments {
       notes.push("takes further arguments");
@@ -116,9 +114,8 @@ pub fn briefing(manifest: &Manifest) -> String {
   text
 }
 
-/// The host services this session can reach, which a guest would otherwise have
-/// no way to know are there: nothing in the container says why `localhost:7001`
-/// answers when nothing in the container is listening on it.
+/// The host services this session can reach, which the guest could not
+/// otherwise discover: nothing in it explains why `localhost:7001` answers.
 fn ports(manifest: &Manifest) -> String {
   if !manifest.host.has_ports() {
     return String::new();

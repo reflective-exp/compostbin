@@ -1,8 +1,8 @@
 #!/bin/sh
 # Ask the host to run an allowlisted command and behave as though this shell had
 # run it: stdin goes to it, stdout and stderr come back on ours, we exit with its
-# status. A shell script rather than compostbin itself, the container being Linux
-# and compostbin a macOS binary; it speaks the spool protocol in `host`.
+# status. A shell script because the container is Linux and compostbin a macOS
+# binary; it speaks the spool protocol in `host`.
 #
 # Output arrives as numbered chunks, not a stream we watch grow: a file observed
 # here while the host appends to it stays stale forever. Each chunk is renamed
@@ -66,7 +66,9 @@ printf '%s\n' "$@" > "$spool/requests/$id.partial"
 mv "$spool/requests/$id.partial" "$spool/requests/$id.request"
 
 # Status is published last, so checking it *before* draining means the drain that
-# follows sees every chunk.
+# follows sees every chunk. Polled quickly at first, so a short command returns
+# promptly, then backing off to 0.1s.
+delay=0.01
 while :; do
   finished=0
   if [ -f "$status" ]; then
@@ -80,7 +82,12 @@ while :; do
     break
   fi
 
-  sleep 0.1
+  sleep "$delay"
+  case "$delay" in
+    0.01) delay=0.02 ;;
+    0.02) delay=0.05 ;;
+    *) delay=0.1 ;;
+  esac
 done
 
 code=$(cat "$status")

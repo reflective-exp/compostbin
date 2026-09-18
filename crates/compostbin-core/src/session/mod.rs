@@ -28,12 +28,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const CLAUDE_HOME_TARGET: &str = "/home/claude/.claude";
 /// Under the session state directory: kept, because `claude --continue` reads it.
 pub const CLAUDE_HOME_DIR: &str = "claude-home";
-/// Under the session state directory: emptied by `clean`, holding only requests
-/// in flight. Emptied and not removed — the container mounts it.
+/// Under the session state directory: requests in flight. `clean` empties it
+/// rather than removing it, because the container mounts it.
 pub const SPOOL_DIR: &str = "host";
-/// Under the session state directory: one bound socket per declared port, which
-/// live exactly as long as the container created with them. Both belong to the
-/// `run` that created it.
+/// Under the session state directory: one bound socket per declared port,
+/// owned by the `run` that created the container and living exactly as long.
 pub const PORTS_DIR: &str = "ports";
 /// Where the relay says what it could not, while a session is attached.
 pub const PORTS_LOG: &str = "ports.log";
@@ -165,8 +164,7 @@ impl Session {
     AddOutcome::NeedsRestart
   }
 
-  /// Resolves a manifest path string against this session's cwd and home, so
-  /// callers need no `PathResolver` of their own.
+  /// Resolves a manifest path string against this session's cwd and home.
   pub fn resolve(&self, raw: &str) -> PathBuf {
     self.resolver.resolve(raw)
   }
@@ -196,9 +194,8 @@ impl Session {
       .join(self.container_name())
   }
 
-  /// What `clean` may delete: state that means nothing once the
-  /// container is gone. Not Claude's home — that holds the conversation
-  /// `--continue` reattaches to.
+  /// What `clean` may delete: state meaningless once the container is gone. Not
+  /// Claude's home, which holds the conversation `--continue` reattaches to.
   fn transient_state(&self) -> Vec<PathBuf> {
     vec![
       self.host_spool(),
@@ -212,10 +209,9 @@ impl Session {
   /// session directory whole. Missing paths are not an error: `clean` exists
   /// because an earlier exit may not have run.
   ///
-  /// Emptied rather than removed, because the container may still be running
-  /// and every one of these paths is a mount source (§`clear`). `--all` is the
-  /// exception: it discards the conversation too, so the session it belonged to
-  /// is over by definition.
+  /// Emptied rather than removed: the container may still be running, and each
+  /// of these paths is a mount source (§`clear`). `everything` is the exception:
+  /// it discards the conversation, so the session is over by definition.
   pub fn clean(&self, everything: bool) -> Result<Vec<PathBuf>, PathError> {
     if everything {
       let state = self.state_dir();
@@ -249,10 +245,9 @@ impl Session {
   /// What the `run` that created the container clears when Claude exits: only
   /// the spool, so nothing claimed outlives the agent that claimed it.
   ///
-  /// Emptied rather than removed, because until this process exits the
-  /// container is still holding that mount (§`clear`). The rest of the transient
-  /// state is left for the next create, which binds the sockets and writes the
-  /// managed settings again anyway.
+  /// Emptied rather than removed: until this process exits the container still
+  /// holds that mount (§`clear`). The rest is left for the next create, which
+  /// rebinds the sockets and rewrites the managed settings anyway.
   fn clean_after_exit(&self) -> Result<Vec<PathBuf>, PathError> {
     let spool = self.host_spool();
     if !spool.exists() {
@@ -318,8 +313,7 @@ impl Session {
       })
       .collect();
 
-    // With no allowlist there is no channel at all, rather than an empty one.
-    if self.manifest.host.has_commands() {
+    if self.spool().is_some() {
       mounts.push(Mount {
         readonly: false,
         source: self.host_spool(),
@@ -345,14 +339,11 @@ impl Session {
     mounts
   }
 
-  /// Where the session lands inside the container. The fallback to `/workspace`
-  /// keeps a misconfigured manifest from starting in an unmounted directory.
-  /// One socket per declared port, carried into the guest rather than mounted
-  /// there, and named after the port so the guest's relay finds it without
-  /// being told where to look.
+  /// One socket per declared port, relayed into the guest rather than mounted,
+  /// and named after the port so the guest's relay finds it unprompted.
   ///
-  /// Each has to be a live socket by the time the container is created, which
-  /// is why `run` starts the relay that binds them first.
+  /// Each must be a live socket when the container is created, which is why
+  /// `run` binds them first.
   pub fn sockets(&self) -> Vec<SocketRelay> {
     self
       .forwards()
@@ -370,6 +361,8 @@ impl Session {
       .collect()
   }
 
+  /// Where the session lands inside the container. The `/workspace` fallback
+  /// keeps a misconfigured manifest from starting in an unmounted directory.
   pub fn workdir(&self) -> PathBuf {
     self
       .workspace()
@@ -383,21 +376,29 @@ impl Session {
     self.state_dir().join(SPOOL_DIR)
   }
 
+  /// The spool at `host_spool`, or `None` with no commands declared: with no
+  /// allowlist there is no channel at all, rather than an empty one.
+  fn spool(&self) -> Option<Spool> {
+    self
+      .manifest
+      .host
+      .has_commands()
+      .then(|| Spool::new(self.host_spool()))
+  }
+
   /// Where this session's port sockets are bound. Inside the session directory
-  /// for the same reason as the spool: the directory is what confines them, the
-  /// socket mode cannot be (the guest end is root-owned, and the session is
-  /// not).
+  /// because the directory is what confines them: socket mode cannot (the guest
+  /// end is root-owned, the session is not).
   pub fn port_sockets(&self) -> PathBuf {
     self.state_dir().join(PORTS_DIR)
   }
 
   /// Where the relay writes once Claude is attached.
   ///
-  /// A file rather than the terminal, because by then the terminal is Claude's:
-  /// the relay runs on a thread of `run`, and anything it printed would land in
-  /// the middle of what Claude is drawing. A host service that has not started
-  /// yet is an ordinary state — `[host.commands]` is one of the ways it starts
-  /// — so the first connection to refuse must not look like a fault.
+  /// A file, because by then the terminal is Claude's: the relay runs on a
+  /// thread of `run`, and anything it printed would land mid-draw. A host
+  /// service not yet started is ordinary (`[host.commands]` may start it), so a
+  /// refused connection must not look like a fault.
   pub fn ports_log(&self) -> PathBuf {
     self.state_dir().join(PORTS_LOG)
   }
@@ -473,11 +474,10 @@ impl Session {
   /// The mount source must exist before the container starts, and the guest
   /// cannot create it. A no-op with no commands declared.
   pub fn prepare_host_spool(&self) -> Result<(), PathError> {
-    if !self.manifest.host.has_commands() {
-      return Ok(());
+    match self.spool() {
+      Some(spool) => spool.create(),
+      None => Ok(()),
     }
-
-    Spool::new(self.host_spool()).create()
   }
 
   /// Where the container's creation-time mounts are recorded, so `doctor` can
@@ -502,8 +502,8 @@ impl Session {
 
     // Every guest client that could still be waiting on a response died with the
     // container this one replaces, so their leftovers are now provably nobody's.
-    if self.manifest.host.has_commands() {
-      Spool::new(self.host_spool()).sweep()?;
+    if let Some(spool) = self.spool() {
+      spool.sweep()?;
     }
 
     engine.run(&spec)?;
@@ -512,9 +512,9 @@ impl Session {
     Ok(())
   }
 
-  /// Whether the container is already up, and so whether `run` will attach to
-  /// it rather than create it. Asked before starting by anything whose work
-  /// belongs to the container's creation — binding the port sockets, above all.
+  /// Whether the container is up, and so whether `run` will attach rather than
+  /// create. Anything whose work belongs to creation (binding the port sockets,
+  /// above all) must ask first.
   pub fn is_running(&self, engine: &impl Engine) -> Result<bool, SessionError> {
     Ok(engine.is_running(&self.container_name())?)
   }
@@ -547,9 +547,8 @@ impl Session {
     self.launch(engine, arguments, notify)
   }
 
-  /// Seeds Claude's token and shares the host's own settings into Claude's
-  /// home, the source side of a mount, and so reachable whether or not the
-  /// container is up yet.
+  /// Seeds Claude's token and shares the host's settings into Claude's home: a
+  /// mount source, so reachable whether or not the container is up.
   fn prepare(&self, credentials: &impl CredentialSource, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
     let seeded = credentials::seed(
       &self.claude_home(),
@@ -597,15 +596,15 @@ impl Session {
     self.create(engine, notify)?;
 
     let stop = AtomicBool::new(false);
-    let spool = Spool::new(self.host_spool());
+    let spool = self.spool();
     let log = self.ports_log();
     let log_port = |event: PortEvent| append_to_log(&log, &event);
 
     let code = std::thread::scope(|scope| {
-      if self.manifest.host.has_commands() {
+      if let Some(spool) = &spool {
         scope.spawn(|| {
           if let Err(error) = host::serve(
-            &spool,
+            spool,
             &self.manifest.host.served_commands(),
             &self.project_dir,
             self.manifest.host.concurrency,
@@ -719,6 +718,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::session::credentials::FakeSource;
   use compostbin_engine::fake::{Call, RecordingEngine};
   use std::os::unix::fs::{FileTypeExt, MetadataExt};
   use tempfile::TempDir;
@@ -758,20 +758,11 @@ source   = "~/.cargo/registry"
     )
   }
 
-  /// A Keychain with nothing in it: `run` says so and carries on.
-  struct NoToken;
-
-  impl CredentialSource for NoToken {
-    fn read(&self) -> Result<Option<String>, crate::error::CredentialError> {
-      Ok(None)
-    }
-  }
-
   fn quiet(_: Notice) {}
 
   fn run(session: &Session, engine: &RecordingEngine) -> i32 {
     session
-      .run(engine, &NoToken, &[], &quiet)
+      .run(engine, &FakeSource(None), &[], &quiet)
       .expect("run should succeed")
   }
 
@@ -882,7 +873,7 @@ source   = "~/.cargo/registry"
       let said = std::sync::Mutex::new(Vec::new());
 
       session
-        .run(engine, &NoToken, &[], &|notice| {
+        .run(engine, &FakeSource(None), &[], &|notice| {
           if let Notice::Unpacking(image) = notice {
             said.lock().expect("unpoisoned").push(image);
           }
@@ -907,7 +898,7 @@ source   = "~/.cargo/registry"
     let engine = RecordingEngine::new();
 
     session
-      .run(&engine, &NoToken, &["--continue".to_string()], &quiet)
+      .run(&engine, &FakeSource(None), &["--continue".to_string()], &quiet)
       .expect("run should succeed");
 
     assert_eq!(
@@ -970,7 +961,7 @@ source   = "~/.cargo/registry"
     let said = std::sync::Mutex::new(Vec::new());
 
     let code = session
-      .run(&engine, &NoToken, &[], &|notice| {
+      .run(&engine, &FakeSource(None), &[], &|notice| {
         if let Notice::SetupFailed { line, code } = notice {
           said.lock().expect("unpoisoned").push((line, code));
         }
@@ -1029,7 +1020,7 @@ source   = "~/.cargo/registry"
     let engine = RecordingEngine::with_unpacked(&[&session.run_spec().image]);
 
     session
-      .run(&engine, &NoToken, &[], &|notice| {
+      .run(&engine, &FakeSource(None), &[], &|notice| {
         said.lock().expect("lock").push(format!("{notice:?}"))
       })
       .expect("run should succeed");
@@ -1445,7 +1436,7 @@ source   = "~/.cargo/registry"
   }
 
   /// A socket mounted as a filesystem is not a relay, and the framework engine
-  /// would try exactly that. The two must not be confused again.
+  /// would attempt exactly that mount.
   #[test]
   fn mounts_no_socket_for_a_declared_port() {
     let mut session = session();
@@ -1518,10 +1509,9 @@ source   = "~/.cargo/registry"
     );
   }
 
-  /// The bug this is here to prevent: a spool unlinked while the container held
-  /// it left every later `shell` and `host-agent` writing to an inode the guest
-  /// could no longer reach, so the session had a host channel that was present
-  /// and permanently empty.
+  /// A spool unlinked while the container holds it leaves every later `shell`
+  /// and `host-agent` writing to an inode the guest cannot reach: a host channel
+  /// present and permanently empty.
   #[test]
   fn cleaning_keeps_the_inode_a_running_container_mounts() {
     let temp = TempDir::new().expect("temp dir");

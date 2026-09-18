@@ -4,12 +4,10 @@
 
 import Foundation
 
-/// Runs an async body to completion on a thread that is not ours, and blocks
-/// until it finishes.
+/// Runs an async body in a detached task and blocks until it finishes.
 ///
-/// Every bridged function goes through this. Rust calls us on one of its own
-/// threads — never on Swift's cooperative pool — so blocking here cannot
-/// deadlock the executor the body runs on.
+/// Rust calls in on its own threads, never on Swift's cooperative pool, so
+/// blocking here cannot deadlock the executor the body runs on.
 func blocking<T>(_ body: @escaping @Sendable () async throws -> T) throws -> T {
     let semaphore = DispatchSemaphore(value: 0)
     nonisolated(unsafe) var outcome: Result<T, any Error>?
@@ -35,26 +33,24 @@ func blocking<T>(_ body: @escaping @Sendable () async throws -> T) throws -> T {
 enum BridgeError: Error, CustomStringConvertible {
     /// Cannot happen: the semaphore is only signalled after `outcome` is set.
     case noOutcome
-    /// A bridged string did not have the shape this side expects — a bug in the
-    /// Rust encoder rather than anything a user did.
+    /// A bridged string had an unexpected shape: a bug in the Rust encoder.
     case malformed(String, String)
-    /// An `exec`, `resize` or `stop` for a session this process does not own.
-    /// Ordinary when a second terminal reaches the wrong process; the control
-    /// socket is what makes it not happen.
+    /// An `exec`, `resize` or `stop` for a session this process does not own,
+    /// e.g. a second terminal reaching the wrong process. The control socket
+    /// prevents it.
     case notBooted(String)
-    /// The binary is not signed for virtualization. Almost always a rebuild
-    /// that was not re-signed.
+    /// The binary is not signed for virtualization, usually a rebuild that was
+    /// not re-signed.
     case unentitled
-    /// A build step exited non-zero. Carries the step's own label, so the
-    /// message names what failed rather than a number.
+    /// A build step exited non-zero. Carries the step's label so the message
+    /// names what failed.
     case stepFailed(String, Int32)
-    /// The ingest body finished without leaving an index descriptor behind,
-    /// which can only be a bug in `Build.ingest`.
+    /// The ingest body left no index descriptor: a bug in `Build.ingest`.
     case notIngested(String)
-    /// The kernel download did not answer with one.
+    /// The kernel download returned a non-success status.
     case kernelUnavailable(String, Int)
-    /// The archive downloaded, and the kernel was not in it where it was meant to
-    /// be: a release whose layout has changed.
+    /// The downloaded archive lacks the kernel at the expected path: the
+    /// release layout has changed.
     case kernelMissing(String)
     /// A rootfs could not be copied to or from the build cache. Filesystems
     /// without clones fall back to a copy and never land here.

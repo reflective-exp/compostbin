@@ -4,8 +4,8 @@ use crate::error::EngineError;
 use crate::model::{BuildPlan, ExecSpec, RunSpec};
 use std::cell::RefCell;
 
-/// A call that was made instead of run. Carries the spec rather than a rendering
-/// of it, so a test asserts against what the caller composed.
+/// A recorded call, carrying the spec itself so tests assert on what the
+/// caller composed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Call {
   Exec(ExecSpec),
@@ -16,8 +16,8 @@ pub enum Call {
   Version,
 }
 
-/// Records every call instead of running anything, so callers can assert what was
-/// asked of the engine and that nothing else was.
+/// Records calls instead of running them, so tests can assert exactly what
+/// was asked.
 #[derive(Debug, Default)]
 pub struct Calls {
   recorded: RefCell<Vec<Call>>,
@@ -38,16 +38,13 @@ impl Calls {
 #[derive(Debug, Default)]
 pub struct RecordingEngine {
   calls: Calls,
-  /// The containers the posed engine is running, and every one `run` has
-  /// started since.
+  /// Posed as running, plus every one `run` has started.
   running: RefCell<Vec<String>>,
-  /// The images the posed engine has unpacked, and every one `run` has
-  /// unpacked since.
+  /// Posed as unpacked, plus every one `run` has unpacked.
   unpacked: RefCell<Vec<String>>,
   /// `None` poses an engine that cannot say what images exist.
   images: Option<Vec<String>>,
   version: Option<String>,
-  /// What every `exec` exits with.
   exit_code: i32,
 }
 
@@ -109,11 +106,11 @@ impl Engine for RecordingEngine {
       .ok_or_else(|| EngineError::unavailable("read the image store", "there is none"))
   }
 
-  fn run(&self, spec: &RunSpec) -> Result<String, EngineError> {
+  fn run(&self, spec: &RunSpec) -> Result<(), EngineError> {
     self.calls.record(Call::Run(spec.clone()));
     self.running.borrow_mut().push(spec.name.clone());
     self.unpacked.borrow_mut().push(spec.image.clone());
-    Ok(spec.name.clone())
+    Ok(())
   }
 
   fn is_running(&self, name: &str) -> Result<bool, EngineError> {
@@ -142,10 +139,6 @@ impl Engine for RecordingEngine {
 }
 
 /// A `Builder` that builds nothing and keeps the plans it was given.
-///
-/// The plans themselves rather than a rendering of them: a plan is what the
-/// caller composed, and asserting against it reads better than asserting against
-/// a string that would have to be invented for the purpose.
 #[derive(Debug, Default)]
 pub struct RecordingBuilder {
   plans: RefCell<Vec<BuildPlan>>,
@@ -156,7 +149,7 @@ impl RecordingBuilder {
     Self::default()
   }
 
-  /// Every plan it was asked to build, in call order.
+  /// Every plan given, in call order.
   pub fn plans(&self) -> Vec<BuildPlan> {
     self.plans.borrow().clone()
   }

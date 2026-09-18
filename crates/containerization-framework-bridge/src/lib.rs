@@ -1,13 +1,11 @@
 //! Rust's side of the Containerization.framework bridge.
 //!
-//! The Swift package is only buildable on macOS 26 with Xcode 26. Everywhere
-//! else — Linux CI, and a compostbin session's own guest — the engine and the
-//! builder are stand-ins that fail at the first thing asked of them, so callers
-//! compile unchanged. The store is plain files, and is the same everywhere.
+//! The Swift package builds only on macOS 26 with Xcode 26. Elsewhere the
+//! engine and builder are stand-ins that fail on first use, so callers compile
+//! unchanged. The store is plain files and works everywhere.
 
-// A C ABI is wide by nature: `boot` carries a whole `RunSpec` as scalars because
-// no struct crosses the bridge. swift-bridge also refuses an `allow` inside its
-// own module, so the exemption has to live out here.
+// `boot` carries a whole `RunSpec` as scalars since no struct crosses the
+// bridge, and swift-bridge refuses an `allow` inside its module.
 #![cfg_attr(target_os = "macos", allow(clippy::too_many_arguments))]
 
 #[cfg(target_os = "macos")]
@@ -34,8 +32,7 @@ pub use crate::store::{INITFS_REFERENCE, INITFS_VERSION, KERNEL_VERSION, Store, 
 #[cfg(not(target_os = "macos"))]
 pub use crate::unsupported::{FrameworkBuilder, FrameworkEngine};
 
-/// Failure, as the bridge reports it. Never collides with a guest process's own
-/// exit code, which is 0...255.
+/// The bridge's failure code; can't collide with a guest exit code (0...255).
 #[cfg(target_os = "macos")]
 const FAILED: i32 = -1;
 

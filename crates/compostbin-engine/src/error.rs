@@ -1,18 +1,14 @@
 use std::error::Error;
 use std::fmt;
 
-/// Something the engine or the builder could not do.
-///
-/// Named by the action rather than by a command line: nothing here shells out any
-/// more, so an argv would be a fiction. What a message has to carry instead is
-/// what was attempted and what the attempt said.
+/// Something the engine or the builder could not do: what was attempted, and
+/// what the attempt said.
 #[derive(Debug)]
 pub enum EngineError {
-  /// It was attempted and it failed.
+  /// Attempted and failed.
   Failed { action: String, message: String },
-  /// It could not be attempted: something the engine needs is missing or
-  /// unreadable. Distinct from `Failed` because the fix is different — provision
-  /// the thing, rather than look at why it failed.
+  /// Couldn't be attempted: a prerequisite is missing or unreadable. The fix
+  /// is to provision it, not debug a failure.
   Unavailable { action: String, message: String },
 }
 
@@ -28,12 +24,6 @@ impl EngineError {
     Self::Unavailable {
       action: action.into(),
       message: message.to_string(),
-    }
-  }
-
-  pub fn action(&self) -> &str {
-    match self {
-      Self::Failed { action, .. } | Self::Unavailable { action, .. } => action,
     }
   }
 }

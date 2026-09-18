@@ -15,9 +15,8 @@ pub fn version(engine: &impl Engine) -> Check {
 
 /// Whether the image store can be read at all.
 ///
-/// There is nothing to be up or down: a session boots from the store on disk, so
-/// the question is only whether it is there and readable. `compostbin build`
-/// writes it, which is why the fix is a build.
+/// There is no daemon to be up or down: a session boots from the store on disk,
+/// which `compostbin build` writes.
 pub fn store(images: &Result<Vec<String>, EngineError>) -> Check {
   match images {
     Ok(_) => check("image store", Status::Ok, "readable"),

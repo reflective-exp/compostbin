@@ -6,8 +6,9 @@
 //! back as an image.
 
 use crate::error::{At, ImageError};
-use crate::manifest::Manifest;
-use crate::session::Session;
+use crate::session::briefing::MANAGED_SETTINGS_TARGET;
+use crate::session::{CLAUDE_HOME_TARGET, Session};
+use crate::workspace::WORKSPACE_TARGET;
 use compostbin_engine::builder::Builder;
 use compostbin_engine::model::{BuildPlan, BuildStep, Resources};
 use std::path::PathBuf;
@@ -19,14 +20,12 @@ pub const IMAGE_STORE: &str = "~/.cache/compostbin/images";
 /// Where the guest scripts are staged for a build to read. Kept afterwards, so
 /// a failed build can be poked at; under `.cache` because it is regenerable.
 pub const BUILD_CONTEXT: &str = "~/.cache/compostbin/build";
-/// Where a build's context appears inside the builder. Steps install out of it,
-/// which is what a `COPY` was.
-/// The engine's: the build cache matches on it.
+/// Where a build's context appears inside the builder; steps install from it.
+/// Owned by the engine, whose build cache matches on it.
 pub use compostbin_engine::cache::CONTEXT_MOUNT;
-/// The builder's size. Deliberately not the manifest's `[container]`: that is
-/// what the session runs with, and a project asking for a bigger session has no
-/// business resizing everyone's build. Sized past 2 GB, which is not enough to
-/// install Claude Code.
+/// The builder's size. Not the manifest's `[container]`: a project asking for a
+/// bigger session must not resize everyone's build. Above 2 GB, which is too
+/// little to install Claude Code.
 pub const BUILD_RESOURCES: Resources = Resources {
   cpus: 4,
   memory_in_bytes: 8 << 30,
@@ -36,9 +35,8 @@ pub const BUILD_RESOURCES: Resources = Resources {
 pub const BASE_IMAGE: &str = "docker.io/library/debian:stable-slim";
 /// The unprivileged user every session runs as, created by the base image.
 pub const USER: &str = "claude";
-/// Claude's home, and the directory the session's project is mounted under.
+/// Claude's home.
 pub const HOME: &str = "/home/claude";
-pub const WORKSPACE: &str = "/workspace";
 /// The tools the base image installs. `socat` is the port relay's; the rest are
 /// what a session needs to be usable.
 pub const PACKAGES: [&str; 10] = [
@@ -67,8 +65,7 @@ pub const GUEST_CLIPBOARD_NAME: &str = "compostbin-clipboard";
 pub const GUEST_PORTS: &str = include_str!("compostbin-ports");
 pub const GUEST_PORTS_NAME: &str = "compostbin-ports";
 
-/// Every script a build's context has to hold, since the steps install them by
-/// name and a context missing one fails the build.
+/// Every script a build's context must hold: the steps install them by name.
 pub const GUEST_SCRIPTS: [(&str, &str); 3] = [
   (GUEST_CLIENT_NAME, GUEST_CLIENT),
   (GUEST_CLIPBOARD_NAME, GUEST_CLIPBOARD),
@@ -78,9 +75,8 @@ pub const GUEST_SCRIPTS: [(&str, &str); 3] = [
 /// Builds the base image, and then the project's own when the manifest adds
 /// anything to it.
 ///
-/// The base is shared by every project, so anything belonging to one project —
-/// a language toolchain, a private CA — goes in the derived image rather
-/// than growing the base for everyone.
+/// The base is shared by every project, so anything belonging to one (a
+/// language toolchain, a private CA) goes in the derived image.
 pub fn build(session: &Session, builder: &impl Builder, cache: bool) -> Result<(), ImageError> {
   let context = context(session);
   std::fs::create_dir_all(&context).at(&context)?;
@@ -112,21 +108,13 @@ pub fn base_plan(session: &Session) -> BuildPlan {
   // Keeps `.claude.json` — the account and the onboarding answers — inside the
   // mounted home. Without it Claude writes to `~/.claude.json`, which dies with
   // the container, and every restart asks for a fresh login.
-  plan.environment = vec![format!("CLAUDE_CONFIG_DIR={HOME}/.claude")];
+  plan.environment = vec![format!("CLAUDE_CONFIG_DIR={CLAUDE_HOME_TARGET}")];
   // Nothing in a session needs root: the mounts are the user's own files, and a
   // container that installs packages at run time is one whose image is wrong.
   plan.user = Some(USER.to_string());
-  plan.workdir = Some(PathBuf::from(WORKSPACE));
+  plan.workdir = Some(PathBuf::from(WORKSPACE_TARGET));
   plan.steps = vec![
-    BuildStep::root(
-      "packages",
-      format!(
-        "apt-get update \\\n && apt-get install --no-install-recommends --yes \\\n{} \\\n && rm -rf /var/lib/apt/lists/*",
-        PACKAGES
-          .map(|package| format!("      {package}"))
-          .join(" \\\n")
-      ),
-    ),
+    install_packages(PACKAGES),
     BuildStep::root(
       "claude code",
       "curl -fsSL https://claude.ai/install.sh | bash \\\n && mv /root/.local/share/claude/versions/* /usr/local/bin/claude",
@@ -134,28 +122,27 @@ pub fn base_plan(session: &Session) -> BuildPlan {
     BuildStep::root(
       "guest scripts",
       format!(
-        "install -m 755 {CONTEXT_MOUNT}/{GUEST_CLIENT_NAME} /usr/local/bin/{GUEST_CLIENT_NAME} \\\n \
-         && install -m 755 {CONTEXT_MOUNT}/{GUEST_CLIPBOARD_NAME} /usr/local/bin/{GUEST_CLIPBOARD_NAME} \\\n \
-         && install -m 755 {CONTEXT_MOUNT}/{GUEST_PORTS_NAME} /usr/local/bin/{GUEST_PORTS_NAME} \\\n \
-         && for tool in {tools}; do \\\n      ln -s {GUEST_CLIPBOARD_NAME} \"/usr/local/bin/$tool\"; \\\n    done",
+        "{installs} \\\n && for tool in {tools}; do \\\n      ln -s {GUEST_CLIPBOARD_NAME} \"/usr/local/bin/$tool\"; \\\n    done",
+        installs = GUEST_SCRIPTS
+          .map(|(name, _)| format!("install -m 755 {CONTEXT_MOUNT}/{name} /usr/local/bin/{name}"))
+          .join(" \\\n && "),
         tools = CLIPBOARD_TOOLS.join(" "),
       ),
     ),
     BuildStep::root(
       "the session's user",
       format!(
-        // `/etc/claude-code` is where Claude's managed settings are mounted at
-        // run time — the session's briefing. The mountpoint exists here because
-        // the guest cannot create one under /etc, and stays root-owned because
-        // nothing in a session may edit what it is told.
+        // The managed-settings mountpoint (the briefing) is created here because
+        // the guest cannot create it under /etc; root-owned because nothing in a
+        // session may edit what it is told.
         //
-        // The home and the workspace are mounted from the host too; created here,
-        // owned by the user, so the first run has a mountpoint even before the
-        // host directory exists and nothing under them is left owned by root.
-        "mkdir -p /etc/claude-code \\\n \
+        // The home and workspace mountpoints are created owned by the user, so
+        // the first run has them before the host directories exist and nothing
+        // under them is left owned by root.
+        "mkdir -p {MANAGED_SETTINGS_TARGET} \\\n \
          && useradd --create-home --shell /bin/bash {USER} \\\n \
-         && mkdir -p {HOME}/.claude {WORKSPACE} \\\n \
-         && chown -R {USER}:{USER} {HOME} {WORKSPACE}"
+         && mkdir -p {CLAUDE_HOME_TARGET} {WORKSPACE_TARGET} \\\n \
+         && chown -R {USER}:{USER} {HOME} {WORKSPACE_TARGET}"
       ),
     ),
   ];
@@ -163,16 +150,28 @@ pub fn base_plan(session: &Session) -> BuildPlan {
   plan
 }
 
+fn install_packages<'a>(packages: impl IntoIterator<Item = &'a str>) -> BuildStep {
+  BuildStep::root(
+    "packages",
+    format!(
+      "apt-get update \\\n && apt-get install --no-install-recommends --yes \\\n{} \\\n && rm -rf /var/lib/apt/lists/*",
+      packages
+        .into_iter()
+        .map(|package| format!("      {package}"))
+        .collect::<Vec<_>>()
+        .join(" \\\n")
+    ),
+  )
+}
+
 /// The plan for the project's own image, or `None` when the manifest adds
 /// nothing and the session can run the base itself.
 ///
-/// One root group then one user group, in that order: packages install as root
-/// because apt needs to, `run_as_root` lines follow while the image is still
-/// root, and `run` lines execute as the session's user, so a line appending to
-/// `~/.bashrc` writes the file the session will read.
+/// Root steps, then user steps: packages (apt needs root), then `run_as_root`,
+/// then `run` as the session's user, so a line appending to `~/.bashrc` writes
+/// the file the session reads.
 ///
-/// The image always ends as that user, whether or not anything ran as them: a
-/// session must not run as root.
+/// The image always ends as that user: a session must not run as root.
 pub fn project_plan(session: &Session) -> Option<BuildPlan> {
   let manifest = &session.manifest;
 
@@ -186,19 +185,9 @@ pub fn project_plan(session: &Session) -> Option<BuildPlan> {
   plan.workdir = Some(PathBuf::from(HOME));
 
   if !manifest.image.packages.is_empty() {
-    plan.steps.push(BuildStep::root(
-      "packages",
-      format!(
-        "apt-get update \\\n && apt-get install --no-install-recommends --yes \\\n{} \\\n && rm -rf /var/lib/apt/lists/*",
-        manifest
-          .image
-          .packages
-          .iter()
-          .map(|package| format!("      {package}"))
-          .collect::<Vec<_>>()
-          .join(" \\\n")
-      ),
-    ));
+    plan
+      .steps
+      .push(install_packages(manifest.image.packages.iter().map(String::as_str)));
   }
 
   for line in &manifest.image.run_as_root {
@@ -212,11 +201,6 @@ pub fn project_plan(session: &Session) -> Option<BuildPlan> {
   }
 
   Some(plan)
-}
-
-/// Whether a manifest adds anything to the base image.
-pub fn adds_to_the_base(manifest: &Manifest) -> bool {
-  !manifest.image.is_empty()
 }
 
 /// The base image's build context, resolved against the host.
@@ -281,8 +265,8 @@ mod tests {
     let plan = base_plan(&session(&home));
 
     assert_eq!(plan.user, Some(USER.to_string()), "a session must not run as root");
-    assert_eq!(plan.workdir, Some(PathBuf::from(WORKSPACE)));
-    assert_eq!(plan.environment, [format!("CLAUDE_CONFIG_DIR={HOME}/.claude")]);
+    assert_eq!(plan.workdir, Some(PathBuf::from(WORKSPACE_TARGET)));
+    assert_eq!(plan.environment, [format!("CLAUDE_CONFIG_DIR={CLAUDE_HOME_TARGET}")]);
   }
 
   #[test]
@@ -348,7 +332,6 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
 
     assert_eq!(project_plan(&session(&home)), None);
-    assert!(!adds_to_the_base(&Manifest::default()));
   }
 
   #[test]

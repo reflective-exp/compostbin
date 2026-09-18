@@ -1,32 +1,29 @@
 //===----------------------------------------------------------------------===//
 // The surface Rust calls.
 //
-// Flat and synchronous by construction: no Swift types cross, every function
-// blocks, and failure comes back as a negative code with the message left in
-// `lastError` for Rust to collect. swift-bridge carries `async` poorly in this
-// direction, and a bridge that cannot fail informatively is not worth having.
+// Flat and synchronous: no Swift types cross, every function blocks, and
+// failure returns a negative code with the message in `lastError` for Rust to
+// collect. swift-bridge handles `async` poorly in this direction.
 //
-// The argument labels are the Rust parameter names — swift-bridge's generated
-// `@_cdecl` shims call these with them, so they are part of the contract.
+// Argument labels are the Rust parameter names; swift-bridge's generated
+// `@_cdecl` shims call with them, so they are part of the contract.
 //
-// Lists cross as newline-separated strings. Nothing compostbin puts in one may
-// contain a newline, and `host::request::Request::render` already refuses such
-// an argument on the other side of the container.
+// Lists cross as newline-separated strings, so no element may contain a
+// newline (`host::request::Request::render` likewise refuses them in guest
+// requests).
 //===----------------------------------------------------------------------===//
 
 import Foundation
 import Synchronization
 
 /// Set by the last failing bridged call, read by `compostbin_last_error`.
-/// Locked because it is per-process, and two attached terminals can fail at
-/// once.
+/// Locked because two attached terminals can fail at once.
 private let lastError = Mutex("")
 
-/// Failure, as the bridge reports it. Distinct from any exit code a guest
-/// process can return, which is 0...255.
+/// Bridge failure. Outside the guest exit code range 0...255.
 private let failed: Int32 = -1
 
-/// Runs `body`, turning a thrown error into `failed` and a readable message.
+/// Turns a thrown error into `failed`, storing its message in `lastError`.
 private func reporting(_ body: () throws -> Int32) -> Int32 {
     do {
         return try body()
@@ -39,6 +36,10 @@ private func reporting(_ body: () throws -> Int32) -> Int32 {
 /// A line in the build log, on stderr.
 func note(_ message: String) {
     try? FileHandle.standardError.write(contentsOf: Data("compostbin: \(message)\n".utf8))
+}
+
+private func decoding<T: Decodable>(_ type: T.Type, from json: RustStr) throws -> T {
+    try JSONDecoder().decode(type, from: Data(json.toString().utf8))
 }
 
 private func lines(_ text: RustStr) -> [String] {
@@ -94,12 +95,11 @@ func compostbin_boot(
 
 /// Builds an image from a plan, with no builder and no daemon.
 ///
-/// The plan crosses as JSON, alone among the bridged calls: it nests, and a
-/// build step is arbitrary shell that may contain the newline the other calls
-/// use as a separator.
+/// The plan crosses as JSON because it nests and build steps are arbitrary
+/// shell that may contain newlines.
 func compostbin_build(plan: RustStr) -> Int32 {
     reporting {
-        let plan = try JSONDecoder().decode(BuildPlan.self, from: Data(plan.toString().utf8))
+        let plan = try decoding(BuildPlan.self, from: plan)
 
         try blocking { try await Build.run(plan) }
 
@@ -110,7 +110,7 @@ func compostbin_build(plan: RustStr) -> Int32 {
 /// Puts a kernel and an init image in the store, fetching whatever is missing.
 func compostbin_provision(spec: RustStr) -> Int32 {
     reporting {
-        let spec = try JSONDecoder().decode(ProvisionSpec.self, from: Data(spec.toString().utf8))
+        let spec = try decoding(ProvisionSpec.self, from: spec)
 
         try blocking { try await Provision.run(spec) }
 
@@ -121,9 +121,9 @@ func compostbin_provision(spec: RustStr) -> Int32 {
 /// Runs a process in a booted session and blocks until it exits, returning its
 /// exit code.
 ///
-/// `terminal` is a descriptor this process can use: its own when `run` attaches
-/// Claude, or one `compostbin shell` passed across the control socket. `-1`
-/// runs without a terminal at all. An empty `user` is the image's own.
+/// `terminal` is a descriptor in this process: its own when `run` attaches
+/// Claude, or one `compostbin shell` passed over the control socket. `-1` runs
+/// without a terminal. An empty `user` means the image's default.
 func compostbin_exec(
     name: RustStr,
     id: RustStr,
@@ -160,8 +160,7 @@ func compostbin_resize(id: RustStr, terminal: Int32) -> Int32 {
     }
 }
 
-/// Whether a run of this image skips the unpack: 1 when it does, 0 when the
-/// next run unpacks it first.
+/// 1 when this image is already unpacked, 0 when the next run must unpack it.
 func compostbin_is_unpacked(store_root: RustStr, image_reference: RustStr) -> Int32 {
     reporting {
         let unpacked = Unpacked(store: URL(filePath: store_root.toString()))

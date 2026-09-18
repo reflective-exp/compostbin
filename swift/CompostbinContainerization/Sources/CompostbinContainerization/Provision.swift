@@ -1,17 +1,16 @@
 //===----------------------------------------------------------------------===//
 // Putting a kernel and an init image in the store.
 //
-// A VM needs two things that are not images of the workload: a kernel to boot and
-// an init image to boot into. Both are fetched rather than built:
+// A VM needs a kernel to boot and an init image to boot into. Both are fetched:
 //
-//   * the init image — `vminitd`, the agent the library talks to over vsock —
-//     is an OCI image, so pulling it is an ImageStore call;
-//   * the kernel is not. Nobody publishes one as an image, so it comes out of
-//     Kata Containers' static release, the same place Containerization's own
-//     Makefile takes it from and the same one the CLI offers on first start.
+//   * the init image (`vminitd`, the agent the library talks to over vsock) is
+//     an OCI image, pulled through ImageStore;
+//   * the kernel is not published as an image, so it comes from Kata
+//     Containers' static release, as in Containerization's Makefile and the
+//     CLI's first-start offer.
 //
-// Idempotent and cheap when there is nothing to do: `build` calls it every time
-// rather than leaving it to a separate command nobody remembers to run.
+// Idempotent and cheap when there is nothing to do, so `build` calls it every
+// time.
 //===----------------------------------------------------------------------===//
 
 import Containerization
@@ -22,7 +21,7 @@ import SystemPackage
 
 struct ProvisionSpec: Decodable {
     var storeRoot: String
-    /// Where the kernel goes. Inside the store, so removing the store removes it.
+    /// Inside the store, so removing the store removes it.
     var kernelPath: String
     var kernelURL: String
     /// The kernel's path inside the downloaded archive.
@@ -32,8 +31,7 @@ struct ProvisionSpec: Decodable {
     enum CodingKeys: String, CodingKey {
         case storeRoot
         case kernelPath
-        // The Rust side writes `kernelUrl`: serde's camelCase of `kernel_url`,
-        // which does not know that URL is an initialism.
+        // serde's camelCase of `kernel_url`.
         case kernelURL = "kernelUrl"
         case kernelInArchive
         case initfsReference
@@ -45,8 +43,10 @@ enum Provision {
         let root = URL(filePath: spec.storeRoot)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
-        try await kernel(spec)
-        try await initfs(spec, root: root)
+        async let kernel: Void = kernel(spec)
+        async let initfs: Void = initfs(spec, root: root)
+
+        _ = try await (kernel, initfs)
     }
 
     /// Downloads and unpacks the kernel, unless it is already there.
@@ -63,8 +63,8 @@ enum Provision {
 
         note("downloading a kernel from \(url.absoluteString)")
 
-        // To a file rather than into memory: the archive is a few hundred
-        // megabytes, and only one entry of it is wanted.
+        // To a file, not memory: the archive is hundreds of megabytes and only
+        // one entry is wanted.
         let (archive, response) = try await URLSession.shared.download(from: url)
 
         defer { try? FileManager.default.removeItem(at: archive) }
@@ -81,16 +81,16 @@ enum Provision {
             at: destination.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        // Written beside the destination and moved, so an interrupted
-        // provision cannot leave a half-written kernel that looks complete.
+        // Written aside and moved, so an interrupted provision never leaves a
+        // half-written kernel that looks complete.
         let partial = destination.appendingPathExtension("partial")
         try binary.write(to: partial, options: .atomic)
         _ = try FileManager.default.replaceItemAt(destination, withItemAt: partial)
     }
 
-    /// Reads one file out of the archive, following a symlink if that is what it
-    /// finds: in Kata's release `vmlinux.container` is a link to the versioned
-    /// kernel beside it, and a link's own entry carries no contents.
+    /// Reads one file out of the archive, following a symlink: in Kata's release
+    /// `vmlinux.container` links to the versioned kernel beside it, and a link
+    /// entry has no contents.
     private static func extract(_ path: String, from archive: URL) throws -> Data {
         let (entry, data) = try ArchiveReader(file: archive).extractFile(path: path)
 
@@ -102,9 +102,9 @@ enum Provision {
             return data
         }
 
-        // Relative to the link's own directory, and the reader has to start over:
-        // extracting moved it past the entry the target may precede.
-        // `pushing` replaces the path outright when the target is absolute.
+        // Resolved against the link's directory (`pushing` replaces outright
+        // when the target is absolute). A fresh reader, because extracting moved
+        // the old one past entries the target may precede.
         let resolved = FilePath(path).removingLastComponent().pushing(FilePath(target)).string
         let (_, contents) = try ArchiveReader(file: archive).extractFile(path: resolved)
 
@@ -117,9 +117,9 @@ enum Provision {
 
     /// Pulls the init image, unless the store already holds it.
     ///
-    /// `getInitImage` pulls what it cannot find, so this is only about saying so
-    /// first: the pull is the slow part of a first build, and a silent wait looks
-    /// like a hang.
+    /// `getInitImage` pulls on its own; the check exists to log first, since the
+    /// pull is the slow part of a first build and a silent wait looks like a
+    /// hang.
     private static func initfs(_ spec: ProvisionSpec, root: URL) async throws {
         let imageStore = try ImageStore(path: root)
 

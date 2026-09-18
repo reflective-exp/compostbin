@@ -1,25 +1,19 @@
 //! The host end of an attached terminal.
 //!
-//! The guest process gets a pty of its own, inside the VM. For the two to
-//! behave like one terminal, the host end has to stop interpreting: no line
-//! buffering, no echo, no signal characters — the guest's pty is doing all of
-//! that, and doing it twice shows up as doubled characters and a shell that
-//! only reacts when you press return.
+//! The guest has its own pty in the VM, so the host end must be raw: no line
+//! buffering, echo, or signal characters. Doing it twice shows up as doubled
+//! characters and a shell that only reacts on return.
 //!
-//! Raw mode belongs to whichever process owns the terminal, which is why it is
-//! set here rather than in Swift: `run` owns its own, and `shell` owns the one
-//! it passes over the control socket. Swift takes the descriptor with
-//! `setInitState: false` precisely so it never touches attributes that are not
-//! its to restore.
+//! Raw mode belongs to the process that owns the terminal (`run` its own,
+//! `shell` the one it passes over the control socket). Swift takes the
+//! descriptor with `setInitState: false` so it never touches attributes it
+//! doesn't own.
 
 use std::io;
 use std::os::fd::RawFd;
 
-/// Whether a descriptor is a terminal at all.
-///
-/// Output redirected to a file is the ordinary case — `compostbin run > log` —
-/// and the guest process should then simply run without a terminal rather than
-/// failing on one that is not there.
+/// Whether a descriptor is a terminal. When it isn't (e.g. `run > log`), the
+/// guest runs without one rather than failing.
 pub fn is_tty(descriptor: RawFd) -> bool {
   // SAFETY: isatty only reads, and tolerates any integer.
   unsafe { libc::isatty(descriptor) == 1 }
@@ -28,15 +22,12 @@ pub fn is_tty(descriptor: RawFd) -> bool {
 /// Duplicates a descriptor for the Swift side to own.
 ///
 /// Swift closes it when the attach ends, and this side must not: the close is
-/// what stops reading, and it has to happen exactly once.
+/// what stops reading, and must happen exactly once.
 ///
-/// `LinuxProcess` pumps stdin with a task reading the terminal it is given, and
-/// tearing a process down only cancels that task — which does not interrupt a
-/// read already pending on the handle. Until the descriptor is closed, that
-/// reader is still on the terminal, taking keystrokes that now belong to
-/// whoever is typing at it. A duplicate is what makes closing safe: the caller
-/// keeps its own descriptor for the same terminal, so the terminal itself
-/// survives.
+/// `LinuxProcess` pumps stdin with a task reading the terminal; cancelling it
+/// doesn't interrupt a pending read, so until the descriptor closes the stale
+/// reader keeps stealing keystrokes. Duplicating makes that close safe, since
+/// the caller's own descriptor keeps the terminal alive.
 pub fn lend(descriptor: RawFd) -> io::Result<RawFd> {
   // SAFETY: dup only reads the descriptor table, and returns < 0 on failure.
   let lent = unsafe { libc::dup(descriptor) };
@@ -50,9 +41,7 @@ pub fn lend(descriptor: RawFd) -> io::Result<RawFd> {
 
 /// Puts a terminal in raw mode for as long as it is held.
 ///
-/// Restoring on drop rather than at the end of the attach matters: the guest
-/// exiting, an error on the way, and a panic all have to leave the user with a
-/// usable shell.
+/// Restores on drop so guest exit, errors, and panics all leave a usable shell.
 pub struct Raw {
   descriptor: RawFd,
   restore: libc::termios,

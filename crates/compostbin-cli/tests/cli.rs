@@ -1,8 +1,8 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-/// Cargo rebuilds the binary before these run and points this at it. Locating it
-/// by hand from `current_exe` would happily test a stale build.
+/// Cargo rebuilds the binary and points this at it; finding it via
+/// `current_exe` could test a stale build.
 const BINARY: &str = env!("CARGO_BIN_EXE_compostbin");
 
 fn compostbin(project_dir: &std::path::Path, arguments: &[&str]) -> std::process::Output {

@@ -1,19 +1,16 @@
 //! How a second terminal reaches a session this process owns.
 //!
-//! The VM dies with the process that created it, so there is nothing for
-//! `compostbin shell` to attach to directly. It connects here instead, to a socket
-//! in the session's state directory, and the process that owns the VM runs the
-//! command on its behalf.
+//! The VM dies with the process that created it, so `compostbin shell` connects
+//! to a socket in the session's state directory and the owning process runs
+//! the command on its behalf.
 //!
-//! What crosses is the client's **terminal**, not its bytes: the request is sent
-//! with `SCM_RIGHTS` carrying the client's own tty descriptor, and the owner
-//! hands that descriptor straight to the guest process as its stdio. So the
-//! guest talks to the real terminal, nothing relays keystrokes, and the owner's
-//! code path is identical whether the terminal came from `run`'s own process or
-//! across this socket.
+//! What crosses is the client's **terminal**, not its bytes: the request
+//! carries the client's tty via `SCM_RIGHTS`, and the owner hands it straight
+//! to the guest process as stdio. Nothing relays keystrokes, and the owner's
+//! code path is the same as for `run`'s own terminal.
 //!
-//! The socket then carries only what a descriptor cannot: the request, a nudge
-//! on every window resize, and the exit code on the way back.
+//! The socket carries only what a descriptor cannot: the request, a nudge per
+//! window resize, and the exit code back.
 
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -22,22 +19,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// In the container's own directory under the engine's runtime directory.
+/// Socket file name, inside the container's runtime directory.
 pub const CONTROL_SOCKET: &str = "control.sock";
 
-/// Separates list elements inside one request line. A unit separator cannot
-/// occur in an argument or an environment variable.
+/// Separates list elements within a request line; cannot occur in an argument
+/// or environment variable.
 const UNIT: char = '\u{1f}';
 
 /// Written by the client whenever its window changes size.
 const RESIZE: u8 = b'R';
 
-/// Enough for any plausible argv and environment; a request beyond it is a bug
-/// rather than a size to grow into.
+/// Enough for any plausible argv and environment; larger is a bug.
 const MAX_REQUEST: usize = 64 * 1024;
 
-/// How often the client checks whether its window changed. Fast enough not to
-/// be felt while dragging, and the longest an attach can take to end.
+/// How often the client checks for a window resize. Also the longest an attach
+/// can take to end.
 const RESIZE_POLL: Duration = Duration::from_millis(100);
 
 /// What a client asks the owner to run.
@@ -76,13 +72,10 @@ impl Request {
   }
 }
 
-/// Whether a connection asked anything at all.
+/// Whether a connection sent nothing, i.e. was a liveness check.
 ///
-/// A client always sends a request and a terminal together, in one message, so
-/// a connection carrying neither closed before speaking: a liveness check
-/// rather than an attach that went wrong. The distinction matters only because
-/// the two are otherwise indistinguishable at the point of failure, and one of
-/// them is worth reporting.
+/// A client always sends request and terminal in one message, so neither means
+/// it closed before speaking — not a failed attach worth reporting.
 fn probe(payload: &str, terminal: &Option<OwnedFd>) -> bool {
   payload.is_empty() && terminal.is_none()
 }
@@ -97,17 +90,13 @@ fn split(line: &str) -> Vec<String> {
 
 /// Whether a live owner answers at this path.
 ///
-/// A connect refused is the only way to tell a socket whose owner is gone from
-/// one whose owner is listening — the inode outlives the process that bound it.
+/// The inode outlives its owner, so only a connect tells dead from listening.
 pub fn served(path: &Path) -> bool {
   UnixStream::connect(path).is_ok()
 }
 
 /// Binds the control socket, creating its directory and replacing any socket
-/// left by a dead owner.
-///
-/// The leftover is safe to remove precisely because `served` just said nothing
-/// answers on it.
+/// left by a dead owner (safe because `served` found nothing answering).
 pub fn bind(path: &Path) -> io::Result<UnixListener> {
   if let Some(parent) = path.parent() {
     std::fs::create_dir_all(parent)?;
@@ -123,9 +112,8 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 /// Serves requests until the listener is dropped, one thread per attached
 /// terminal.
 ///
-/// `run` is called with the request and the client's terminal, and returns the
-/// guest process's exit code. `resize` is called with that same terminal every
-/// time the client's window changes.
+/// `run` gets the request and the client's terminal and returns the guest's
+/// exit code. `resize` gets that terminal on each client window change.
 pub fn serve<R, S>(listener: &UnixListener, run: R, resize: S)
 where
   R: Fn(&Request, RawFd, &str) -> i32 + Sync,
@@ -142,8 +130,7 @@ where
       let resize = &resize;
 
       scope.spawn(move || {
-        // Unique per attach, so a resize reaches the process that asked for it
-        // and not another terminal's.
+        // Unique per attach, so a resize reaches only its own process.
         let id = format!("attach-{sequence}");
 
         if let Err(error) = attend(stream, &id, run, resize) {
@@ -157,16 +144,14 @@ where
 fn attend<R, S>(stream: UnixStream, id: &str, run: R, resize: S) -> io::Result<()>
 where
   R: Fn(&Request, RawFd, &str) -> i32,
-  // The resize watcher runs on a thread of its own, so that a window dragged
-  // while the guest is quiet still reaches it.
+  // The resize watcher gets its own thread so resizes arrive while the guest
+  // is quiet.
   S: Fn(&str, RawFd) + Send,
 {
   let (payload, terminal) = receive(&stream)?;
 
-  // `served` connects and closes without sending, which is how anything asks
-  // whether this container is still up — `is_running`, and so `run` and
-  // `doctor`. That is not a client and not an error, and saying so would put a
-  // line into the middle of someone's session every time it was asked.
+  // `served` (via `is_running`, `run`, `doctor`) connects and closes without
+  // sending. Reporting it would print into the session on every check.
   if probe(&payload, &terminal) {
     return Ok(());
   }
@@ -174,13 +159,12 @@ where
   let request =
     Request::decode(&payload).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed request"))?;
 
-  // Owned here so the descriptor is closed once the guest process is done with
-  // it; the client holds its own copy either way.
+  // Owned so it closes once the guest is done; the client keeps its own copy.
   let terminal = terminal.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no terminal was passed"))?;
 
-  // A duplicate the Swift side keeps: see `terminal::lend`. Closing the one we
-  // received, while a reader from a previous attach could still be on that
-  // number, is what made a second `shell` take the first one's descriptor.
+  // A duplicate the Swift side keeps (see `terminal::lend`). Handing over the
+  // received fd let a later attach reuse its number while a previous reader
+  // was still on it.
   let raw = crate::terminal::lend(terminal.as_raw_fd())?;
 
   std::thread::scope(|scope| {
@@ -189,8 +173,8 @@ where
     scope.spawn(move || {
       let mut byte = [0u8; 1];
 
-      // Ends when the client closes, which it does as soon as it has its exit
-      // code — so this thread cannot outlive the attach.
+      // Ends when the client closes after getting its exit code, so this
+      // thread cannot outlive the attach.
       while let Ok(1) = watching.read(&mut byte) {
         if byte[0] == RESIZE {
           resize(id, raw);
@@ -208,16 +192,11 @@ where
   })
 }
 
-/// Asks the owner to run something, with this process's terminal, and returns
-/// the exit code.
+/// Asks the owner to run something on this process's terminal; blocks until
+/// the guest exits and returns its exit code. Nothing is relayed meanwhile.
 ///
-/// Blocks until the guest process exits. Nothing is relayed in between: the
-/// guest is reading and writing the same terminal this process is attached to.
-///
-/// `resized` blocks until the terminal changes size and returns `true`, or
-/// returns `false` once the caller should stop watching. It is polled rather
-/// than driven by the signal directly, so nothing here has to be
-/// async-signal-safe.
+/// `resized` returns whether the terminal changed size since last asked. It is
+/// polled, not signal-driven, so nothing here must be async-signal-safe.
 pub fn request(
   path: &Path,
   request: &Request,
@@ -235,10 +214,9 @@ pub fn request(
     let attached = &attached;
 
     scope.spawn(move || {
-      // Polled rather than blocking, so that clearing the flag below ends this
-      // thread within one interval. A watcher that only woke on a resize would
-      // outlive the attach, and `scope` waits for it — which is the whole
-      // process hanging after the guest has already exited.
+      // Polled so clearing the flag ends this thread within one interval. A
+      // watcher woken only by resizes would keep `scope` (and the process)
+      // hanging after the guest exits.
       while attached.load(Ordering::Relaxed) {
         if resized() && nudging.write_all(&[RESIZE]).is_err() {
           return;
@@ -251,8 +229,8 @@ pub fn request(
     let mut code = [0u8; 4];
     let read = (&stream).read_exact(&mut code);
 
-    // Before `scope` joins, and on the error path too: an owner that died
-    // without answering must not strand us here.
+    // Before `scope` joins, even on error, or an owner that died without
+    // answering would strand us.
     attached.store(false, Ordering::Relaxed);
     read?;
 
@@ -281,9 +259,8 @@ fn send(stream: &UnixStream, payload: &[u8], descriptor: RawFd) -> io::Result<()
     message.msg_iov = &mut iov;
     message.msg_iovlen = 1;
     message.msg_control = space.as_mut_ptr() as *mut libc::c_void;
-    // Exactly one descriptor's worth, not the buffer's capacity: the kernel
-    // reads `msg_controllen` as "how many control messages are here", and a
-    // length past the one we wrote is a second, malformed one — EINVAL.
+    // Exactly one descriptor's worth, not the buffer's capacity: any length
+    // past it reads as a second, malformed control message — EINVAL.
     message.msg_controllen = libc::CMSG_SPACE(size_of::<RawFd>() as u32);
 
     let header = libc::CMSG_FIRSTHDR(&message);
@@ -343,9 +320,8 @@ fn receive(stream: &UnixStream) -> io::Result<(String, Option<OwnedFd>)> {
   Ok((String::from_utf8_lossy(&payload).into_owned(), descriptor))
 }
 
-/// Room for one `SCM_RIGHTS` control message. `CMSG_SPACE` is not a const fn,
-/// so this is the buffer's capacity and the exact length is computed at the
-/// call; anything at least that big is safe.
+/// Buffer capacity for one `SCM_RIGHTS` message. `CMSG_SPACE` isn't const, so
+/// the exact length is computed at the call; this only has to be at least that.
 const CMSG_SPACE: usize = 64;
 
 #[cfg(test)]
@@ -384,8 +360,7 @@ mod tests {
     assert_eq!(Request::decode("bash\nIS_SANDBOX=1\n/workspace"), None);
   }
 
-  /// `served` connects and closes. Reporting that as a malformed request put a
-  /// line into the session every time anything asked whether it was running.
+  /// `served` connects and closes; that must not be reported as malformed.
   #[test]
   fn a_connection_that_says_nothing_is_a_liveness_probe() {
     assert!(probe("", &None));

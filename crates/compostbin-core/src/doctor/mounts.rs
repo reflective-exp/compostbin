@@ -36,12 +36,11 @@ pub fn mounted_paths(session: &Session) -> Check {
   )
 }
 
-/// A symlink that resolves on the host and dangles in the container, its target
-/// being outside every mounted tree. Nothing else reports it — the file is simply
-/// not there.
+/// Symlinks that resolve on the host but dangle in the container, their targets
+/// outside every mounted tree.
 ///
-/// A warning, not a failure: the session runs, and the fix — mount the target, or
-/// stop relying on the link — is the user's call.
+/// A warning: the session runs, and whether to mount the target or drop the
+/// link is the user's call.
 pub fn dangling_symlinks(session: &Session) -> Check {
   const NAMED: usize = 5;
 
@@ -64,8 +63,7 @@ pub fn dangling_symlinks(session: &Session) -> Check {
     .map(Escape::to_string)
     .collect();
 
-  // In the list rather than the sentence, so the sentence stays true however
-  // many were named.
+  // In the list, so the sentence stays true however many were named.
   let rest = found.escapes.len().saturating_sub(named.len());
   if rest > 0 {
     named.push(format!("and {rest} more"));
@@ -80,14 +78,12 @@ pub fn dangling_symlinks(session: &Session) -> Check {
 }
 
 /// Whether the running container has the mounts the manifest describes. `run`
-/// attaches to a live container, and mounts cannot be added to one, so a manifest
-/// edited mid-session takes effect once the session exits and `run` creates it
-/// again, and not before.
-/// Nothing else says so: the path is simply missing in the guest, which reads as
-/// the feature being broken.
+/// attaches to a live container, and mounts cannot be added to one, so a
+/// manifest edit takes effect only once `run` recreates it. Otherwise the path
+/// is just missing in the guest.
 ///
-/// A warning, not a failure — recreating the container is the user's call — but
-/// the fix is named, because it is not guessable.
+/// A warning, since recreating is the user's call, but the fix is named because
+/// it is not guessable.
 pub fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
   let name = session.container_name();
 
@@ -153,7 +149,7 @@ pub fn root_breadth(session: &Session) -> Check {
     .iter()
     .filter_map(|entry| {
       // Judged as `add` judges it: `~/code/../.ssh`, or a link to `~/.ssh`, is
-      // still `~/.ssh`. A missing path has nothing to resolve, so is judged as written.
+      // still `~/.ssh`. A missing path is judged as written.
       let judged = entry
         .host
         .canonicalize()

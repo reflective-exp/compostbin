@@ -1,23 +1,26 @@
 //! Turning `compostbin_engine`'s specs into what the bridge carries.
 //!
-//! Lists cross as newline-separated strings, and mounts as tab-separated
-//! triples inside them. Neither separator can occur in what compostbin puts
-//! there: a mount is two host paths and a flag, and `host::request::Request`
-//! already refuses an argument containing a newline on the other side of the
-//! container.
+//! Lists cross as newline-separated strings, mounts as tab-separated triples
+//! within them. Neither separator can occur in the values: a mount is two
+//! host paths and a flag, and `host::request::Request` refuses arguments
+//! containing a newline.
 
 use compostbin_engine::model::{EnvVar, Mount, SocketRelay};
+use std::path::Path;
 
-/// One list element per line. Empty in, empty out — Swift reads `""` as no
-/// elements rather than as one empty one.
+/// One element per line. Swift reads `""` as no elements, not one empty one.
 pub fn lines(values: &[String]) -> String {
   values.join("\n")
 }
 
-/// `source\tdestination\tro?`, in the order the spec declares them, which
-/// matters when one mounted path nests inside another.
-pub fn mounts(mounts: &[Mount]) -> String {
-  let lines: Vec<String> = mounts
+/// The guest's working directory; `/` when none is declared.
+pub fn working_directory(workdir: Option<&Path>) -> String {
+  workdir.map_or_else(|| "/".to_string(), |path| path.display().to_string())
+}
+
+/// `source\tdestination\tro|rw`, in declared order (matters for nested mounts).
+pub fn mounts(mounts: &[Mount]) -> Vec<String> {
+  mounts
     .iter()
     .map(|mount| {
       format!(
@@ -27,32 +30,26 @@ pub fn mounts(mounts: &[Mount]) -> String {
         if mount.readonly { "ro" } else { "rw" }
       )
     })
-    .collect();
-
-  lines.join("\n")
+    .collect()
 }
 
-/// `source\tdestination`, one per line.
+/// `source\tdestination`.
 ///
-/// Not mounts: these are host sockets the guest reaches through, and mounting
-/// one as a filesystem relays nothing. Containerization carries them as
-/// configuration of their own.
-pub fn sockets(sockets: &[SocketRelay]) -> String {
-  let lines: Vec<String> = sockets
+/// Not mounts: a socket mounted as a filesystem relays nothing, so
+/// Containerization configures relays separately.
+pub fn sockets(sockets: &[SocketRelay]) -> Vec<String> {
+  sockets
     .iter()
     .map(|socket| format!("{}\t{}", socket.source.display(), socket.target.display()))
-    .collect();
-
-  lines.join("\n")
+    .collect()
 }
 
-/// `NAME=VALUE` per line.
+/// `NAME=VALUE`.
 ///
-/// An `Inherit` whose variable is not set on the host is dropped rather than
-/// passed empty: the guest telling an unset variable from an empty one is worth
-/// more than the reminder that the manifest asked for it.
-pub fn environment(env: &[EnvVar]) -> String {
-  let lines: Vec<String> = env
+/// An `Inherit` unset on the host is dropped, not passed empty, so the guest
+/// can tell unset from empty.
+pub fn environment(env: &[EnvVar]) -> Vec<String> {
+  env
     .iter()
     .filter_map(|variable| match variable {
       EnvVar::Inherit(name) => std::env::var(name)
@@ -60,36 +57,28 @@ pub fn environment(env: &[EnvVar]) -> String {
         .map(|value| format!("{name}={value}")),
       EnvVar::Set { name, value } => Some(format!("{name}={value}")),
     })
-    .collect();
-
-  lines.join("\n")
+    .collect()
 }
 
-/// The gateway of the network Virtualization.framework's built-in NAT puts a
-/// guest on — macOS's shared networking, the same one every other VZ VM uses.
+/// Gateway of Virtualization.framework's built-in NAT (macOS shared networking).
 ///
-/// Not vmnet: creating a vmnet network wants privileges this binary does not have,
-/// and getting them would mean a privileged helper of its own. NAT needs nothing
-/// beyond the virtualization entitlement.
+/// Not vmnet: that needs privileges, hence a privileged helper. NAT needs only
+/// the virtualization entitlement.
 pub const NAT_GATEWAY: &str = "192.168.64.1";
-/// The prefix length of that network.
 const NAT_PREFIX: u32 = 24;
-/// `.1` is the gateway and `.255` the broadcast, so guests live between these.
+/// `.1` is the gateway and `.255` the broadcast; guests live between these.
 const FIRST_HOST: u32 = 2;
 const LAST_HOST: u32 = 250;
 
 /// The address a session's guest takes on the NAT network.
 ///
-/// Static because nothing assigns one: `Interface` requires an address up
-/// front, and vminitd configures it directly rather than asking for a lease.
-/// Derived from the session name so that it is stable across runs of the same
-/// session and different between two sessions — which is the collision that
-/// would actually happen, two projects open at once.
+/// Static because `Interface` requires an address up front and vminitd
+/// configures it without DHCP. Hashed from the session name: stable per
+/// session, distinct between concurrent sessions.
 ///
-/// It can still collide with something else on the host's shared network, and
-/// there is nothing here that would notice.
+/// Collisions with other hosts on the shared network go undetected.
 pub fn nat_address(name: &str) -> String {
-  // FNV-1a, for no reason beyond being short and well spread.
+  // FNV-1a: short and well spread.
   let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
 
   for byte in name.as_bytes() {
@@ -126,16 +115,22 @@ mod tests {
     ];
 
     assert_eq!(
-      mounts(&declared),
+      lines(&mounts(&declared)),
       "/Users/user/workspace\t/workspace\trw\n/Users/user/.cargo/registry\t/Users/user/.cargo/registry\tro"
     );
   }
 
   #[test]
   fn writes_no_mounts_as_nothing_at_all() {
-    assert_eq!(mounts(&[]), "");
+    assert_eq!(lines(&mounts(&[])), "");
     assert_eq!(lines(&[]), "");
-    assert_eq!(sockets(&[]), "");
+    assert_eq!(lines(&sockets(&[])), "");
+  }
+
+  #[test]
+  fn works_in_the_root_unless_told_otherwise() {
+    assert_eq!(working_directory(None), "/");
+    assert_eq!(working_directory(Some(Path::new("/workspace"))), "/workspace");
   }
 
   #[test]
@@ -147,7 +142,7 @@ mod tests {
 
     assert_eq!(
       sockets(&declared),
-      "/state/ports/7001.sock\t/run/compostbin/ports/7001.sock"
+      ["/state/ports/7001.sock\t/run/compostbin/ports/7001.sock"]
     );
   }
 
@@ -165,7 +160,7 @@ mod tests {
       },
     ];
 
-    assert_eq!(environment(&declared), "COMPOSTBIN_SPEC_TEST=present\nIS_SANDBOX=1");
+    assert_eq!(environment(&declared), ["COMPOSTBIN_SPEC_TEST=present", "IS_SANDBOX=1"]);
   }
 
   #[test]

@@ -1,14 +1,12 @@
 //===----------------------------------------------------------------------===//
 // The VMs this process owns, and the processes running in them.
 //
-// A `LinuxContainer` dies with the process that created it, so the registry is
-// what makes `run` the owner of a session rather than a caller into a daemon:
-// `boot` puts one here, every later `exec` finds it, and the process exiting is
-// what stops it.
+// A `LinuxContainer` dies with the process that created it, so `run` owns its
+// session with no daemon: `boot` registers it here, later `exec`s find it, and
+// process exit stops it.
 //
-// Processes are held for the same reason on a smaller scale: a resize has to
-// reach the `LinuxProcess` that owns the guest pty, and the SIGWINCH that
-// prompts it arrives on a different call than the exec did.
+// Processes are held because a resize must reach the `LinuxProcess` owning the
+// guest pty, and the SIGWINCH arrives on a different call than the exec.
 //===----------------------------------------------------------------------===//
 
 import Containerization
@@ -16,20 +14,19 @@ import ContainerizationOCI
 import Synchronization
 
 struct Booted {
-    /// Held because dropping it would drop the network interface with it.
+    /// Held because dropping it drops the network interface.
     let manager: ContainerManager
     let container: LinuxContainer
-    /// The image's own process configuration — its user above all.
+    /// The image's process configuration, chiefly its user.
     ///
-    /// `ContainerManager.create` seeds the container's first process from this,
-    /// but `LinuxContainer.exec` starts from a bare configuration that runs as
-    /// root. Every later attach has to seed itself, so the image config has to
-    /// outlive the boot that read it.
+    /// `ContainerManager.create` seeds the first process from this, but
+    /// `LinuxContainer.exec` starts from a bare config running as root, so each
+    /// attach seeds itself from this copy.
     let imageConfig: ImageConfig?
 }
 
-/// Bridged calls arrive on Rust threads, one per attached terminal, so this is
-/// reachable from several at once.
+/// Accessed concurrently: bridged calls arrive on one Rust thread per attached
+/// terminal.
 final class Sessions: Sendable {
     static let shared = Sessions()
 
