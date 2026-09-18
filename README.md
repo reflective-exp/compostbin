@@ -89,11 +89,26 @@ conversation.
 compostbin serves the session's host commands while Claude is attached; both
 stop when Claude exits.
 
+`--entrypoint` runs something else in Claude's place, taking the arguments after
+`--`; `-U`/`--user` picks the guest user (default `claude`). Handy for working
+out what the manifest needs:
+
+``` sh
+compostbin run -U root --entrypoint bash
+compostbin run -U root --entrypoint apt-cache -- search ripgrep
+```
+
+Whichever `run` creates the container owns it: when that process exits, the
+container goes, with everything that joined it. A failing `[container] setup`
+line stops only Claude. Changes to the container (an `apt-get install`) die with
+it; keep them in `[image]`.
+
 ### shell
 
 `compostbin shell` opens a bash prompt in a running container, as the
 unprivileged `claude` user, in the project's directory under `/workspace`.
-`-U`/`--user` opens it as another user the image knows, such as `root`.
+`-U`/`--user` opens it as another user the image knows, such as `root`. To
+start the container at a shell, use `run --entrypoint bash`.
 
 ### add
 

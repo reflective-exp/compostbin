@@ -7,7 +7,7 @@ use compostbin_core::doctor::{self, Status};
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, SESSIONS_DIR};
 use compostbin_core::session::credentials::{KEYCHAIN_SERVICE, Keychain};
 use compostbin_core::session::image;
-use compostbin_core::session::{AddOutcome, Notice, Session};
+use compostbin_core::session::{AddOutcome, Notice, Process, Session};
 use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
@@ -25,7 +25,7 @@ fn report(notice: Notice) {
     Notice::Shared(names) => println!("shared from your own ~/.claude: {}", names.join(", ")),
     Notice::Port(event) => eprintln!("compostbin: {event}"),
     Notice::Unpacking(image) => eprintln!("compostbin: unpacking {image}"),
-    Notice::SetupFailed { line, code } => eprintln!("compostbin: setup `{line}` exited {code}; not starting Claude"),
+    Notice::SetupFailed { line, code } => eprintln!("compostbin: setup `{line}` exited {code}"),
     Notice::AgentStopped(error) => eprintln!("compostbin: the host command agent stopped: {error}"),
     Notice::CleanupFailed(error) => eprintln!("compostbin: could not clean up after the session: {error}"),
   }
@@ -130,10 +130,19 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       Ok(0)
     }
 
-    Command::Run { arguments } => {
+    Command::Run {
+      arguments,
+      entrypoint,
+      user,
+    } => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
+      let process = Process {
+        arguments,
+        entrypoint,
+        user,
+      };
 
-      Ok(session.run(&select(&session)?, &Keychain, &arguments, &report)?)
+      Ok(session.run(&select(&session)?, &Keychain, &process, &report)?)
     }
 
     Command::Shell { user } => {

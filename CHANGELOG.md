@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add `--entrypoint <cmd>` and `-U` / `--user <user>` to `run`, to attach
+  something other than Claude.
+
 ## v0.8.1
 
 - Specify a small, random container ID for the container builder.

@@ -1,13 +1,13 @@
 //! How a second terminal reaches a session this process owns.
 //!
-//! The VM dies with the process that created it, so `compostbin shell` connects
-//! to a socket in the session's state directory and the owning process runs
-//! the command on its behalf.
+//! The VM dies with the process that created it, so a joining `run` or `shell`
+//! connects to a socket in the session's state directory and the owning process
+//! runs the command on its behalf.
 //!
 //! What crosses is the client's **terminal**, not its bytes: the request
 //! carries the client's tty via `SCM_RIGHTS`, and the owner hands it straight
 //! to the guest process as stdio. Nothing relays keystrokes, and the owner's
-//! code path is the same as for `run`'s own terminal.
+//! code path is the same as for its own terminal.
 //!
 //! The socket carries only what a descriptor cannot: the request, a nudge per
 //! window resize, and the exit code back.

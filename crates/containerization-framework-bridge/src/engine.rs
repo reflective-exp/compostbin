@@ -3,7 +3,7 @@
 //! A container lives *in* this process, not a daemon. So:
 //!
 //! - The VM lives exactly as long as this process; `run` also starts the
-//!   control socket through which `shell` in another terminal reaches it.
+//!   control socket through which other terminals join it.
 //! - Nothing lists containers. A container is up iff something answers on its
 //!   control socket (one per container, under the runtime directory).
 
@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// one terminal.
 static RESIZED: AtomicBool = AtomicBool::new(false);
 
-/// `run`'s exec id; can't collide with `shell`'s `attach-<n>`.
+/// The owner's exec id; can't collide with a joiner's `attach-<n>`.
 const OWNER_ATTACH: &str = "attach-owner";
 
 const NO_TERMINAL: RawFd = -1;

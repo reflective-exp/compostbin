@@ -4,8 +4,8 @@
 //! buffering, echo, or signal characters. Doing it twice shows up as doubled
 //! characters and a shell that only reacts on return.
 //!
-//! Raw mode belongs to the process that owns the terminal (`run` its own,
-//! `shell` the one it passes over the control socket). Swift takes the
+//! Raw mode belongs to the process that owns the terminal (the owner its own,
+//! a joiner the one it passes over the control socket). Swift takes the
 //! descriptor with `setInitState: false` so it never touches attributes it
 //! doesn't own.
 

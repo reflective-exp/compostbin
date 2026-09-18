@@ -43,11 +43,17 @@ pub enum Command {
   Init,
   /// List the session's mounts
   Ls,
-  /// Start the session and attach Claude
+  /// Start or join the session and attach Claude
   Run {
-    /// Arguments passed through to `claude`
+    /// Arguments passed to the entrypoint
     #[arg(last = true)]
     arguments: Vec<String>,
+    /// Run this instead of `claude`, such as `bash`
+    #[arg(long)]
+    entrypoint: Option<String>,
+    /// The guest user to run it as
+    #[arg(short = 'U', long, default_value = image::USER)]
+    user: String,
   },
   /// Open a shell in the session
   Shell {
@@ -89,13 +95,50 @@ mod tests {
 
   #[test]
   fn parses_run_with_trailing_claude_arguments() {
+    let claude = |arguments: &[&str]| Command::Run {
+      arguments: arguments
+        .iter()
+        .map(|argument| argument.to_string())
+        .collect(),
+      entrypoint: None,
+      user: "claude".to_string(),
+    };
+
     assert_eq!(
       parse(&["compostbin", "run", "--", "--continue", "--model", "opus"]),
+      claude(&["--continue", "--model", "opus"])
+    );
+    assert_eq!(parse(&["compostbin", "run"]), claude(&[]));
+  }
+
+  #[test]
+  fn parses_run_with_another_entrypoint_and_user() {
+    assert_eq!(
+      parse(&[
+        "compostbin",
+        "run",
+        "-U",
+        "root",
+        "--entrypoint",
+        "apt-cache",
+        "--",
+        "search",
+        "ripgrep"
+      ]),
       Command::Run {
-        arguments: vec!["--continue".to_string(), "--model".to_string(), "opus".to_string()],
+        arguments: vec!["search".to_string(), "ripgrep".to_string()],
+        entrypoint: Some("apt-cache".to_string()),
+        user: "root".to_string(),
       }
     );
-    assert_eq!(parse(&["compostbin", "run"]), Command::Run { arguments: Vec::new() });
+    assert_eq!(
+      parse(&["compostbin", "run", "--user", "root", "--entrypoint", "bash"]),
+      Command::Run {
+        arguments: Vec::new(),
+        entrypoint: Some("bash".to_string()),
+        user: "root".to_string(),
+      }
+    );
   }
 
   #[test]

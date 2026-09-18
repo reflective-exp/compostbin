@@ -76,11 +76,42 @@ fn clear(target: &Path) -> Result<(), PathError> {
   Ok(())
 }
 
-/// `claude`, then whatever the caller passes through to it.
-fn claude(arguments: &[String]) -> Vec<String> {
-  std::iter::once("claude".to_string())
-    .chain(arguments.iter().cloned())
-    .collect()
+/// What `run` attaches when told nothing else.
+const DEFAULT_ENTRYPOINT: &str = "claude";
+
+/// The process `run` attaches to the session, and the guest user it runs as.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Process {
+  /// Passed through to the entrypoint.
+  pub arguments: Vec<String>,
+  /// `None` is `claude`.
+  pub entrypoint: Option<String>,
+  pub user: String,
+}
+
+impl Process {
+  pub fn claude(arguments: &[String]) -> Self {
+    Self {
+      arguments: arguments.to_vec(),
+      entrypoint: None,
+      user: image::USER.to_string(),
+    }
+  }
+
+  fn entrypoint(&self) -> &str {
+    self.entrypoint.as_deref().unwrap_or(DEFAULT_ENTRYPOINT)
+  }
+
+  /// Only Claude needs setup to succeed; anything else may be debugging it.
+  fn needs_setup(&self) -> bool {
+    self.entrypoint() == DEFAULT_ENTRYPOINT
+  }
+
+  fn argv(&self) -> Vec<String> {
+    std::iter::once(self.entrypoint().to_string())
+      .chain(self.arguments.iter().cloned())
+      .collect()
+  }
 }
 
 /// Best effort: a log that cannot be written must not take a port down with it.
@@ -106,7 +137,8 @@ pub enum Notice {
   Port(PortEvent),
   /// This image's first run, which unpacks it before the container can start.
   Unpacking(String),
-  /// A `[container] setup` line exited non-zero, so Claude was not started.
+  /// A `[container] setup` line exited non-zero. Stops Claude, not any other
+  /// entrypoint.
   SetupFailed {
     line: String,
     code: i32,
@@ -524,9 +556,8 @@ impl Session {
     Ok(engine.is_running(&self.container_name())?)
   }
 
-  /// Attaches Claude to the session, creating the container first unless it is
-  /// already running, and returns Claude's exit code. `arguments` are passed
-  /// through to `claude`.
+  /// Attaches `process` to the session, creating the container first unless it
+  /// is already running, and returns the process's exit code.
   ///
   /// A second `run` joins the session rather than replacing it, and does
   /// nothing else: the host command agent, the port relay, and the cleanup on
@@ -534,22 +565,25 @@ impl Session {
   /// the sockets again would take them from the relay the container is using,
   /// and one cleaning up as it left would empty a spool still being served.
   ///
+  /// The creator owns the container, Claude or not: when it exits, so does
+  /// everything that joined.
+  ///
   /// Attaching leaves the record alone. It describes the running container, not
   /// the manifest as it reads now, and `doctor` checks the gap between them.
   pub fn run(
     &self,
     engine: &impl Engine,
     credentials: &impl CredentialSource,
-    arguments: &[String],
+    process: &Process,
     notify: &(dyn Fn(Notice) + Sync),
   ) -> Result<i32, SessionError> {
     self.prepare(credentials, notify)?;
 
     if self.is_running(engine)? {
-      return Ok(engine.exec(&self.exec_spec(&claude(arguments)))?);
+      return Ok(engine.exec(&self.process_spec(process))?);
     }
 
-    self.launch(engine, arguments, notify)
+    self.launch(engine, process, notify)
   }
 
   /// Seeds Claude's token and shares the host's settings into Claude's home: a
@@ -578,7 +612,7 @@ impl Session {
     Ok(())
   }
 
-  /// Creates the container and serves it until Claude exits.
+  /// Creates the container and serves it until `process` exits.
   ///
   /// The port sockets are bound first: each has to already be a socket when the
   /// container's relays are set up, and they are set up at creation. The agent
@@ -591,7 +625,7 @@ impl Session {
   fn launch(
     &self,
     engine: &impl Engine,
-    arguments: &[String],
+    process: &Process,
     notify: &(dyn Fn(Notice) + Sync),
   ) -> Result<i32, SessionError> {
     self.prepare_host_spool()?;
@@ -624,9 +658,9 @@ impl Session {
         scope.spawn(|| host::relay(&bound, &stop, &log_port));
       }
 
-      let code = match self.set_up(engine, notify) {
+      let code = match self.set_up(engine, process, notify) {
         Ok(0) => engine
-          .exec(&self.exec_spec(&claude(arguments)))
+          .exec(&self.process_spec(process))
           .map_err(SessionError::from),
         failed => failed,
       };
@@ -643,11 +677,17 @@ impl Session {
     Ok(code)
   }
 
-  /// Runs `[container] setup`, returning the first non-zero exit code.
+  /// Runs `[container] setup`, stopping at the first failing line. Returns its
+  /// exit code if `process` needs setup, else 0.
   ///
   /// Called once the host agent and relay are up, so a line may use them. Same
   /// shell as `[image] run`.
-  fn set_up(&self, engine: &impl Engine, notify: &(dyn Fn(Notice) + Sync)) -> Result<i32, SessionError> {
+  fn set_up(
+    &self,
+    engine: &impl Engine,
+    process: &Process,
+    notify: &(dyn Fn(Notice) + Sync),
+  ) -> Result<i32, SessionError> {
     for line in &self.manifest.container.setup {
       let code = engine.exec(&self.exec_spec(&[
         "bash".to_string(),
@@ -662,7 +702,7 @@ impl Session {
           line: line.clone(),
           code,
         });
-        return Ok(code);
+        return Ok(if process.needs_setup() { code } else { 0 });
       }
     }
 
@@ -710,6 +750,14 @@ impl Session {
       tty: true,
       user: None,
       workdir: Some(self.workdir()),
+    }
+  }
+
+  /// `exec_spec` for what `run` attaches, as its user.
+  pub fn process_spec(&self, process: &Process) -> ExecSpec {
+    ExecSpec {
+      user: Some(process.user.clone()),
+      ..self.exec_spec(&process.argv())
     }
   }
 
@@ -771,8 +819,20 @@ source   = "~/.cargo/registry"
 
   fn run(session: &Session, engine: &RecordingEngine) -> i32 {
     session
-      .run(engine, &FakeSource(None), &[], &quiet)
+      .run(engine, &FakeSource(None), &Process::claude(&[]), &quiet)
       .expect("run should succeed")
+  }
+
+  fn claude(session: &Session) -> Call {
+    Call::Exec(session.process_spec(&Process::claude(&[])))
+  }
+
+  fn root_shell() -> Process {
+    Process {
+      arguments: Vec::new(),
+      entrypoint: Some("bash".to_string()),
+      user: "root".to_string(),
+    }
   }
 
   #[test]
@@ -842,12 +902,54 @@ source   = "~/.cargo/registry"
 
     assert_eq!(
       engine.calls(),
-      [
-        Call::IsRunning("compostbin-cb".to_string()),
-        Call::Exec(session.exec_spec(&["claude".to_string()]))
-      ],
+      [Call::IsRunning("compostbin-cb".to_string()), claude(&session)],
       "a running container must not be recreated"
     );
+  }
+
+  #[test]
+  fn run_attaches_another_process_to_a_running_container() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = session_under(&base);
+    let engine = RecordingEngine::with_running(&["compostbin-cb"]);
+
+    session
+      .run(&engine, &FakeSource(None), &root_shell(), &quiet)
+      .expect("run should succeed");
+
+    assert_eq!(
+      engine.calls(),
+      [
+        Call::IsRunning("compostbin-cb".to_string()),
+        Call::Exec(session.process_spec(&root_shell())),
+      ]
+    );
+  }
+
+  /// A shell can start the session as well as Claude can.
+  #[test]
+  fn run_creates_a_container_for_another_process() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = session_under(&base);
+    let engine = RecordingEngine::new();
+
+    session
+      .run(&engine, &FakeSource(None), &root_shell(), &quiet)
+      .expect("run should succeed");
+
+    assert_eq!(
+      engine.calls(),
+      [
+        Call::IsRunning("compostbin-cb".to_string()),
+        Call::IsUnpacked(session.run_spec().image),
+        Call::Run(session.run_spec()),
+        Call::Exec(session.process_spec(&root_shell())),
+      ]
+    );
+    assert_eq!(session.process_spec(&root_shell()).arguments, ["bash".to_string()]);
+    assert_eq!(session.process_spec(&root_shell()).user, Some("root".to_string()));
   }
 
   /// Another session's container is not this one: `run` creates its own.
@@ -866,7 +968,7 @@ source   = "~/.cargo/registry"
         Call::IsRunning("compostbin-cb".to_string()),
         Call::IsUnpacked(session.run_spec().image),
         Call::Run(session.run_spec()),
-        Call::Exec(session.exec_spec(&["claude".to_string()])),
+        claude(&session),
       ]
     );
   }
@@ -882,7 +984,7 @@ source   = "~/.cargo/registry"
       let said = std::sync::Mutex::new(Vec::new());
 
       session
-        .run(engine, &FakeSource(None), &[], &|notice| {
+        .run(engine, &FakeSource(None), &Process::claude(&[]), &|notice| {
           if let Notice::Unpacking(image) = notice {
             said.lock().expect("unpoisoned").push(image);
           }
@@ -906,16 +1008,18 @@ source   = "~/.cargo/registry"
     let session = session_under(&base);
     let engine = RecordingEngine::new();
 
+    let process = Process::claude(&["--continue".to_string()]);
+
     session
-      .run(&engine, &FakeSource(None), &["--continue".to_string()], &quiet)
+      .run(&engine, &FakeSource(None), &process, &quiet)
       .expect("run should succeed");
 
+    assert_eq!(engine.calls().last(), Some(&Call::Exec(session.process_spec(&process))));
     assert_eq!(
-      engine.calls().last(),
-      Some(&Call::Exec(
-        session.exec_spec(&["claude".to_string(), "--continue".to_string()])
-      ))
+      session.process_spec(&process).arguments,
+      ["claude".to_string(), "--continue".to_string()]
     );
+    assert_eq!(session.process_spec(&process).user, Some("claude".to_string()));
   }
 
   fn setup_spec(session: &Session, line: &str) -> ExecSpec {
@@ -937,7 +1041,7 @@ source   = "~/.cargo/registry"
       [
         Call::Exec(setup_spec(&session, "./bin/setup")),
         Call::Exec(setup_spec(&session, "true")),
-        Call::Exec(session.exec_spec(&["claude".to_string()])),
+        claude(&session),
       ]
     );
   }
@@ -953,10 +1057,7 @@ source   = "~/.cargo/registry"
 
     run(&session, &engine);
 
-    assert_eq!(
-      engine.calls().last(),
-      Some(&Call::Exec(session.exec_spec(&["claude".to_string()])))
-    );
+    assert_eq!(engine.calls().last(), Some(&claude(&session)));
     assert_eq!(engine.calls().len(), 2);
   }
 
@@ -970,7 +1071,7 @@ source   = "~/.cargo/registry"
     let said = std::sync::Mutex::new(Vec::new());
 
     let code = session
-      .run(&engine, &FakeSource(None), &[], &|notice| {
+      .run(&engine, &FakeSource(None), &Process::claude(&[]), &|notice| {
         if let Notice::SetupFailed { line, code } = notice {
           said.lock().expect("unpoisoned").push((line, code));
         }
@@ -980,6 +1081,35 @@ source   = "~/.cargo/registry"
     assert_eq!(code, 3);
     assert_eq!(said.into_inner().expect("unpoisoned"), [("false".to_string(), 3)]);
     assert_eq!(engine.calls().last(), Some(&Call::Exec(setup_spec(&session, "false"))));
+  }
+
+  /// A shell may be there to find out why setup fails.
+  #[test]
+  fn failed_setup_still_starts_another_process() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let mut session = session_under(&base);
+    session.manifest.container.setup = vec!["false".to_string(), "true".to_string()];
+    let engine = RecordingEngine::exiting_with(3);
+    let said = std::sync::Mutex::new(Vec::new());
+
+    session
+      .run(&engine, &FakeSource(None), &root_shell(), &|notice| {
+        if let Notice::SetupFailed { line, code } = notice {
+          said.lock().expect("unpoisoned").push((line, code));
+        }
+      })
+      .expect("run should succeed");
+
+    assert_eq!(said.into_inner().expect("unpoisoned"), [("false".to_string(), 3)]);
+    assert_eq!(
+      engine.calls()[3..],
+      [
+        Call::Exec(setup_spec(&session, "false")),
+        Call::Exec(session.process_spec(&root_shell())),
+      ],
+      "setup stops at the failing line"
+    );
   }
 
   /// Declared ports are bound before the container is created, since each has
@@ -1029,7 +1159,7 @@ source   = "~/.cargo/registry"
     let engine = RecordingEngine::with_unpacked(&[&session.run_spec().image]);
 
     session
-      .run(&engine, &FakeSource(None), &[], &|notice| {
+      .run(&engine, &FakeSource(None), &Process::claude(&[]), &|notice| {
         said.lock().expect("lock").push(format!("{notice:?}"))
       })
       .expect("run should succeed");
