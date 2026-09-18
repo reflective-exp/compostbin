@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.8.0
+
 - **Breaking:** build images with Containerization instead of `container build`
   and BuildKit. Removes last references to Apple's `container` CLI.
   - Requires rebuilding images!
