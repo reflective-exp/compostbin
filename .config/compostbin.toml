@@ -5,6 +5,7 @@ seed_from_keychain = true
 cpus = 4
 env = []
 memory = "8G"
+setup = ["direnv allow"]
 
 [host]
 clipboard = true

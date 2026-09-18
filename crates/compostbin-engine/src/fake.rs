@@ -47,6 +47,8 @@ pub struct RecordingEngine {
   /// `None` poses an engine that cannot say what images exist.
   images: Option<Vec<String>>,
   version: Option<String>,
+  /// What every `exec` exits with.
+  exit_code: i32,
 }
 
 impl RecordingEngine {
@@ -79,6 +81,14 @@ impl RecordingEngine {
     }
   }
 
+  /// Poses an engine whose every `exec` exits with this code.
+  pub fn exiting_with(code: i32) -> Self {
+    Self {
+      exit_code: code,
+      ..Self::default()
+    }
+  }
+
   pub fn calls(&self) -> Vec<Call> {
     self.calls.all()
   }
@@ -87,7 +97,7 @@ impl RecordingEngine {
 impl Engine for RecordingEngine {
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError> {
     self.calls.record(Call::Exec(spec.clone()));
-    Ok(0)
+    Ok(self.exit_code)
   }
 
   fn images(&self) -> Result<Vec<String>, EngineError> {

@@ -143,6 +143,9 @@ name  = "compostbin"
 cpus   = 4
 memory = "8G"
 env    = ["GITHUB_TOKEN"]
+# Run in the project directory when the container is created, before Claude.
+# A failing line stops the session.
+setup  = ["direnv allow"]
 
 # Trees whose contents may be mounted. Empty by default: mounting a whole
 # workspace read-write is opt-in. The directory you run compostbin in is

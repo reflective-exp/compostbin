@@ -107,6 +107,11 @@ pub enum Notice {
   Port(PortEvent),
   /// This image's first run, which unpacks it before the container can start.
   Unpacking(String),
+  /// A `[container] setup` line exited non-zero, so Claude was not started.
+  SetupFailed {
+    line: String,
+    code: i32,
+  },
   /// The host command agent gave up; the session carries on without it.
   AgentStopped(PathError),
   /// The spool could not be emptied after Claude exited.
@@ -615,7 +620,12 @@ impl Session {
         scope.spawn(|| host::relay(&bound, &stop, &log_port));
       }
 
-      let code = engine.exec(&self.exec_spec(&claude(arguments)));
+      let code = match self.set_up(engine, notify) {
+        Ok(0) => engine
+          .exec(&self.exec_spec(&claude(arguments)))
+          .map_err(SessionError::from),
+        failed => failed,
+      };
       stop.store(true, Ordering::Relaxed);
       code
     })?;
@@ -627,6 +637,32 @@ impl Session {
     }
 
     Ok(code)
+  }
+
+  /// Runs `[container] setup`, returning the first non-zero exit code.
+  ///
+  /// Called once the host agent and relay are up, so a line may use them. Same
+  /// shell as `[image] run`.
+  fn set_up(&self, engine: &impl Engine, notify: &(dyn Fn(Notice) + Sync)) -> Result<i32, SessionError> {
+    for line in &self.manifest.container.setup {
+      let code = engine.exec(&self.exec_spec(&[
+        "bash".to_string(),
+        "-euo".to_string(),
+        "pipefail".to_string(),
+        "-c".to_string(),
+        line.clone(),
+      ]))?;
+
+      if code != 0 {
+        notify(Notice::SetupFailed {
+          line: line.clone(),
+          code,
+        });
+        return Ok(code);
+      }
+    }
+
+    Ok(0)
   }
 
   /// `IS_SANDBOX=1` tells Claude it is already sandboxed.
@@ -879,6 +915,70 @@ source   = "~/.cargo/registry"
         session.exec_spec(&["claude".to_string(), "--continue".to_string()])
       ))
     );
+  }
+
+  fn setup_spec(session: &Session, line: &str) -> ExecSpec {
+    session.exec_spec(&["bash", "-euo", "pipefail", "-c", line].map(str::to_string))
+  }
+
+  #[test]
+  fn run_sets_up_a_new_container_before_starting_claude() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let mut session = session_under(&base);
+    session.manifest.container.setup = vec!["./bin/setup".to_string(), "true".to_string()];
+    let engine = RecordingEngine::new();
+
+    run(&session, &engine);
+
+    assert_eq!(
+      engine.calls()[3..],
+      [
+        Call::Exec(setup_spec(&session, "./bin/setup")),
+        Call::Exec(setup_spec(&session, "true")),
+        Call::Exec(session.exec_spec(&["claude".to_string()])),
+      ]
+    );
+  }
+
+  /// The creator already set it up.
+  #[test]
+  fn joining_a_running_session_sets_nothing_up() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let mut session = session_under(&base);
+    session.manifest.container.setup = vec!["./bin/setup".to_string()];
+    let engine = RecordingEngine::with_running(&["compostbin-cb"]);
+
+    run(&session, &engine);
+
+    assert_eq!(
+      engine.calls().last(),
+      Some(&Call::Exec(session.exec_spec(&["claude".to_string()])))
+    );
+    assert_eq!(engine.calls().len(), 2);
+  }
+
+  #[test]
+  fn failed_setup_does_not_start_claude() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let mut session = session_under(&base);
+    session.manifest.container.setup = vec!["false".to_string(), "true".to_string()];
+    let engine = RecordingEngine::exiting_with(3);
+    let said = std::sync::Mutex::new(Vec::new());
+
+    let code = session
+      .run(&engine, &NoToken, &[], &|notice| {
+        if let Notice::SetupFailed { line, code } = notice {
+          said.lock().expect("unpoisoned").push((line, code));
+        }
+      })
+      .expect("run should succeed");
+
+    assert_eq!(code, 3);
+    assert_eq!(said.into_inner().expect("unpoisoned"), [("false".to_string(), 3)]);
+    assert_eq!(engine.calls().last(), Some(&Call::Exec(setup_spec(&session, "false"))));
   }
 
   /// Declared ports are bound before the container is created, since each has
@@ -1277,7 +1377,7 @@ source   = "~/.cargo/registry"
     assert_eq!(session().image(), "compostbin/base:latest");
 
     let mut session = session();
-    session.manifest.image.packages = vec!["direnv".to_string()];
+    session.manifest.image.packages = vec!["jq".to_string()];
 
     assert_eq!(session.image(), "compostbin/compostbin-cb:latest");
     assert_eq!(

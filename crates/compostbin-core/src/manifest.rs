@@ -181,6 +181,10 @@ pub struct ContainerConfig {
   pub cpus: u32,
   pub env: Vec<String>,
   pub memory: Memory,
+  /// Shell lines run as `claude` in the project directory when the container is
+  /// created, before Claude — for what needs the mounted workspace.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub setup: Vec<String>,
 }
 
 impl Default for ContainerConfig {
@@ -189,6 +193,7 @@ impl Default for ContainerConfig {
       cpus: DEFAULT_CONTAINER_CPUS,
       env: Vec::new(),
       memory: DEFAULT_CONTAINER_MEMORY,
+      setup: Vec::new(),
     }
   }
 }
@@ -371,7 +376,7 @@ pub struct HostCommand {
 }
 
 /// Per-project image additions, for what belongs to one project rather than
-/// every project — direnv, say. Non-empty means the session runs a derived image
+/// every project. Non-empty means the session runs a derived image
 /// built `FROM` the base; empty means it runs the base image itself.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -471,6 +476,7 @@ name  = "compostbin"
 cpus   = 4
 env    = ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
 memory = "8G"
+setup  = ["./bin/setup"]
 
 [workspace]
 roots = ["~/workspace"]
@@ -488,8 +494,8 @@ seed_from_keychain = true
 shared             = ["agents"]
 
 [image]
-packages    = ["direnv"]
-run         = ["echo 'eval \"$(direnv hook bash)\"' >> ~/.bashrc"]
+packages    = ["jq"]
+run         = ["echo 'alias ll=\"ls -l\"' >> ~/.bashrc"]
 run_as_root = ["install -d -o claude /opt/vendor"]
 "#;
 
@@ -501,10 +507,11 @@ shared = ["agents"]
 cpus = 4
 env = ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
 memory = "8G"
+setup = ["./bin/setup"]
 
 [image]
-packages = ["direnv"]
-run = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
+packages = ["jq"]
+run = ["""echo 'alias ll="ls -l"' >> ~/.bashrc"""]
 run_as_root = ["install -d -o claude /opt/vendor"]
 
 [[paths]]
@@ -795,6 +802,7 @@ tty = true
     assert_eq!(manifest.container.cpus, 4);
     assert_eq!(manifest.container.env, ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]);
     assert_eq!(manifest.container.memory, Memory::gibibytes(8));
+    assert_eq!(manifest.container.setup, ["./bin/setup"]);
 
     assert_eq!(manifest.workspace.roots, ["~/workspace"]);
 
@@ -810,7 +818,7 @@ tty = true
     assert_eq!(manifest.claude.seed_from_keychain, true);
     assert_eq!(manifest.claude.shared, ["agents"]);
 
-    assert_eq!(manifest.image.packages, ["direnv"]);
+    assert_eq!(manifest.image.packages, ["jq"]);
     assert_eq!(manifest.image.run.len(), 1);
     assert_eq!(manifest.image.run_as_root, ["install -d -o claude /opt/vendor"]);
   }
@@ -910,6 +918,7 @@ source = "~/a-first"
     assert_eq!(manifest.container.cpus, 4);
     assert_eq!(manifest.container.env, [] as [String; 0]);
     assert_eq!(manifest.container.memory, Memory::gibibytes(8));
+    assert_eq!(manifest.container.setup, [] as [String; 0]);
 
     assert_eq!(manifest.workspace.roots, [] as [String; 0]);
     assert_eq!(manifest.paths.len(), 0);

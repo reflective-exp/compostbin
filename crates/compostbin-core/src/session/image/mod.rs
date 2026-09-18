@@ -79,7 +79,7 @@ pub const GUEST_SCRIPTS: [(&str, &str); 3] = [
 /// anything to it.
 ///
 /// The base is shared by every project, so anything belonging to one project —
-/// direnv, a language toolchain, a private CA — goes in the derived image rather
+/// a language toolchain, a private CA — goes in the derived image rather
 /// than growing the base for everyone.
 pub fn build(session: &Session, builder: &impl Builder, cache: bool) -> Result<(), ImageError> {
   let context = context(session);
@@ -333,7 +333,7 @@ mod tests {
     let mut session = session(&home);
     session.manifest.container.cpus = 16;
     session.manifest.container.memory = crate::manifest::Memory::gibibytes(16);
-    session.manifest.image.packages = vec!["direnv".to_string()];
+    session.manifest.image.packages = vec!["jq".to_string()];
     let builder = RecordingBuilder::new();
 
     build(&session, &builder, true).expect("build should succeed");
@@ -355,7 +355,7 @@ mod tests {
   fn builds_a_project_image_from_manifest_additions() {
     let home = TempDir::new().expect("temp dir");
     let mut session = session(&home);
-    session.manifest = toml::from_str("[image]\npackages = [\"direnv\"]\nrun = [\"echo hook >> ~/.bashrc\"]\n")
+    session.manifest = toml::from_str("[image]\npackages = [\"jq\"]\nrun = [\"echo hook >> ~/.bashrc\"]\n")
       .expect("manifest should parse");
     let plan = project_plan(&session).expect("additions should produce a plan");
 
@@ -364,7 +364,7 @@ mod tests {
       "the project image extends the base rather than repeating it"
     );
     assert_eq!(plan.tag, session.image());
-    assert!(plan.steps[0].script.contains("      direnv"), "{:?}", plan.steps);
+    assert!(plan.steps[0].script.contains("      jq"), "{:?}", plan.steps);
     assert_eq!(
       plan.steps[1],
       BuildStep::as_user("echo hook >> ~/.bashrc", USER, "echo hook >> ~/.bashrc"),
@@ -422,7 +422,7 @@ mod tests {
   fn builds_the_project_image_after_the_base() {
     let home = TempDir::new().expect("temp dir");
     let mut session = session(&home);
-    session.manifest.image.packages = vec!["direnv".to_string()];
+    session.manifest.image.packages = vec!["jq".to_string()];
     let builder = RecordingBuilder::new();
 
     build(&session, &builder, true).expect("build should succeed");
