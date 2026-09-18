@@ -123,21 +123,24 @@ func compostbin_provision(spec: RustStr) -> Int32 {
 ///
 /// `terminal` is a descriptor this process can use: its own when `run` attaches
 /// Claude, or one `compostbin shell` passed across the control socket. `-1`
-/// runs without a terminal at all.
+/// runs without a terminal at all. An empty `user` is the image's own.
 func compostbin_exec(
     name: RustStr,
     id: RustStr,
     arguments: RustStr,
     environment: RustStr,
+    user: RustStr,
     working_directory: RustStr,
     terminal: Int32
 ) -> Int32 {
     reporting {
+        let user = user.toString()
         let request = ExecRequest(
             name: name.toString(),
             id: id.toString(),
             arguments: lines(arguments),
             environment: lines(environment),
+            user: user.isEmpty ? nil : user,
             workingDirectory: working_directory.toString(),
             terminal: terminal
         )

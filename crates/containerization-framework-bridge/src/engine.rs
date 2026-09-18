@@ -66,6 +66,7 @@ impl FrameworkEngine {
       id,
       &spec::lines(&spec.arguments),
       &spec::environment(&spec.env),
+      spec.user.as_deref().unwrap_or(""),
       &spec
         .workdir
         .as_ref()
@@ -96,6 +97,7 @@ impl FrameworkEngine {
             id,
             &spec::lines(&request.arguments),
             &spec::lines(&request.environment),
+            request.user.as_deref().unwrap_or(""),
             &request.working_directory,
             terminal,
           )
@@ -152,6 +154,7 @@ impl Engine for FrameworkEngine {
         .lines()
         .map(str::to_string)
         .collect(),
+      user: spec.user.clone(),
       working_directory: spec
         .workdir
         .as_ref()

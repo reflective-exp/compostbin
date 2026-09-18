@@ -106,6 +106,8 @@ pub struct ExecSpec {
   pub name: String,
   /// Whether it gets a terminal.
   pub tty: bool,
+  /// The guest user, as the image names it. `None` is the image's own user.
+  pub user: Option<String>,
   pub workdir: Option<PathBuf>,
 }
 

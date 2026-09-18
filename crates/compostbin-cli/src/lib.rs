@@ -12,6 +12,7 @@ use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
 use compostbin_engine::engine::Engine;
+use compostbin_engine::model::ExecSpec;
 use containerization_framework_bridge::{FrameworkBuilder, FrameworkEngine, Store};
 use std::error::Error;
 use std::path::Path;
@@ -135,9 +136,14 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       Ok(session.run(&select(&session)?, &Keychain, &arguments, &report)?)
     }
 
-    Command::Shell => {
+    Command::Shell { user } => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
-      Ok(select(&session)?.exec(&session.exec_spec(&["bash".to_string()]))?)
+      let spec = ExecSpec {
+        user: Some(user),
+        ..session.exec_spec(&["bash".to_string()])
+      };
+
+      Ok(select(&session)?.exec(&spec)?)
     }
   }
 }

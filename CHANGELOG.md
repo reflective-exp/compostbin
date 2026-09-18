@@ -13,6 +13,7 @@
   first, and sessions on one image share disk blocks.
 - Add `[container] setup`, shell lines run as `claude` in the project directory
   each time the container is created, before Claude starts.
+- Add `-U` / `--user <user>` to `shell`. Defaults to the claude user.
 
 ## v0.7.0
 

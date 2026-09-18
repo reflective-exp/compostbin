@@ -700,6 +700,7 @@ impl Session {
       interactive: true,
       name: self.container_name(),
       tty: true,
+      user: None,
       workdir: Some(self.workdir()),
     }
   }
@@ -1168,6 +1169,7 @@ source   = "~/.cargo/registry"
         interactive: true,
         name: "compostbin-cb".to_string(),
         tty: true,
+        user: None,
         workdir: Some(PathBuf::from("/workspace/workspace/compostbin")),
       }
     );

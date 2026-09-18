@@ -45,27 +45,32 @@ const RESIZE_POLL: Duration = Duration::from_millis(100);
 pub struct Request {
   pub arguments: Vec<String>,
   pub environment: Vec<String>,
+  /// `None` is the image's own user, and crosses as an empty line.
+  pub user: Option<String>,
   pub working_directory: String,
 }
 
 impl Request {
   fn encode(&self) -> String {
     format!(
-      "{}\n{}\n{}",
+      "{}\n{}\n{}\n{}",
       self.arguments.join(&UNIT.to_string()),
       self.environment.join(&UNIT.to_string()),
+      self.user.as_deref().unwrap_or(""),
       self.working_directory
     )
   }
 
   fn decode(payload: &str) -> Option<Self> {
-    let mut lines = payload.splitn(3, '\n');
+    let mut lines = payload.splitn(4, '\n');
     let arguments = lines.next()?;
     let environment = lines.next()?;
+    let user = lines.next()?;
 
     Some(Self {
       arguments: split(arguments),
       environment: split(environment),
+      user: (!user.is_empty()).then(|| user.to_string()),
       working_directory: lines.next()?.to_string(),
     })
   }
@@ -351,6 +356,7 @@ mod tests {
     Request {
       arguments: vec!["bash".to_string()],
       environment: vec!["IS_SANDBOX=1".to_string(), "TERM=xterm".to_string()],
+      user: Some("root".to_string()),
       working_directory: "/workspace/compostbin".to_string(),
     }
   }
@@ -365,6 +371,7 @@ mod tests {
     let empty = Request {
       arguments: Vec::new(),
       environment: Vec::new(),
+      user: None,
       working_directory: "/".to_string(),
     };
 
@@ -374,6 +381,7 @@ mod tests {
   #[test]
   fn reads_nothing_from_a_truncated_request() {
     assert_eq!(Request::decode("bash"), None);
+    assert_eq!(Request::decode("bash\nIS_SANDBOX=1\n/workspace"), None);
   }
 
   /// `served` connects and closes. Reporting that as a malformed request put a

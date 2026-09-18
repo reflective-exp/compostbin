@@ -93,8 +93,9 @@ stop when Claude exits.
 
 ### shell
 
-`compostbin shell` opens a bash prompt in a running container, as an unprivileged
-user, in the project's directory under `/workspace`.
+`compostbin shell` opens a bash prompt in a running container, as the
+unprivileged `claude` user, in the project's directory under `/workspace`.
+`-U`/`--user` opens it as another user the image knows, such as `root`.
 
 ### add
 

@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use compostbin_core::session::image;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -49,7 +50,11 @@ pub enum Command {
     arguments: Vec<String>,
   },
   /// Open a shell in the session
-  Shell,
+  Shell {
+    /// The guest user to open it as
+    #[arg(short = 'U', long, default_value = image::USER)]
+    user: String,
+  },
 }
 
 #[cfg(test)]
@@ -99,6 +104,14 @@ mod tests {
     assert_eq!(parse(&["compostbin", "clean", "--all"]), Command::Clean { all: true });
     assert_eq!(parse(&["compostbin", "init"]), Command::Init);
     assert_eq!(parse(&["compostbin", "ls"]), Command::Ls);
-    assert_eq!(parse(&["compostbin", "shell"]), Command::Shell);
+  }
+
+  #[test]
+  fn parses_shell_as_claude_unless_told_otherwise() {
+    let shell = |user: &str| Command::Shell { user: user.to_string() };
+
+    assert_eq!(parse(&["compostbin", "shell"]), shell("claude"));
+    assert_eq!(parse(&["compostbin", "shell", "-U", "root"]), shell("root"));
+    assert_eq!(parse(&["compostbin", "shell", "--user", "root"]), shell("root"));
   }
 }

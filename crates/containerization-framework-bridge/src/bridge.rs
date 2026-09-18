@@ -31,6 +31,7 @@ pub(crate) mod ffi {
       id: &str,
       arguments: &str,
       environment: &str,
+      user: &str,
       working_directory: &str,
       terminal: i32,
     ) -> i32;

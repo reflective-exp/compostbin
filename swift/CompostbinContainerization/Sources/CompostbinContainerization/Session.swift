@@ -43,6 +43,8 @@ struct ExecRequest {
     var id: String
     var arguments: [String]
     var environment: [String]
+    /// The guest user, as the image names it. The image's own user when absent.
+    var user: String?
     var workingDirectory: String
     /// The terminal to attach. `-1` runs the process without one.
     var terminal: Int32
@@ -212,6 +214,10 @@ enum Session {
             // Ours last, so a variable the session sets beats the image's.
             config.environmentVariables += request.environment
             config.workingDirectory = request.workingDirectory
+
+            if let user = request.user {
+                config.user = User(username: user)
+            }
 
             if let terminal {
                 config.setTerminalIO(terminal: terminal)
