@@ -75,12 +75,7 @@ enum BridgeError: Error, CustomStringConvertible {
         case .notCloned(let name, let reason):
             return "could not copy \(name): \(reason)"
         case .unentitled:
-            return """
-                this build is not signed for virtualization — run `bin/dev/sign \
-                <binary>`, or `bin/dev/start`, which signs what it builds. \
-                A signature does not survive a rebuild, so a plain `cargo build` \
-                always lands here
-                """
+            return "this build is not signed for virtualization!"
         }
     }
 }
