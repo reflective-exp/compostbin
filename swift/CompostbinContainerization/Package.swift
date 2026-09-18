@@ -1,6 +1,16 @@
 // swift-tools-version: 6.2
 
+import Foundation
 import PackageDescription
+
+// Set here rather than as a `-Xswiftc` flag on `swift build`, which SwiftPM
+// applies to every target it compiles: that makes swift-bridge's regenerated
+// header an input to swift-nio, gRPC and Containerization too, and a minute of
+// rebuilding out of every change to the Rust bridge.
+//
+// Absolute, because the flag reaches the compiler verbatim and nothing promises
+// what its working directory will be.
+let bridgingHeader = "\(URL(fileURLWithPath: #filePath).deletingLastPathComponent().path)/Sources/CompostbinContainerization/bridging-header.h"
 
 // Pinned exactly, not `from:`. The initfs image in the `container` CLI's store
 // is built by a specific Containerization release — `vminit:0.45.0` — and the
@@ -28,7 +38,8 @@ let package = Package(
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "ContainerizationOS", package: "containerization"),
-            ]
+            ],
+            swiftSettings: [.unsafeFlags(["-import-objc-header", bridgingHeader])]
         )
     ]
 )

@@ -62,20 +62,44 @@ fn publish_bridge_shims(generated: &std::path::Path) {
   std::fs::write(&path, published).expect("the generated glue should be writable");
 }
 
+/// Copies freshly generated glue into the package, skipping files whose
+/// contents have not changed.
+///
+/// swift-bridge rewrites its output every run and SwiftPM keys incrementality
+/// off mtimes, so rewriting identical bytes is enough to make `swift build`
+/// recompile the module — and to make cargo rerun this script, which watches
+/// the directory it would be writing into.
+fn sync_generated(staged: &std::path::Path, generated: &std::path::Path) {
+  std::fs::create_dir_all(generated).expect("the generated directory should be creatable");
+
+  for entry in std::fs::read_dir(staged).expect("swift-bridge should have just written the glue") {
+    let entry = entry.expect("a readable directory entry");
+    let destination = generated.join(entry.file_name());
+
+    if entry.file_type().expect("a stat-able entry").is_dir() {
+      sync_generated(&entry.path(), &destination);
+      continue;
+    }
+
+    let fresh = std::fs::read(entry.path()).expect("a readable generated file");
+
+    if std::fs::read(&destination).is_ok_and(|current| current == fresh) {
+      continue;
+    }
+
+    std::fs::write(&destination, fresh).expect("the generated glue should be writable");
+  }
+}
+
 /// Compiles the Swift package to a static library.
 ///
-/// The bridging header is passed rather than committed into the module: it
-/// names files swift-bridge has only just generated, so it cannot be part of
-/// the package's own source list.
+/// The bridging header is named by the package's own `swiftSettings` rather
+/// than passed here as `-Xswiftc`, which SwiftPM would apply to every target in
+/// the dependency graph.
 fn compile_swift() {
-  let header = swift_source_dir().join("bridging-header.h");
   let mut command = Command::new("swift");
 
-  command
-    .current_dir(swift_package_dir())
-    .arg("build")
-    .args(["-Xswiftc", "-import-objc-header"])
-    .args(["-Xswiftc", header.to_str().expect("a utf-8 path")]);
+  command.current_dir(swift_package_dir()).arg("build");
 
   if is_release() {
     command.args(["-c", "release"]);
@@ -148,10 +172,11 @@ fn main() {
     swift_package_dir().join("Package.swift").display()
   );
 
-  let generated = swift_source_dir().join("generated");
+  let staged = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR")).join("swift-bridge");
 
-  swift_bridge_build::parse_bridges(vec![manifest_dir().join("src/lib.rs")]).write_all_concatenated(&generated, BRIDGE);
-  publish_bridge_shims(&generated);
+  swift_bridge_build::parse_bridges(vec![manifest_dir().join("src/lib.rs")]).write_all_concatenated(&staged, BRIDGE);
+  publish_bridge_shims(&staged);
+  sync_generated(&staged, &swift_source_dir().join("generated"));
 
   compile_swift();
 
