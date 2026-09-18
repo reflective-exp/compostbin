@@ -42,6 +42,8 @@ pub struct BuildPlan {
   /// The image the steps run on top of, registry-qualified: nothing resolves a
   /// bare `debian:stable-slim` into `docker.io/library/…`.
   pub base: String,
+  /// Whether to start from cached snapshots. Off still writes them.
+  pub cache: bool,
   /// A host directory the steps may read, mounted read-only. This is what a
   /// `COPY` is: a step installs out of it.
   pub context: Option<PathBuf>,
@@ -63,6 +65,7 @@ impl BuildPlan {
   pub fn new(base: impl Into<String>, tag: impl Into<String>) -> Self {
     Self {
       base: base.into(),
+      cache: true,
       context: None,
       cpus: None,
       environment: Vec::new(),

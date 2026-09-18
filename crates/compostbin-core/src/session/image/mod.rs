@@ -21,7 +21,8 @@ pub const IMAGE_STORE: &str = "~/.cache/compostbin/images";
 pub const BUILD_CONTEXT: &str = "~/.cache/compostbin/build";
 /// Where a build's context appears inside the builder. Steps install out of it,
 /// which is what a `COPY` was.
-pub const CONTEXT_MOUNT: &str = "/mnt/compostbin-context";
+/// The engine's: the build cache matches on it.
+pub use compostbin_engine::cache::CONTEXT_MOUNT;
 /// The builder's size. Deliberately not the manifest's `[container] memory`:
 /// that is what the session runs with, and a project asking for a bigger session
 /// has no business resizing everyone's build. Sized past 2 GB, which is not
@@ -78,7 +79,7 @@ pub const GUEST_SCRIPTS: [(&str, &str); 3] = [
 /// The base is shared by every project, so anything belonging to one project —
 /// direnv, a language toolchain, a private CA — goes in the derived image rather
 /// than growing the base for everyone.
-pub fn build(session: &Session, builder: &impl Builder) -> Result<(), ImageError> {
+pub fn build(session: &Session, builder: &impl Builder, cache: bool) -> Result<(), ImageError> {
   let context = context(session);
   std::fs::create_dir_all(&context).at(&context)?;
 
@@ -87,9 +88,13 @@ pub fn build(session: &Session, builder: &impl Builder) -> Result<(), ImageError
     std::fs::write(&path, contents).at(&path)?;
   }
 
-  builder.build(&base_plan(session))?;
+  let mut base = base_plan(session);
+  base.cache = cache;
 
-  if let Some(plan) = project_plan(session) {
+  builder.build(&base)?;
+
+  if let Some(mut plan) = project_plan(session) {
+    plan.cache = cache;
     builder.build(&plan)?;
   }
 
@@ -251,7 +256,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let session = session(&home);
 
-    build(&session, &RecordingBuilder::new()).expect("build should succeed");
+    build(&session, &RecordingBuilder::new(), true).expect("build should succeed");
 
     for (name, contents) in GUEST_SCRIPTS {
       assert_eq!(
@@ -332,7 +337,7 @@ mod tests {
     session.manifest.image.packages = vec!["direnv".to_string()];
     let builder = RecordingBuilder::new();
 
-    build(&session, &builder).expect("build should succeed");
+    build(&session, &builder, true).expect("build should succeed");
 
     for plan in builder.plans() {
       assert_eq!(plan.memory, Some(BUILD_MEMORY.to_string()), "{plan:?}");
@@ -421,7 +426,7 @@ mod tests {
     session.manifest.image.packages = vec!["direnv".to_string()];
     let builder = RecordingBuilder::new();
 
-    build(&session, &builder).expect("build should succeed");
+    build(&session, &builder, true).expect("build should succeed");
 
     let plans = builder.plans();
     assert_eq!(plans.len(), 2, "base, then project: {plans:?}");
@@ -436,7 +441,7 @@ mod tests {
     let session = session(&home);
     let builder = RecordingBuilder::new();
 
-    build(&session, &builder).expect("build should succeed");
+    build(&session, &builder, true).expect("build should succeed");
 
     assert_eq!(builder.plans().len(), 1, "the base only");
   }

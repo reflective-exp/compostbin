@@ -100,7 +100,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       }
     }
 
-    Command::Build => build_base_image(&load_session(&manifest_path, resolver, &project_dir)?),
+    Command::Build { no_cache } => build_base_image(&load_session(&manifest_path, resolver, &project_dir)?, !no_cache),
 
     Command::Clean { all } => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
@@ -247,7 +247,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 }
 
 /// Builds the base image, and the project's own when the manifest adds to it.
-fn build_base_image(session: &Session) -> Result<i32, Box<dyn Error>> {
+fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn Error>> {
   println!(
     "building {} into {}",
     session.manifest.project.image,
@@ -255,10 +255,10 @@ fn build_base_image(session: &Session) -> Result<i32, Box<dyn Error>> {
   );
 
   if image::adds_to_the_base(&session.manifest) {
-    println!("then {}, for this project's own additions", session.image());
+    println!("then {}", session.image());
   }
 
-  build_images(session)?;
+  build_images(session, cache)?;
 
   Ok(0)
 }
@@ -270,19 +270,19 @@ fn build_base_image(session: &Session) -> Result<i32, Box<dyn Error>> {
 /// boot, and a separate step for that is exactly the `container system start`
 /// this replaced.
 #[cfg(target_os = "macos")]
-fn build_images(session: &Session) -> Result<(), Box<dyn Error>> {
+fn build_images(session: &Session, cache: bool) -> Result<(), Box<dyn Error>> {
   let builder = containerization_framework_bridge::FrameworkBuilder::new(containerization_framework_bridge::Store::at(
     image::store(session),
   ));
 
   builder.provision()?;
-  image::build(session, &builder)?;
+  image::build(session, &builder, cache)?;
 
   Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn build_images(_session: &Session) -> Result<(), Box<dyn Error>> {
+fn build_images(_session: &Session, _cache: bool) -> Result<(), Box<dyn Error>> {
   Err("Containerization.framework is macOS only".into())
 }
 

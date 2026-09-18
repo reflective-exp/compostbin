@@ -7,6 +7,7 @@
 //! lives in `containerization-framework-bridge`, which is macOS-only.
 
 pub mod builder;
+pub mod cache;
 pub mod engine;
 pub mod error;
 #[cfg(any(feature = "fake", test))]

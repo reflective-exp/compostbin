@@ -56,6 +56,9 @@ enum BridgeError: Error, CustomStringConvertible {
     /// The archive downloaded, and the kernel was not in it where it was meant to
     /// be: a release whose layout has changed.
     case kernelMissing(String)
+    /// A rootfs could not be copied to or from the build cache. Filesystems
+    /// without clones fall back to a copy and never land here.
+    case notCloned(String, String)
 
     var description: String {
         switch self {
@@ -73,6 +76,8 @@ enum BridgeError: Error, CustomStringConvertible {
             return "downloading a kernel from \(url) answered \(status)"
         case .kernelMissing(let path):
             return "the downloaded archive has no \(path)"
+        case .notCloned(let name, let reason):
+            return "could not copy \(name): \(reason)"
         case .unentitled:
             return """
                 this build is not signed for virtualization — run `bin/dev/sign \

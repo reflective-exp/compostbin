@@ -8,6 +8,10 @@ version.workspace = true
 
 [dependencies]
 serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [features]
 fake = []      # Expose RecordingEngine to other crates' tests.

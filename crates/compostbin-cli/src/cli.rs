@@ -28,7 +28,11 @@ pub enum Command {
     restart: bool,
   },
   /// Build the base image, and the project's own image if the manifest adds to it
-  Build,
+  Build {
+    /// Skip cached rootfs snapshots
+    #[arg(long)]
+    no_cache: bool,
+  },
   /// Remove this session's transient state
   Clean {
     /// Also remove Claude's home, discarding the conversation `--continue` resumes

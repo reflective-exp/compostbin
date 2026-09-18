@@ -5,14 +5,16 @@
 //! single-layer image. All of it through Containerization, in this process, with
 //! nothing to start first.
 //!
-//! What it does not do is cache. Every build runs every step, which the base image
-//! can afford — it is built rarely, and `provision` plus the registry's own
-//! caching keep a rebuild from being a download. Per-step layers, and a cache
-//! keyed on them, are the obvious next thing.
+//! A rebuild runs only the steps whose inputs changed: the rootfs is snapshotted
+//! after each step under a `compostbin_engine::cache` key, and the next build
+//! resumes from the deepest match. The image is still one layer.
+//!
+//! A build also removes stale builder rootfs and unreferenced blobs.
 
 use crate::store::{KERNEL_IN_ARCHIVE, KERNEL_URL, Store};
 use crate::{checked, ffi, spec};
 use compostbin_engine::builder::Builder;
+use compostbin_engine::cache;
 use compostbin_engine::error::EngineError;
 use compostbin_engine::model::{BuildPlan, BuildStep};
 use serde::Serialize;
@@ -31,14 +33,17 @@ struct Step<'a> {
   name: &'a str,
   script: &'a str,
   user: Option<&'a str>,
+  /// The rootfs after this step. The builder salts it with the base's digest.
+  cache_key: &'a str,
 }
 
-impl<'a> From<&'a BuildStep> for Step<'a> {
-  fn from(step: &'a BuildStep) -> Self {
+impl<'a> Step<'a> {
+  fn new(step: &'a BuildStep, cache_key: &'a str) -> Self {
     Self {
       name: &step.name,
       script: &step.script,
       user: step.user.as_deref(),
+      cache_key,
     }
   }
 }
@@ -64,6 +69,9 @@ struct Wire<'a> {
   working_directory: Option<String>,
   ipv4_address: String,
   ipv4_gateway: &'static str,
+  /// The rootfs before any step.
+  base_key: &'a str,
+  use_cache: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,6 +125,7 @@ impl Builder for FrameworkBuilder {
   fn build(&self, plan: &BuildPlan) -> Result<(), EngineError> {
     let name = builder_name(&plan.tag);
     let action = format!("build {}", plan.tag);
+    let keys = cache::keys(plan)?;
     let wire = Wire {
       store_root: self.store.root().display().to_string(),
       kernel_path: self.store.kernel().display().to_string(),
@@ -131,12 +140,19 @@ impl Builder for FrameworkBuilder {
         .unwrap_or(DEFAULT_MEMORY_IN_BYTES),
       rootfs_size_in_bytes: ROOTFS_SIZE_IN_BYTES,
       context: plan.context.as_ref().map(|path| path.display().to_string()),
-      steps: plan.steps.iter().map(Step::from).collect(),
+      steps: plan
+        .steps
+        .iter()
+        .zip(&keys.steps)
+        .map(|(step, key)| Step::new(step, key))
+        .collect(),
       environment: &plan.environment,
       user: plan.user.as_deref(),
       working_directory: plan.workdir.as_ref().map(|path| path.display().to_string()),
       ipv4_address: spec::nat_address(&name),
       ipv4_gateway: spec::NAT_GATEWAY,
+      base_key: &keys.base,
+      use_cache: plan.cache,
       name,
     };
 
@@ -186,6 +202,8 @@ mod tests {
 
   fn wire(plan: &BuildPlan) -> serde_json::Value {
     let name = builder_name(&plan.tag);
+    // No step names the context mount, so the nonexistent context isn't read.
+    let keys = cache::keys(plan).expect("a plan with no context to read should key");
 
     serde_json::to_value(Wire {
       store_root: "/store".to_string(),
@@ -197,12 +215,19 @@ mod tests {
       memory_in_bytes: 8 * 1024 * 1024 * 1024,
       rootfs_size_in_bytes: ROOTFS_SIZE_IN_BYTES,
       context: plan.context.as_ref().map(|path| path.display().to_string()),
-      steps: plan.steps.iter().map(Step::from).collect(),
+      steps: plan
+        .steps
+        .iter()
+        .zip(&keys.steps)
+        .map(|(step, key)| Step::new(step, key))
+        .collect(),
       environment: &plan.environment,
       user: plan.user.as_deref(),
       working_directory: plan.workdir.as_ref().map(|path| path.display().to_string()),
       ipv4_address: spec::nat_address(&name),
       ipv4_gateway: spec::NAT_GATEWAY,
+      base_key: &keys.base,
+      use_cache: plan.cache,
       name,
     })
     .expect("a plan should serialize")
@@ -240,6 +265,8 @@ mod tests {
       "workingDirectory",
       "ipv4Address",
       "ipv4Gateway",
+      "baseKey",
+      "useCache",
     ] {
       assert!(json.get(key).is_some(), "the plan should carry {key}: {json}");
     }
@@ -247,6 +274,29 @@ mod tests {
     assert_eq!(json["steps"][0]["user"], serde_json::Value::Null);
     assert_eq!(json["steps"][1]["user"], "claude");
     assert_eq!(json["steps"][1]["name"], "bashrc");
+    assert!(json["steps"][0]["cacheKey"].is_string());
+  }
+
+  #[test]
+  fn carries_a_cache_key_for_the_base_and_for_every_step() {
+    let json = wire(&plan());
+    let base = json["baseKey"].as_str().expect("a base key");
+    let first = json["steps"][0]["cacheKey"].as_str().expect("a step key");
+    let second = json["steps"][1]["cacheKey"].as_str().expect("a step key");
+
+    assert_ne!(base, first);
+    assert_ne!(first, second);
+  }
+
+  #[test]
+  fn says_when_the_cache_is_not_to_be_trusted() {
+    let mut plan = plan();
+
+    assert_eq!(wire(&plan)["useCache"], true);
+
+    plan.cache = false;
+
+    assert_eq!(wire(&plan)["useCache"], false);
   }
 
   #[test]

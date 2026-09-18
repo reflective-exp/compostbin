@@ -6,8 +6,11 @@
 // image. All of it is Containerization API, in this process, with nothing to start
 // first.
 //
-// What it does not do: layer per step, or cache anything. A cache keyed on
-// per-step snapshots of the block is the obvious next thing.
+// The image is one layer however many steps went into it. The cache is block
+// snapshots, not layers: a rebuild resumes from the deepest one still matching.
+// See `Cache.swift`.
+//
+// A build also removes stale builder rootfs and unreferenced blobs.
 //
 // The step that deserves suspicion is the export: a rootfs leaves as ext4 and
 // comes back as a tar, so users, modes, symlinks, hardlinks and extended
@@ -34,6 +37,8 @@ struct BuildStep: Decodable {
     /// `packages` and `run_as_root` need.
     var user: String?
     var script: String
+    /// Unsalted; see `Keys`.
+    var cacheKey: String
 }
 
 struct BuildPlan: Decodable {
@@ -62,11 +67,16 @@ struct BuildPlan: Decodable {
     var workingDirectory: String?
     var ipv4Address: String
     var ipv4Gateway: String
+    var baseKey: String
+    /// False for `--no-cache`. Snapshots are written either way.
+    var useCache: Bool
 }
 
 enum Build {
-    /// Where a build's context appears in the guest.
+    /// Where a build's context appears in the guest. Must match the engine's
+    /// `CONTEXT_MOUNT`, which the cache keys match on.
     static let contextDestination = "/mnt/compostbin-context"
+    static let cacheDirectory = "build-cache"
 
     static func run(_ plan: BuildPlan) async throws {
         guard Entitlement.hasVirtualization else {
@@ -82,79 +92,62 @@ enum Build {
         let imageStore = try ImageStore(path: root, contentStore: contentStore)
         let platform = Platform.current
 
-        let kernel = Kernel(path: URL(fileURLWithPath: plan.kernelPath), platform: .linuxArm)
-        var manager = try await ContainerManager(
-            kernel: kernel,
-            initfsReference: plan.initfsReference,
-            imageStore: imageStore,
-            network: nil
-        )
-
         // Pulled here rather than left to `create`, because the base's own
-        // config is what the finished image inherits.
+        // config is what the finished image inherits, and its digest salts
+        // every cache key.
         let base = try await imageStore.get(reference: plan.base, pull: true)
         let baseConfig = try? await base.config(for: platform).config
+        let environment = Self.merge(baseConfig?.env ?? [], plan.environment)
+
+        let cache = Cache(root: root.appendingPathComponent(cacheDirectory))
+        let keys = Keys(plan: plan, baseDigest: base.digest)
+
+        // Nothing changed: re-tag, skipping the export.
+        if plan.useCache, let descriptor = cache.image(keys.image),
+            await Cache.holds(descriptor, in: contentStore)
+        {
+            note("\(plan.tag) is already built")
+            try? await imageStore.delete(reference: plan.tag)
+            try await imageStore.create(description: .init(reference: plan.tag, descriptor: descriptor))
+            cache.evict()
+            return
+        }
 
         let containerDirectory =
             root
             .appendingPathComponent("containers")
             .appendingPathComponent(plan.name)
-        // A previous build's rootfs, which `create` would refuse to overwrite.
-        try? FileManager.default.removeItem(at: containerDirectory)
+        let rootfsPath = containerDirectory.appendingPathComponent("rootfs.ext4")
 
-        let environment = Self.merge(baseConfig?.env ?? [], plan.environment)
-        let mounts: [Containerization.Mount] =
-            plan.context.map { [.share(source: $0, destination: contextDestination, options: ["ro"])] } ?? []
-        let interface = NATInterface(
-            ipv4Address: try CIDRv4(plan.ipv4Address),
-            ipv4Gateway: try IPv4Address(plan.ipv4Gateway)
+        try? FileManager.default.removeItem(at: containerDirectory)
+        Self.sweepBuilders(in: root, keeping: plan.name)
+        try FileManager.default.createDirectory(at: containerDirectory, withIntermediateDirectories: true)
+        Self.markBuilder(containerDirectory)
+
+        let start = try await Self.prepare(
+            rootfs: rootfsPath,
+            plan: plan,
+            keys: keys,
+            cache: cache,
+            base: base,
+            platform: platform
         )
 
-        let cpus = plan.cpus
-        let memoryInBytes = plan.memoryInBytes
-        let gateway = plan.ipv4Gateway
-        let stepEnvironment = environment
-
-        let container = try await manager.create(
-            plan.name,
-            image: base,
-            rootfsSizeInBytes: plan.rootfsSizeInBytes,
-            networking: false
-        ) { config in
-            config.cpus = cpus
-            config.memoryInBytes = memoryInBytes
-            // A keepalive, exactly as a session's boot process is: the steps are
-            // execs, and each one needs the container to outlive it. The base
-            // image's own `Cmd` would exit immediately.
-            config.process.arguments = ["/bin/sh", "-c", "while :; do sleep 86400; done"]
-            config.process.user = .init()
-            config.process.workingDirectory = "/"
-            config.process.environmentVariables = stepEnvironment
-            config.mounts.append(contentsOf: mounts)
-            // `apt-get` and `claude.ai/install.sh` need the network, so a build
-            // gets the same NAT a session does.
-            config.interfaces = [interface]
-            config.dns = DNS(nameservers: [gateway])
+        if start < plan.steps.count {
+            try await Self.run(
+                steps: start..<plan.steps.count,
+                of: plan,
+                on: rootfsPath,
+                keys: keys,
+                cache: cache,
+                base: base,
+                imageStore: imageStore,
+                environment: environment
+            )
         }
-
-        try await container.create()
-        try await container.start()
-
-        do {
-            for (index, step) in plan.steps.enumerated() {
-                try await Self.step(step, index: index, in: container, environment: environment)
-            }
-        } catch {
-            // The rootfs is left behind on purpose: a failed step is worth
-            // looking at, and the next build removes the directory anyway.
-            try? await container.stop()
-            throw error
-        }
-
-        try await container.stop()
 
         let descriptor = try await Self.ingest(
-            rootfs: containerDirectory.appendingPathComponent("rootfs.ext4"),
+            rootfs: rootfsPath,
             plan: plan,
             base: baseConfig,
             environment: environment,
@@ -167,7 +160,183 @@ enum Build {
         try? await imageStore.delete(reference: plan.tag)
         try await imageStore.create(description: .init(reference: plan.tag, descriptor: descriptor))
 
-        try? manager.delete(plan.name)
+        cache.save(image: descriptor, as: keys.image)
+
+        // Not `manager.delete`: there is no manager on a fully cached build, and
+        // its only extra is releasing a network interface, of which there is none.
+        try? FileManager.default.removeItem(at: containerDirectory)
+
+        await Self.reclaim(imageStore)
+        cache.evict()
+    }
+
+    /// Puts a rootfs at `rootfs` and returns the index of the first step to run:
+    /// from the deepest cached step, else the cached unpacked base, else a fresh
+    /// unpack.
+    private static func prepare(
+        rootfs: URL,
+        plan: BuildPlan,
+        keys: Keys,
+        cache: Cache,
+        base: Containerization.Image,
+        platform: Platform
+    ) async throws -> Int {
+        if plan.useCache {
+            for index in plan.steps.indices.reversed() where cache.holdsRootfs(keys.steps[index]) {
+                note("cached through \(plan.steps[index].name)")
+                try cache.restore(keys.steps[index], to: rootfs)
+
+                return index + 1
+            }
+
+            if cache.holdsRootfs(keys.base) {
+                try cache.restore(keys.base, to: rootfs)
+
+                return 0
+            }
+        }
+
+        let unpacker = EXT4Unpacker(capacityInBytes: plan.rootfsSizeInBytes)
+
+        _ = try await unpacker.unpack(base, for: platform, at: rootfs)
+        cache.save(rootfs: rootfs, as: keys.base)
+
+        return 0
+    }
+
+    /// Runs the remaining steps, snapshotting the rootfs after each.
+    ///
+    /// One container per step: the block is only consistent once `stop` has
+    /// unmounted it in the guest, so each snapshot costs a boot.
+    private static func run(
+        steps: Range<Int>,
+        of plan: BuildPlan,
+        on rootfs: URL,
+        keys: Keys,
+        cache: Cache,
+        base: Containerization.Image,
+        imageStore: ImageStore,
+        environment: [String]
+    ) async throws {
+        let kernel = Kernel(path: URL(fileURLWithPath: plan.kernelPath), platform: .linuxArm)
+        var manager = try await ContainerManager(
+            kernel: kernel,
+            initfsReference: plan.initfsReference,
+            imageStore: imageStore,
+            network: nil
+        )
+
+        let mounts: [Containerization.Mount] =
+            plan.context.map { [.share(source: $0, destination: contextDestination, options: ["ro"])] } ?? []
+        let interface = NATInterface(
+            ipv4Address: try CIDRv4(plan.ipv4Address),
+            ipv4Gateway: try IPv4Address(plan.ipv4Gateway)
+        )
+
+        let cpus = plan.cpus
+        let memoryInBytes = plan.memoryInBytes
+        let gateway = plan.ipv4Gateway
+        let stepEnvironment = environment
+        let block = Containerization.Mount.block(
+            format: "ext4",
+            source: rootfs.absolutePath(),
+            destination: "/",
+            options: []
+        )
+
+        for index in steps {
+            let container = try await manager.create(
+                plan.name,
+                image: base,
+                rootfs: block,
+                networking: false
+            ) { config in
+                config.cpus = cpus
+                config.memoryInBytes = memoryInBytes
+                // A keepalive, exactly as a session's boot process is: the steps
+                // are execs, and each one needs the container to outlive it. The
+                // base image's own `Cmd` would exit immediately.
+                config.process.arguments = ["/bin/sh", "-c", "while :; do sleep 86400; done"]
+                config.process.user = .init()
+                config.process.workingDirectory = "/"
+                config.process.environmentVariables = stepEnvironment
+                config.mounts.append(contentsOf: mounts)
+                // `apt-get` and `claude.ai/install.sh` need the network, so a
+                // build gets the same NAT a session does.
+                config.interfaces = [interface]
+                config.dns = DNS(nameservers: [gateway])
+            }
+
+            try await container.create()
+            try await container.start()
+
+            do {
+                try await Self.step(plan.steps[index], index: index, in: container, environment: environment)
+            } catch {
+                // Left for inspection, not cached; the next build sweeps it.
+                try? await container.stop()
+                throw error
+            }
+
+            try await container.stop()
+
+            cache.save(rootfs: rootfs, as: keys.steps[index])
+        }
+    }
+
+    /// Marks a `containers` directory as a builder's, not a session's. Holds the
+    /// owning build's pid.
+    private static let builderMarker = ".compostbin-builder"
+
+    private static func markBuilder(_ directory: URL) {
+        try? Data("\(getpid())\n".utf8).write(to: directory.appendingPathComponent(builderMarker))
+    }
+
+    /// Removes rootfs left by failed builds and by tags since renamed.
+    ///
+    /// Only marked directories — sessions share `containers` — and only when the
+    /// owning pid is gone, since builds in other projects share this store.
+    private static func sweepBuilders(in root: URL, keeping current: String) {
+        let containers = root.appendingPathComponent("containers")
+        let directories =
+            (try? FileManager.default.contentsOfDirectory(at: containers, includingPropertiesForKeys: nil)) ?? []
+
+        for directory in directories where directory.lastPathComponent != current {
+            let marker = directory.appendingPathComponent(builderMarker)
+
+            guard let owner = try? String(contentsOf: marker, encoding: .utf8) else {
+                continue
+            }
+
+            // Signal 0: does the process exist.
+            if let pid = pid_t(owner.trimmingCharacters(in: .whitespacesAndNewlines)), kill(pid, 0) == 0 {
+                continue
+            }
+
+            note("removing the rootfs left by \(directory.lastPathComponent)")
+            try? FileManager.default.removeItem(at: directory)
+        }
+    }
+
+    /// Deletes blobs no image references — above all the previous build's
+    /// multi-gigabyte layer, orphaned by the re-tag.
+    ///
+    /// Only after `create`: until then this build's own blobs are unreferenced.
+    /// Failure is logged, not thrown; the image is already usable.
+    private static func reclaim(_ imageStore: ImageStore) async {
+        do {
+            let (deleted, freed) = try await imageStore.cleanUpOrphanedBlobs()
+
+            guard !deleted.isEmpty else {
+                return
+            }
+
+            let size = ByteCountFormatter.string(fromByteCount: Int64(freed), countStyle: .file)
+
+            note("reclaimed \(size) from \(deleted.count) unreferenced blob\(deleted.count == 1 ? "" : "s")")
+        } catch {
+            note("could not reclaim unreferenced blobs: \(error)")
+        }
     }
 
     /// Runs one step to completion, throwing when it fails.
