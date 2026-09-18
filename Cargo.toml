@@ -20,6 +20,7 @@ compostbin-engine = { path = "crates/compostbin-engine" }
 clap = { version = "4", features = ["derive"] }
 compostbin-core = { path = "crates/compostbin-core" }
 containerization-framework-bridge = { path = "crates/containerization-framework-bridge" }
+getrandom = "0.4"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

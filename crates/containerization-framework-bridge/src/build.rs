@@ -68,9 +68,7 @@ struct Wire<'a> {
 }
 
 impl<'a> Wire<'a> {
-  fn new(store_root: String, kernel_path: String, plan: &'a BuildPlan, keys: &'a Keys) -> Self {
-    let name = builder_name(&plan.tag);
-
+  fn new(name: String, store_root: String, kernel_path: String, plan: &'a BuildPlan, keys: &'a Keys) -> Self {
     Self {
       store_root,
       kernel_path,
@@ -146,7 +144,9 @@ impl Builder for FrameworkBuilder {
   fn build(&self, plan: &BuildPlan) -> Result<(), EngineError> {
     let action = format!("build {}", plan.tag);
     let keys = cache::keys(plan)?;
+    let name = builder_name().map_err(|error| EngineError::failed(&action, error))?;
     let wire = Wire::new(
+      name,
       self.store.root().display().to_string(),
       self.store.kernel().display().to_string(),
       plan,
@@ -159,21 +159,13 @@ impl Builder for FrameworkBuilder {
   }
 }
 
-/// The builder container's id (and store directory). From the tag, so
-/// concurrent builds don't share a rootfs and a rebuild reuses its directory.
-fn builder_name(tag: &str) -> String {
-  let slug: String = tag
-    .chars()
-    .map(|character| {
-      if character.is_ascii_alphanumeric() {
-        character
-      } else {
-        '-'
-      }
-    })
-    .collect();
+/// The builder container's id (and store directory). Random, so concurrent
+/// builds never share a rootfs; short, as Containerization caps ids at 64.
+fn builder_name() -> Result<String, getrandom::Error> {
+  let mut bytes = [0u8; 4];
+  getrandom::fill(&mut bytes)?;
 
-  format!("compostbin-build-{slug}")
+  Ok(format!("cb-builder-{:08x}", u32::from_be_bytes(bytes)))
 }
 
 #[cfg(test)]
@@ -208,6 +200,7 @@ mod tests {
     let keys = cache::keys(plan).expect("a plan with no context to read should key");
 
     serde_json::to_value(Wire::new(
+      "cb-0123abcd".to_string(),
       "/store".to_string(),
       "/store/kernels/default.kernel-arm64".to_string(),
       plan,
@@ -217,11 +210,14 @@ mod tests {
   }
 
   #[test]
-  fn names_a_builder_after_the_tag_it_is_building() {
-    assert_eq!(
-      builder_name("compostbin/base:latest"),
-      "compostbin-build-compostbin-base-latest"
-    );
+  fn names_a_builder() {
+    let name = builder_name().expect("the OS should supply randomness");
+    let digits = name
+      .strip_prefix("cb-builder-")
+      .expect("a cb-builder prefix");
+
+    assert_eq!(digits.len(), 8);
+    assert!(digits.chars().all(|digit| digit.is_ascii_hexdigit()));
   }
 
   /// Swift decodes by property name; a renamed field fails only at runtime.

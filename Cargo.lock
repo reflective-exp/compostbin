@@ -170,6 +170,7 @@ name = "containerization-framework-bridge"
 version = "0.8.0"
 dependencies = [
  "compostbin-engine",
+ "getrandom",
  "libc",
  "serde",
  "serde_json",
