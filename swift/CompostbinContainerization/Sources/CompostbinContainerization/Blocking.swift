@@ -12,7 +12,7 @@ import Foundation
 /// deadlock the executor the body runs on.
 func blocking<T>(_ body: @escaping @Sendable () async throws -> T) throws -> T {
     let semaphore = DispatchSemaphore(value: 0)
-    nonisolated(unsafe) var outcome: Result<T, Error>?
+    nonisolated(unsafe) var outcome: Result<T, any Error>?
 
     Task.detached {
         do {

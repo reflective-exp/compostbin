@@ -57,10 +57,7 @@ enum Session {
             throw BridgeError.unentitled
         }
 
-        let kernel = Kernel(
-            path: URL(fileURLWithPath: spec.kernelPath),
-            platform: .linuxArm
-        )
+        let kernel = Kernel(path: URL(filePath: spec.kernelPath), platform: .linuxArm)
 
         // No `Network`: the interface is built below instead. `VmnetNetwork`
         // is what `cctl` uses and what `ContainerManager` would allocate from,
@@ -71,17 +68,12 @@ enum Session {
         var manager = try await ContainerManager(
             kernel: kernel,
             initfsReference: spec.initfsReference,
-            root: URL(fileURLWithPath: spec.storeRoot),
+            root: URL(filePath: spec.storeRoot),
             network: nil
         )
 
-        let mounts = try spec.mounts.map(Self.share)
-        let sockets = try spec.sockets.map(Self.relay)
-        let environment = spec.environment
-        let arguments = spec.arguments
-        let workingDirectory = spec.workingDirectory
-        let cpus = spec.cpus
-        let memoryInBytes = spec.memoryInBytes
+        let mounts = try spec.mounts.map(share)
+        let sockets = try spec.sockets.map(relay)
 
         // Static, because nothing hands out a lease: `Interface` wants an
         // address up front and vminitd sets it directly. Which address is the
@@ -90,7 +82,6 @@ enum Session {
             ipv4Address: try CIDRv4(spec.ipv4Address),
             ipv4Gateway: try IPv4Address(spec.ipv4Gateway)
         )
-        let nameservers = [spec.ipv4Gateway]
 
         // `networking: false` leaves the interfaces alone: with no `Network` on
         // the manager there is nothing for it to allocate, and ours is set here.
@@ -99,15 +90,15 @@ enum Session {
             reference: spec.imageReference,
             networking: false
         ) { config in
-            config.cpus = cpus
-            config.memoryInBytes = memoryInBytes
-            config.process.arguments = arguments
-            config.process.workingDirectory = workingDirectory
-            config.process.environmentVariables += environment
-            config.mounts.append(contentsOf: mounts)
+            config.cpus = spec.cpus
+            config.memoryInBytes = spec.memoryInBytes
+            config.process.arguments = spec.arguments
+            config.process.workingDirectory = spec.workingDirectory
+            config.process.environmentVariables += spec.environment
+            config.mounts += mounts
             config.sockets = sockets
             config.interfaces = [interface]
-            config.dns = DNS(nameservers: nameservers)
+            config.dns = DNS(nameservers: [spec.ipv4Gateway])
         }
 
         try await container.create()
@@ -144,8 +135,8 @@ enum Session {
         }
 
         return UnixSocketConfiguration(
-            source: URL(fileURLWithPath: String(fields[0])),
-            destination: URL(fileURLWithPath: String(fields[1])),
+            source: URL(filePath: String(fields[0])),
+            destination: URL(filePath: String(fields[1])),
             permissions: FilePermissions(rawValue: 0o666),
             direction: .into
         )
@@ -159,7 +150,7 @@ enum Session {
             throw BridgeError.malformed("mount", mount)
         }
 
-        return Containerization.Mount.share(
+        return .share(
             source: String(fields[0]),
             destination: String(fields[1]),
             options: fields[2] == "ro" ? ["ro"] : []
@@ -177,9 +168,6 @@ enum Session {
             throw BridgeError.notBooted(request.name)
         }
 
-        let arguments = request.arguments
-        let environment = request.environment
-        let workingDirectory = request.workingDirectory
         let imageConfig = booted.imageConfig
 
         // `setInitState: false`: the terminal's attributes belong to whoever
@@ -190,11 +178,7 @@ enum Session {
 
         // Not on the exit path alone: an error between here and the wait would
         // otherwise leave a reader on a terminal someone is still typing at.
-        defer {
-            if let terminal {
-                try? terminal.close()
-            }
-        }
+        defer { try? terminal?.close() }
 
         let process = try await booted.container.exec(request.id) { config in
             // Seeded from the image, because `exec` is not: a bare
@@ -213,10 +197,10 @@ enum Session {
                 }
             }
 
-            config.arguments = arguments
+            config.arguments = request.arguments
             // Ours last, so a variable the session sets beats the image's.
-            config.environmentVariables += environment
-            config.workingDirectory = workingDirectory
+            config.environmentVariables += request.environment
+            config.workingDirectory = request.workingDirectory
 
             if let terminal {
                 config.setTerminalIO(terminal: terminal)

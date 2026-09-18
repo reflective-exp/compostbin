@@ -53,21 +53,21 @@ struct Cache {
 
     let root: URL
 
-    private var rootfsDirectory: URL { root.appendingPathComponent("rootfs") }
-    private var imagesDirectory: URL { root.appendingPathComponent("images") }
+    private var rootfsDirectory: URL { root.appending(path: "rootfs") }
+    private var imagesDirectory: URL { root.appending(path: "images") }
 
     private func rootfsPath(_ key: String) -> URL {
-        rootfsDirectory.appendingPathComponent("\(key).ext4")
+        rootfsDirectory.appending(path: "\(key).ext4")
     }
 
     private func imagePath(_ key: String) -> URL {
-        imagesDirectory.appendingPathComponent("\(key).json")
+        imagesDirectory.appending(path: "\(key).json")
     }
 
     // MARK: - Rootfs snapshots
 
     func holdsRootfs(_ key: String) -> Bool {
-        FileManager.default.fileExists(atPath: rootfsPath(key).path)
+        FileManager.default.fileExists(atPath: rootfsPath(key).path(percentEncoded: false))
     }
 
     /// Clones a snapshot to `destination`. The build writes to the clone, so a
@@ -81,7 +81,7 @@ struct Cache {
     func save(rootfs: URL, as key: String) {
         let destination = rootfsPath(key)
 
-        guard !FileManager.default.fileExists(atPath: destination.path) else {
+        guard !FileManager.default.fileExists(atPath: destination.path(percentEncoded: false)) else {
             touch(destination)
             return
         }
@@ -89,7 +89,7 @@ struct Cache {
         do {
             try FileManager.default.createDirectory(at: rootfsDirectory, withIntermediateDirectories: true)
             // Cloned aside then moved, so an interrupted clone is never found.
-            let partial = rootfsDirectory.appendingPathComponent("\(key).partial")
+            let partial = rootfsDirectory.appending(path: "\(key).partial")
 
             try Self.clone(rootfs, to: partial)
             try? FileManager.default.removeItem(at: destination)
@@ -137,7 +137,8 @@ struct Cache {
             }
 
             for blob in manifest.layers + [manifest.config] {
-                guard let found = try? await contentStore.get(digest: blob.digest), found != nil else {
+                // `try?` flattens the optional: nil is both missing and unreadable.
+                guard (try? await contentStore.get(digest: blob.digest)) != nil else {
                     return false
                 }
             }
@@ -150,7 +151,7 @@ struct Cache {
 
     /// By last use: restoring or re-saving touches an entry.
     func evict() {
-        let cutoff = Date().addingTimeInterval(-Self.keepFor)
+        let cutoff = Date.now.addingTimeInterval(-Self.keepFor)
         let snapshots = Self.entries(of: rootfsDirectory)
 
         for (index, entry) in snapshots.enumerated() where index >= Self.keep || entry.used < cutoff {
@@ -175,7 +176,7 @@ struct Cache {
             .map { path in
                 let used =
                     (try? path.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
-                    ?? Date.distantPast
+                    ?? .distantPast
 
                 return (path: path, used: used)
             }
@@ -183,7 +184,10 @@ struct Cache {
     }
 
     private func touch(_ path: URL) {
-        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path.path)
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date.now],
+            ofItemAtPath: path.path(percentEncoded: false)
+        )
     }
 
     // MARK: - Copying
@@ -192,21 +196,16 @@ struct Cache {
     private static func clone(_ source: URL, to destination: URL) throws {
         try? FileManager.default.removeItem(at: destination)
 
-        if clonefile(source.path, destination.path, 0) == 0 {
+        if clonefile(source.path(percentEncoded: false), destination.path(percentEncoded: false), 0) == 0 {
             return
         }
 
         let failure = errno
 
-        guard failure == ENOTSUP || failure == EXDEV || failure == EINVAL || failure == EPERM else {
+        guard [ENOTSUP, EXDEV, EINVAL, EPERM].contains(failure) else {
             throw BridgeError.notCloned(source.lastPathComponent, String(cString: strerror(failure)))
         }
 
         try FileManager.default.copyItem(at: source, to: destination)
     }
-}
-
-/// A line in the build log, on stderr.
-func note(_ message: String) {
-    FileHandle.standardError.write(Data("compostbin: \(message)\n".utf8))
 }

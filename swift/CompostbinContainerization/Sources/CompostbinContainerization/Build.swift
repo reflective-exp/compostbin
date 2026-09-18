@@ -27,6 +27,7 @@ import ContainerizationEXT4
 import ContainerizationExtras
 import ContainerizationOCI
 import Foundation
+import Synchronization
 import SystemPackage
 
 /// A step's shell script, and who runs it.
@@ -83,12 +84,12 @@ enum Build {
             throw BridgeError.unentitled
         }
 
-        let root = URL(fileURLWithPath: plan.storeRoot)
+        let root = URL(filePath: plan.storeRoot)
         // Our own, because `ImageStore.contentStore` is internal to
         // Containerization and the ingest below needs it. The same directory the
         // store would have created for itself, so the blobs land where every
         // other reader looks for them.
-        let contentStore = try LocalContentStore(path: root.appendingPathComponent("content"))
+        let contentStore = try LocalContentStore(path: root.appending(path: "content"))
         let imageStore = try ImageStore(path: root, contentStore: contentStore)
         let platform = Platform.current
 
@@ -97,9 +98,9 @@ enum Build {
         // every cache key.
         let base = try await imageStore.get(reference: plan.base, pull: true)
         let baseConfig = try? await base.config(for: platform).config
-        let environment = Self.merge(baseConfig?.env ?? [], plan.environment)
+        let environment = merge(baseConfig?.env ?? [], plan.environment)
 
-        let cache = Cache(root: root.appendingPathComponent(cacheDirectory))
+        let cache = Cache(root: root.appending(path: cacheDirectory))
         let keys = Keys(plan: plan, baseDigest: base.digest)
 
         // Nothing changed: re-tag, skipping the export.
@@ -113,18 +114,15 @@ enum Build {
             return
         }
 
-        let containerDirectory =
-            root
-            .appendingPathComponent("containers")
-            .appendingPathComponent(plan.name)
-        let rootfsPath = containerDirectory.appendingPathComponent("rootfs.ext4")
+        let containerDirectory = root.appending(components: "containers", plan.name)
+        let rootfsPath = containerDirectory.appending(path: "rootfs.ext4")
 
         try? FileManager.default.removeItem(at: containerDirectory)
-        Self.sweepBuilders(in: root, keeping: plan.name)
+        sweepBuilders(in: root, keeping: plan.name)
         try FileManager.default.createDirectory(at: containerDirectory, withIntermediateDirectories: true)
-        Self.markBuilder(containerDirectory)
+        markBuilder(containerDirectory)
 
-        let start = try await Self.prepare(
+        let start = try await prepare(
             rootfs: rootfsPath,
             plan: plan,
             keys: keys,
@@ -133,9 +131,9 @@ enum Build {
             platform: platform
         )
 
-        if start < plan.steps.count {
-            try await Self.run(
-                steps: start..<plan.steps.count,
+        if start < plan.steps.endIndex {
+            try await run(
+                steps: start..<plan.steps.endIndex,
                 of: plan,
                 on: rootfsPath,
                 keys: keys,
@@ -146,7 +144,7 @@ enum Build {
             )
         }
 
-        let descriptor = try await Self.ingest(
+        let descriptor = try await ingest(
             rootfs: rootfsPath,
             plan: plan,
             base: baseConfig,
@@ -166,7 +164,7 @@ enum Build {
         // its only extra is releasing a network interface, of which there is none.
         try? FileManager.default.removeItem(at: containerDirectory)
 
-        await Self.reclaim(imageStore)
+        await reclaim(imageStore)
         cache.evict()
     }
 
@@ -218,7 +216,7 @@ enum Build {
         imageStore: ImageStore,
         environment: [String]
     ) async throws {
-        let kernel = Kernel(path: URL(fileURLWithPath: plan.kernelPath), platform: .linuxArm)
+        let kernel = Kernel(path: URL(filePath: plan.kernelPath), platform: .linuxArm)
         var manager = try await ContainerManager(
             kernel: kernel,
             initfsReference: plan.initfsReference,
@@ -233,10 +231,6 @@ enum Build {
             ipv4Gateway: try IPv4Address(plan.ipv4Gateway)
         )
 
-        let cpus = plan.cpus
-        let memoryInBytes = plan.memoryInBytes
-        let gateway = plan.ipv4Gateway
-        let stepEnvironment = environment
         let block = Containerization.Mount.block(
             format: "ext4",
             source: rootfs.absolutePath(),
@@ -251,27 +245,27 @@ enum Build {
                 rootfs: block,
                 networking: false
             ) { config in
-                config.cpus = cpus
-                config.memoryInBytes = memoryInBytes
+                config.cpus = plan.cpus
+                config.memoryInBytes = plan.memoryInBytes
                 // A keepalive, exactly as a session's boot process is: the steps
                 // are execs, and each one needs the container to outlive it. The
                 // base image's own `Cmd` would exit immediately.
                 config.process.arguments = ["/bin/sh", "-c", "while :; do sleep 86400; done"]
                 config.process.user = .init()
                 config.process.workingDirectory = "/"
-                config.process.environmentVariables = stepEnvironment
-                config.mounts.append(contentsOf: mounts)
+                config.process.environmentVariables = environment
+                config.mounts += mounts
                 // `apt-get` and `claude.ai/install.sh` need the network, so a
                 // build gets the same NAT a session does.
                 config.interfaces = [interface]
-                config.dns = DNS(nameservers: [gateway])
+                config.dns = DNS(nameservers: [plan.ipv4Gateway])
             }
 
             try await container.create()
             try await container.start()
 
             do {
-                try await Self.step(plan.steps[index], index: index, in: container, environment: environment)
+                try await step(plan.steps[index], index: index, in: container, environment: environment)
             } catch {
                 // Left for inspection, not cached; the next build sweeps it.
                 try? await container.stop()
@@ -289,7 +283,7 @@ enum Build {
     private static let builderMarker = ".compostbin-builder"
 
     private static func markBuilder(_ directory: URL) {
-        try? Data("\(getpid())\n".utf8).write(to: directory.appendingPathComponent(builderMarker))
+        try? Data("\(getpid())\n".utf8).write(to: directory.appending(path: builderMarker))
     }
 
     /// Removes rootfs left by failed builds and by tags since renamed.
@@ -297,12 +291,12 @@ enum Build {
     /// Only marked directories — sessions share `containers` — and only when the
     /// owning pid is gone, since builds in other projects share this store.
     private static func sweepBuilders(in root: URL, keeping current: String) {
-        let containers = root.appendingPathComponent("containers")
+        let containers = root.appending(path: "containers")
         let directories =
             (try? FileManager.default.contentsOfDirectory(at: containers, includingPropertiesForKeys: nil)) ?? []
 
         for directory in directories where directory.lastPathComponent != current {
-            let marker = directory.appendingPathComponent(builderMarker)
+            let marker = directory.appending(path: builderMarker)
 
             guard let owner = try? String(contentsOf: marker, encoding: .utf8) else {
                 continue
@@ -351,19 +345,15 @@ enum Build {
         in container: LinuxContainer,
         environment: [String]
     ) async throws {
-        let label = step.name
         let log = FileWriter(FileHandle.standardError)
 
-        log.line("--> \(label)")
-
-        let script = step.script
-        let user = step.user
+        log.line("--> \(step.name)")
 
         let process = try await container.exec("build-\(index)") { config in
-            config.arguments = ["/bin/bash", "-euo", "pipefail", "-c", script]
+            config.arguments = ["/bin/bash", "-euo", "pipefail", "-c", step.script]
             config.environmentVariables = environment
             config.workingDirectory = "/"
-            config.user = user.map { User(username: $0) } ?? User()
+            config.user = step.user.map { User(username: $0) } ?? User()
             config.stdout = log
             config.stderr = log
         }
@@ -373,7 +363,7 @@ enum Build {
         try? await process.delete()
 
         guard status.exitCode == 0 else {
-            throw BridgeError.stepFailed(label, status.exitCode)
+            throw BridgeError.stepFailed(step.name, status.exitCode)
         }
     }
 
@@ -394,14 +384,13 @@ enum Build {
         platform: Platform,
         contentStore: ContentStore
     ) async throws -> Descriptor {
-        let layer = rootfs.deletingLastPathComponent().appendingPathComponent("layer.tar")
+        let layer = rootfs.deletingLastPathComponent().appending(path: "layer.tar")
         try? FileManager.default.removeItem(at: layer)
 
-        let reader = try EXT4.EXT4Reader(blockDevice: FilePath(rootfs.path))
-        try reader.export(archive: FilePath(layer.path))
+        let reader = try EXT4.EXT4Reader(blockDevice: FilePath(rootfs.path(percentEncoded: false)))
+        try reader.export(archive: FilePath(layer.path(percentEncoded: false)))
 
         let index = Box<Descriptor>()
-        let tag = plan.tag
         let user = plan.user ?? base?.user
         let workingDirectory = plan.workingDirectory ?? base?.workingDir
         let entrypoint = base?.entrypoint
@@ -458,7 +447,7 @@ enum Build {
         try? FileManager.default.removeItem(at: layer)
 
         guard let descriptor = index.value else {
-            throw BridgeError.notIngested(tag)
+            throw BridgeError.notIngested(plan.tag)
         }
 
         return descriptor
@@ -481,18 +470,16 @@ enum Build {
 }
 
 /// A build log, written to this process's stderr as the guest produces it.
-private final class FileWriter: Writer, @unchecked Sendable {
-    private let lock = NSLock()
-    private let handle: FileHandle
+/// Locked so that stdout and stderr chunks never interleave mid-write.
+private final class FileWriter: Writer, Sendable {
+    private let handle: Mutex<FileHandle>
 
     init(_ handle: FileHandle) {
-        self.handle = handle
+        self.handle = Mutex(handle)
     }
 
     func write(_ data: Data) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        handle.write(data)
+        try handle.withLock { try $0.write(contentsOf: data) }
     }
 
     func line(_ text: String) {
@@ -504,21 +491,13 @@ private final class FileWriter: Writer, @unchecked Sendable {
 }
 
 /// Somewhere for an escaping closure to leave its result. `ingest` takes a
-/// `@Sendable` body and has nothing to return through.
-private final class Box<Value>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stored: Value?
+/// `@Sendable` body and has nothing to return through, and a `Mutex` alone
+/// cannot be captured by one.
+private final class Box<Value: Sendable>: Sendable {
+    private let stored = Mutex<Value?>(nil)
 
     var value: Value? {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return stored
-        }
-        set {
-            lock.lock()
-            defer { lock.unlock() }
-            stored = newValue
-        }
+        get { stored.withLock { $0 } }
+        set { stored.withLock { $0 = newValue } }
     }
 }

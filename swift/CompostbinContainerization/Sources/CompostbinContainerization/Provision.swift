@@ -18,6 +18,7 @@ import Containerization
 import ContainerizationArchive
 import ContainerizationOCI
 import Foundation
+import SystemPackage
 
 struct ProvisionSpec: Decodable {
     var storeRoot: String
@@ -41,7 +42,7 @@ struct ProvisionSpec: Decodable {
 
 enum Provision {
     static func run(_ spec: ProvisionSpec) async throws {
-        let root = URL(fileURLWithPath: spec.storeRoot)
+        let root = URL(filePath: spec.storeRoot)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
         try await kernel(spec)
@@ -50,9 +51,9 @@ enum Provision {
 
     /// Downloads and unpacks the kernel, unless it is already there.
     private static func kernel(_ spec: ProvisionSpec) async throws {
-        let destination = URL(fileURLWithPath: spec.kernelPath)
+        let destination = URL(filePath: spec.kernelPath)
 
-        guard !FileManager.default.fileExists(atPath: destination.path) else {
+        guard !FileManager.default.fileExists(atPath: destination.path(percentEncoded: false)) else {
             return
         }
 
@@ -74,7 +75,7 @@ enum Provision {
 
         note("unpacking \(spec.kernelInArchive)")
 
-        let binary = try Self.extract(spec.kernelInArchive, from: archive)
+        let binary = try extract(spec.kernelInArchive, from: archive)
 
         try FileManager.default.createDirectory(
             at: destination.deletingLastPathComponent(),
@@ -103,8 +104,8 @@ enum Provision {
 
         // Relative to the link's own directory, and the reader has to start over:
         // extracting moved it past the entry the target may precede.
-        let directory = (path as NSString).deletingLastPathComponent
-        let resolved = target.hasPrefix("/") ? target : "\(directory)/\(target)"
+        // `pushing` replaces the path outright when the target is absolute.
+        let resolved = FilePath(path).removingLastComponent().pushing(FilePath(target)).string
         let (_, contents) = try ArchiveReader(file: archive).extractFile(path: resolved)
 
         guard !contents.isEmpty else {
@@ -129,11 +130,5 @@ enum Provision {
         note("pulling \(spec.initfsReference)")
 
         _ = try await imageStore.getInitImage(reference: spec.initfsReference)
-    }
-
-    /// Provisioning is slow and only happens when something is missing, so it
-    /// says what it is doing. On stderr, where a build log goes.
-    private static func note(_ message: String) {
-        FileHandle.standardError.write(Data("compostbin: \(message)\n".utf8))
     }
 }

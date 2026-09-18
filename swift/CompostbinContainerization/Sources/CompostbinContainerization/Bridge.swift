@@ -15,32 +15,12 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
+import Synchronization
 
 /// Set by the last failing bridged call, read by `compostbin_last_error`.
-nonisolated(unsafe) private var lastError = Locked("")
-
-/// `lastError` is per-process, and two attached terminals can fail at once.
-private final class Locked<Value>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Value
-
-    init(_ value: Value) {
-        self.value = value
-    }
-
-    var current: Value {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return value
-        }
-        set {
-            lock.lock()
-            defer { lock.unlock() }
-            value = newValue
-        }
-    }
-}
+/// Locked because it is per-process, and two attached terminals can fail at
+/// once.
+private let lastError = Mutex("")
 
 /// Failure, as the bridge reports it. Distinct from any exit code a guest
 /// process can return, which is 0...255.
@@ -51,9 +31,14 @@ private func reporting(_ body: () throws -> Int32) -> Int32 {
     do {
         return try body()
     } catch {
-        lastError.current = "\(error)"
+        lastError.withLock { $0 = "\(error)" }
         return failed
     }
+}
+
+/// A line in the build log, on stderr.
+func note(_ message: String) {
+    try? FileHandle.standardError.write(contentsOf: Data("compostbin: \(message)\n".utf8))
 }
 
 private func lines(_ text: RustStr) -> [String] {
@@ -63,7 +48,7 @@ private func lines(_ text: RustStr) -> [String] {
 }
 
 func compostbin_last_error() -> String {
-    lastError.current
+    lastError.withLock { $0 }
 }
 
 /// Boots a session's VM and leaves it running, owned by this process.
@@ -114,13 +99,7 @@ func compostbin_boot(
 /// use as a separator.
 func compostbin_build(plan: RustStr) -> Int32 {
     reporting {
-        let json = plan.toString()
-
-        guard let data = json.data(using: .utf8) else {
-            throw BridgeError.malformed("build plan", json)
-        }
-
-        let plan = try JSONDecoder().decode(BuildPlan.self, from: data)
+        let plan = try JSONDecoder().decode(BuildPlan.self, from: Data(plan.toString().utf8))
 
         try blocking { try await Build.run(plan) }
 
@@ -131,13 +110,7 @@ func compostbin_build(plan: RustStr) -> Int32 {
 /// Puts a kernel and an init image in the store, fetching whatever is missing.
 func compostbin_provision(spec: RustStr) -> Int32 {
     reporting {
-        let json = spec.toString()
-
-        guard let data = json.data(using: .utf8) else {
-            throw BridgeError.malformed("provision spec", json)
-        }
-
-        let spec = try JSONDecoder().decode(ProvisionSpec.self, from: data)
+        let spec = try JSONDecoder().decode(ProvisionSpec.self, from: Data(spec.toString().utf8))
 
         try blocking { try await Provision.run(spec) }
 

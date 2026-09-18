@@ -16,7 +16,7 @@ let bridgingHeader = "\(URL(fileURLWithPath: #filePath).deletingLastPathComponen
 // is built by a specific Containerization release — `vminit:0.45.0` — and the
 // guest agent it carries speaks that release's protocol. A library newer than
 // the initfs on disk is a runtime mismatch, not a compile error.
-let containerization = "0.45.0"
+let containerization: Version = "0.45.0"
 
 let package = Package(
     name: "CompostbinContainerization",
@@ -29,7 +29,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/containerization.git", exact: .init(stringLiteral: containerization))
+        .package(url: "https://github.com/apple/containerization.git", exact: containerization)
     ],
     targets: [
         .target(
