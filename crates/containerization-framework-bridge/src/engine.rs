@@ -8,8 +8,9 @@
 //! socket, which is how `shell` in another terminal reaches it.
 //!
 //! The second is that there is no register to ask. Nothing keeps a list of
-//! containers, so the question "is this session up?" is answered by whether
-//! anything answers on its control socket.
+//! containers, so the question "is this container up?" is answered by whether
+//! anything answers on its control socket — one per container, in a directory
+//! named after it under the engine's runtime directory.
 
 use crate::store::Store;
 use crate::{checked, control, ffi, spec, terminal};
@@ -32,21 +33,21 @@ const OWNER_ATTACH: &str = "attach-owner";
 const NO_TERMINAL: RawFd = -1;
 
 pub struct FrameworkEngine {
-  /// Where this session keeps its control socket.
-  state_dir: PathBuf,
+  /// One directory per container, named after it, holding its control socket.
+  runtime_dir: PathBuf,
   store: Store,
 }
 
 impl FrameworkEngine {
-  pub fn new(state_dir: impl Into<PathBuf>, store: Store) -> Self {
+  pub fn new(runtime_dir: impl Into<PathBuf>, store: Store) -> Self {
     Self {
-      state_dir: state_dir.into(),
+      runtime_dir: runtime_dir.into(),
       store,
     }
   }
 
-  fn socket(&self) -> PathBuf {
-    control::socket_path(&self.state_dir)
+  fn socket(&self, name: &str) -> PathBuf {
+    control::socket_path(&self.runtime_dir.join(name))
   }
 
   /// Whether this process is the one holding the VM.
@@ -80,7 +81,7 @@ impl FrameworkEngine {
   /// Detached, and never joined: it ends when the process does, which is the
   /// same moment the VM it serves goes away.
   fn serve_control_socket(&self, name: String) -> Result<(), EngineError> {
-    let path = self.socket();
+    let path = self.socket(&name);
     let listener = control::bind(&path).map_err(|error| Self::failed("bind the control socket", error))?;
 
     std::thread::spawn(move || {
@@ -167,7 +168,8 @@ impl Engine for FrameworkEngine {
     // This process's own terminal, not a duplicate: sending a descriptor over
     // the socket copies it, and the owner takes its own duplicate of what
     // arrives. Ours stays ours.
-    control::request(&self.socket(), &request, descriptor, &resized).map_err(|error| Self::failed("attach", error))
+    control::request(&self.socket(&spec.name), &request, descriptor, &resized)
+      .map_err(|error| Self::failed("attach", error))
   }
 
   /// Read from the store's own index rather than asked of anything.
@@ -195,12 +197,8 @@ impl Engine for FrameworkEngine {
       &self.store.kernel().display().to_string(),
       self.store.initfs_reference(),
       &spec.image,
-      spec.cpus.unwrap_or(2) as i32,
-      spec
-        .memory
-        .as_deref()
-        .and_then(spec::memory)
-        .unwrap_or(2 * 1024 * 1024 * 1024),
+      spec.resources.cpus as i32,
+      spec.resources.memory_in_bytes,
       &spec::mounts(&spec.mounts),
       &spec::sockets(&spec.sockets),
       &spec::environment(&spec.env),
@@ -220,14 +218,10 @@ impl Engine for FrameworkEngine {
     Ok(spec.name.clone())
   }
 
-  fn running_containers(&self) -> Result<Vec<String>, EngineError> {
+  fn is_running(&self, name: &str) -> Result<bool, EngineError> {
     // Either we hold it, or whoever does is answering on the socket. A socket
     // file with nothing behind it is a container that died with its owner.
-    Ok(if control::served(&self.socket()) {
-      vec![session_name(&self.state_dir)]
-    } else {
-      Vec::new()
-    })
+    Ok(control::served(&self.socket(name)))
   }
 
   /// Names both halves of what boots a session, because they are pinned
@@ -239,15 +233,6 @@ impl Engine for FrameworkEngine {
       crate::KERNEL_VERSION
     )))
   }
-}
-
-/// The session directory is named after the container, which is what lets
-/// `running_containers` answer without a register.
-fn session_name(state_dir: &std::path::Path) -> String {
-  state_dir
-    .file_name()
-    .map(|name| name.to_string_lossy().into_owned())
-    .unwrap_or_default()
 }
 
 /// Installs the SIGWINCH handler, once.

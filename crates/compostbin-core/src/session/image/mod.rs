@@ -9,7 +9,7 @@ use crate::error::{At, ImageError};
 use crate::manifest::Manifest;
 use crate::session::Session;
 use compostbin_engine::builder::Builder;
-use compostbin_engine::model::{BuildPlan, BuildStep};
+use compostbin_engine::model::{BuildPlan, BuildStep, Resources};
 use std::path::PathBuf;
 
 /// Where the image store lives. Under `.cache` because everything in it is
@@ -23,12 +23,14 @@ pub const BUILD_CONTEXT: &str = "~/.cache/compostbin/build";
 /// which is what a `COPY` was.
 /// The engine's: the build cache matches on it.
 pub use compostbin_engine::cache::CONTEXT_MOUNT;
-/// The builder's size. Deliberately not the manifest's `[container] memory`:
-/// that is what the session runs with, and a project asking for a bigger session
-/// has no business resizing everyone's build. Sized past 2 GB, which is not
-/// enough to install Claude Code.
-pub const BUILD_MEMORY: &str = "8G";
-pub const BUILD_CPUS: u32 = 4;
+/// The builder's size. Deliberately not the manifest's `[container]`: that is
+/// what the session runs with, and a project asking for a bigger session has no
+/// business resizing everyone's build. Sized past 2 GB, which is not enough to
+/// install Claude Code.
+pub const BUILD_RESOURCES: Resources = Resources {
+  cpus: 4,
+  memory_in_bytes: 8 << 30,
+};
 /// What the base image is built from. Registry-qualified: nothing downstream
 /// resolves a bare `debian:stable-slim`.
 pub const BASE_IMAGE: &str = "docker.io/library/debian:stable-slim";
@@ -104,11 +106,9 @@ pub fn build(session: &Session, builder: &impl Builder, cache: bool) -> Result<(
 /// The base image: debian, the tools a session needs, Claude Code, the guest
 /// side of the host channel, and the user it all ends up running as.
 pub fn base_plan(session: &Session) -> BuildPlan {
-  let mut plan = BuildPlan::new(BASE_IMAGE, &session.manifest.project.image);
+  let mut plan = BuildPlan::new(BASE_IMAGE, &session.manifest.project.image, BUILD_RESOURCES);
 
   plan.context = Some(context(session));
-  plan.cpus = Some(BUILD_CPUS);
-  plan.memory = Some(BUILD_MEMORY.to_string());
   // Keeps `.claude.json` — the account and the onboarding answers — inside the
   // mounted home. Without it Claude writes to `~/.claude.json`, which dies with
   // the container, and every restart asks for a fresh login.
@@ -180,10 +180,8 @@ pub fn project_plan(session: &Session) -> Option<BuildPlan> {
     return None;
   }
 
-  let mut plan = BuildPlan::new(&manifest.project.image, session.image());
+  let mut plan = BuildPlan::new(&manifest.project.image, session.image(), BUILD_RESOURCES);
 
-  plan.cpus = Some(BUILD_CPUS);
-  plan.memory = Some(BUILD_MEMORY.to_string());
   plan.user = Some(USER.to_string());
   plan.workdir = Some(PathBuf::from(HOME));
 
@@ -333,14 +331,15 @@ mod tests {
   fn the_session_memory_does_not_reach_the_build() {
     let home = TempDir::new().expect("temp dir");
     let mut session = session(&home);
-    session.manifest.container.memory = "16G".to_string();
+    session.manifest.container.cpus = 16;
+    session.manifest.container.memory = crate::manifest::Memory::gibibytes(16);
     session.manifest.image.packages = vec!["direnv".to_string()];
     let builder = RecordingBuilder::new();
 
     build(&session, &builder, true).expect("build should succeed");
 
     for plan in builder.plans() {
-      assert_eq!(plan.memory, Some(BUILD_MEMORY.to_string()), "{plan:?}");
+      assert_eq!(plan.resources, BUILD_RESOURCES, "{plan:?}");
     }
   }
 

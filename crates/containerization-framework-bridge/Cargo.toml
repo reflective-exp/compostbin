@@ -7,8 +7,10 @@ repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[dependencies]
 compostbin-engine.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true

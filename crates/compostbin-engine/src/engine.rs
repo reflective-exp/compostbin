@@ -17,9 +17,10 @@ pub trait Engine {
   /// Starts a container and returns its id.
   fn run(&self, spec: &RunSpec) -> Result<String, EngineError>;
 
-  /// The containers that are running, and so ready for `exec`. A container that
-  /// is not running does not exist: it dies with the process that started it.
-  fn running_containers(&self) -> Result<Vec<String>, EngineError>;
+  /// Whether this container is running, and so ready for `exec`. A container
+  /// that is not running does not exist: it dies with the process that started
+  /// it.
+  fn is_running(&self, name: &str) -> Result<bool, EngineError>;
 
   /// What is running containers, and at what version. `None` when it cannot
   /// say, which `doctor` reports rather than treating as a failure.

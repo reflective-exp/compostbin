@@ -20,7 +20,7 @@ use crate::session::record::{RECORD_FILE, Record};
 use crate::workspace::paths::{PathResolver, root_containing};
 use crate::workspace::{Origin, Workspace};
 use compostbin_engine::engine::Engine;
-use compostbin_engine::model::{EnvVar, ExecSpec, Mount, RunSpec, SocketRelay};
+use compostbin_engine::model::{EnvVar, ExecSpec, Mount, Resources, RunSpec, SocketRelay};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -444,7 +444,6 @@ impl Session {
   pub fn run_spec(&self) -> RunSpec {
     RunSpec {
       arguments: self.process(),
-      cpus: Some(self.manifest.container.cpus),
       env: self
         .manifest
         .container
@@ -453,9 +452,12 @@ impl Session {
         .map(|name| EnvVar::Inherit(name.clone()))
         .collect(),
       image: self.image(),
-      memory: Some(self.manifest.container.memory.clone()),
       mounts: self.mounts(),
       name: self.container_name(),
+      resources: Resources {
+        cpus: self.manifest.container.cpus,
+        memory_in_bytes: self.manifest.container.memory.bytes(),
+      },
       sockets: self.sockets(),
       workdir: Some(self.workdir()),
     }
@@ -501,11 +503,7 @@ impl Session {
   /// it rather than create it. Asked before starting by anything whose work
   /// belongs to the container's creation — binding the port sockets, above all.
   pub fn is_running(&self, engine: &impl Engine) -> Result<bool, SessionError> {
-    Ok(
-      engine
-        .running_containers()?
-        .contains(&self.container_name()),
-    )
+    Ok(engine.is_running(&self.container_name())?)
   }
 
   /// Attaches Claude to the session, creating the container first unless it is
@@ -799,7 +797,10 @@ source   = "~/.cargo/registry"
 
     assert_eq!(
       engine.calls(),
-      [Call::Running, Call::Exec(session.exec_spec(&["claude".to_string()]))],
+      [
+        Call::IsRunning("compostbin-cb".to_string()),
+        Call::Exec(session.exec_spec(&["claude".to_string()]))
+      ],
       "a running container must not be recreated"
     );
   }
@@ -817,7 +818,7 @@ source   = "~/.cargo/registry"
     assert_eq!(
       engine.calls(),
       [
-        Call::Running,
+        Call::IsRunning("compostbin-cb".to_string()),
         Call::Run(session.run_spec()),
         Call::Exec(session.exec_spec(&["claude".to_string()])),
       ]
@@ -1179,10 +1180,8 @@ source   = "~/.cargo/registry"
       session().run_spec(),
       RunSpec {
         arguments: KEEPALIVE_COMMAND.map(str::to_string).to_vec(),
-        cpus: Some(4),
         env: vec![EnvVar::Inherit("ANTHROPIC_API_KEY".to_string())],
         image: "compostbin/base:latest".to_string(),
-        memory: Some("8G".to_string()),
         mounts: vec![
           Mount {
             readonly: false,
@@ -1206,6 +1205,10 @@ source   = "~/.cargo/registry"
           },
         ],
         name: "compostbin-cb".to_string(),
+        resources: Resources {
+          cpus: 4,
+          memory_in_bytes: 8 << 30,
+        },
         sockets: Vec::new(),
         workdir: Some(PathBuf::from("/workspace/workspace/compostbin")),
       }

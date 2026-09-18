@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 /// `--continue` works, beside the spool, which `clean` removes.
 pub const SESSIONS_DIR: &str = "~/.local/state/compostbin/sessions";
 pub const DEFAULT_CONTAINER_CPUS: u32 = 4;
-pub const DEFAULT_CONTAINER_MEMORY: &str = "8G";
+pub const DEFAULT_CONTAINER_MEMORY: Memory = Memory::gibibytes(8);
 pub const DEFAULT_HOST_CONCURRENCY: usize = 8;
 pub const DEFAULT_IMAGE: &str = "compostbin/base:latest";
 /// Checked in beside the project it configures.
@@ -180,7 +180,7 @@ impl Default for ClaudeConfig {
 pub struct ContainerConfig {
   pub cpus: u32,
   pub env: Vec<String>,
-  pub memory: String,
+  pub memory: Memory,
 }
 
 impl Default for ContainerConfig {
@@ -188,7 +188,86 @@ impl Default for ContainerConfig {
     Self {
       cpus: DEFAULT_CONTAINER_CPUS,
       env: Vec::new(),
-      memory: DEFAULT_CONTAINER_MEMORY.to_string(),
+      memory: DEFAULT_CONTAINER_MEMORY,
+    }
+  }
+}
+
+/// A size in bytes, written the way a manifest writes it: `8G`, `512M`,
+/// `1024K`, or a bare number of bytes. Parsed as the manifest loads, so a typo
+/// is an error naming the file rather than a session quietly given some other
+/// size.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Memory(u64);
+
+/// Largest first, which is the order `Display` wants them in.
+const MEMORY_UNITS: [(char, u64); 3] = [('G', 1 << 30), ('M', 1 << 20), ('K', 1 << 10)];
+
+impl Memory {
+  pub const fn gibibytes(count: u64) -> Self {
+    Self(count << 30)
+  }
+
+  pub fn bytes(self) -> u64 {
+    self.0
+  }
+}
+
+impl std::str::FromStr for Memory {
+  type Err = String;
+
+  fn from_str(text: &str) -> Result<Self, String> {
+    let invalid = || format!("\"{text}\" is not a memory size: expected a number, optionally followed by G, M, or K");
+    let trimmed = text.trim();
+
+    let (digits, scale) = match trimmed.char_indices().last() {
+      Some((at, unit)) if unit.is_ascii_alphabetic() => {
+        let (_, scale) = MEMORY_UNITS
+          .iter()
+          .find(|(name, _)| name.eq_ignore_ascii_case(&unit))
+          .ok_or_else(invalid)?;
+
+        (&trimmed[..at], *scale)
+      }
+      _ => (trimmed, 1),
+    };
+
+    digits
+      .trim()
+      .parse::<u64>()
+      .ok()
+      .and_then(|count| count.checked_mul(scale))
+      .filter(|&bytes| bytes > 0)
+      .map(Self)
+      .ok_or_else(invalid)
+  }
+}
+
+impl TryFrom<String> for Memory {
+  type Error = String;
+
+  fn try_from(text: String) -> Result<Self, String> {
+    text.parse()
+  }
+}
+
+impl From<Memory> for String {
+  fn from(memory: Memory) -> Self {
+    memory.to_string()
+  }
+}
+
+/// In the largest unit that divides it exactly, so `8G` is written back as it
+/// was read.
+impl std::fmt::Display for Memory {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match MEMORY_UNITS
+      .iter()
+      .find(|(_, scale)| self.0.is_multiple_of(*scale))
+    {
+      Some((unit, scale)) => write!(formatter, "{}{unit}", self.0 / scale),
+      None => write!(formatter, "{}", self.0),
     }
   }
 }
@@ -214,8 +293,8 @@ pub struct HostConfig {
   /// Declared before `commands`, against this table's alphabetical order, and it
   /// must stay there: TOML cannot express a bare value after a table.
   pub concurrency: usize,
-  /// Host loopback ports the guest reaches at its own `localhost`, relayed over
-  /// vmnet — where every other container can reach them too. A bare value, so
+  /// Host loopback ports the guest reaches at its own `localhost`, each relayed
+  /// through a unix socket carried into this container alone. A bare value, so
   /// before `commands` for the same reason as `concurrency`.
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub ports: Vec<u16>,
@@ -715,7 +794,7 @@ tty = true
 
     assert_eq!(manifest.container.cpus, 4);
     assert_eq!(manifest.container.env, ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]);
-    assert_eq!(manifest.container.memory, "8G");
+    assert_eq!(manifest.container.memory, Memory::gibibytes(8));
 
     assert_eq!(manifest.workspace.roots, ["~/workspace"]);
 
@@ -789,6 +868,39 @@ source = "~/a-first"
   }
 
   #[test]
+  fn reads_the_memory_forms_a_manifest_uses() {
+    for (text, bytes) in [("8G", 8 << 30), ("512M", 512 << 20), ("1024k", 1 << 20), ("2048", 2048)] {
+      assert_eq!(text.parse::<Memory>().map(Memory::bytes), Ok(bytes), "{text}");
+    }
+  }
+
+  #[test]
+  fn writes_memory_back_the_way_it_reads() {
+    for text in ["8G", "512M", "1536K", "1000"] {
+      assert_eq!(
+        text
+          .parse::<Memory>()
+          .expect("a size should parse")
+          .to_string(),
+        text
+      );
+    }
+  }
+
+  /// Caught as the manifest loads, not left for the engine to replace with a
+  /// size nobody asked for.
+  #[test]
+  fn refuses_memory_that_is_not_a_size() {
+    for text in ["", "lots", "8GB", "8T", "0", "-1G"] {
+      assert!(text.parse::<Memory>().is_err(), "{text:?} should not parse");
+    }
+
+    let error = toml::from_str::<Manifest>("[container]\nmemory = \"8GB\"\n").expect_err("8GB is not a size");
+
+    assert!(error.to_string().contains("\"8GB\" is not a memory size"), "{error}");
+  }
+
+  #[test]
   fn applies_defaults() {
     let manifest: Manifest = toml::from_str("").expect("empty manifest should parse");
 
@@ -797,7 +909,7 @@ source = "~/a-first"
 
     assert_eq!(manifest.container.cpus, 4);
     assert_eq!(manifest.container.env, [] as [String; 0]);
-    assert_eq!(manifest.container.memory, "8G");
+    assert_eq!(manifest.container.memory, Memory::gibibytes(8));
 
     assert_eq!(manifest.workspace.roots, [] as [String; 0]);
     assert_eq!(manifest.paths.len(), 0);

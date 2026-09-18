@@ -19,9 +19,6 @@ use compostbin_engine::error::EngineError;
 use compostbin_engine::model::{BuildPlan, BuildStep};
 use serde::Serialize;
 
-/// What a builder VM gets when the plan says nothing.
-const DEFAULT_MEMORY_IN_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const DEFAULT_CPUS: i32 = 4;
 /// The rootfs the base image is unpacked into. Sparse, so this is a ceiling
 /// rather than an allocation — but everything a build installs has to fit.
 const ROOTFS_SIZE_IN_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -132,12 +129,8 @@ impl Builder for FrameworkBuilder {
       initfs_reference: self.store.initfs_reference(),
       base: &plan.base,
       tag: &plan.tag,
-      cpus: plan.cpus.map_or(DEFAULT_CPUS, |cpus| cpus as i32),
-      memory_in_bytes: plan
-        .memory
-        .as_deref()
-        .and_then(spec::memory)
-        .unwrap_or(DEFAULT_MEMORY_IN_BYTES),
+      cpus: plan.resources.cpus as i32,
+      memory_in_bytes: plan.resources.memory_in_bytes,
       rootfs_size_in_bytes: ROOTFS_SIZE_IN_BYTES,
       context: plan.context.as_ref().map(|path| path.display().to_string()),
       steps: plan
@@ -183,13 +176,20 @@ fn builder_name(tag: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use compostbin_engine::model::Resources;
 
   fn plan() -> BuildPlan {
-    let mut plan = BuildPlan::new("docker.io/library/debian:stable-slim", "compostbin/base:latest");
+    let mut plan = BuildPlan::new(
+      "docker.io/library/debian:stable-slim",
+      "compostbin/base:latest",
+      Resources {
+        cpus: 4,
+        memory_in_bytes: 8 << 30,
+      },
+    );
 
     plan.context = Some("/Users/user/.cache/compostbin/build/base".into());
     plan.environment = vec!["CLAUDE_CONFIG_DIR=/home/claude/.claude".to_string()];
-    plan.memory = Some("8G".to_string());
     plan.steps = vec![
       BuildStep::root("packages", "apt-get update"),
       BuildStep::as_user("bashrc", "claude", "echo hook >> ~/.bashrc"),
@@ -211,8 +211,8 @@ mod tests {
       initfs_reference: "vminit:0",
       base: &plan.base,
       tag: &plan.tag,
-      cpus: 4,
-      memory_in_bytes: 8 * 1024 * 1024 * 1024,
+      cpus: plan.resources.cpus as i32,
+      memory_in_bytes: plan.resources.memory_in_bytes,
       rootfs_size_in_bytes: ROOTFS_SIZE_IN_BYTES,
       context: plan.context.as_ref().map(|path| path.display().to_string()),
       steps: plan
@@ -300,7 +300,10 @@ mod tests {
   }
 
   #[test]
-  fn carries_the_builders_own_memory_in_bytes() {
-    assert_eq!(wire(&plan())["memoryInBytes"], 8 * 1024 * 1024 * 1024u64);
+  fn carries_the_builders_own_resources() {
+    let json = wire(&plan());
+
+    assert_eq!(json["cpus"], 4);
+    assert_eq!(json["memoryInBytes"], 8u64 << 30);
   }
 }

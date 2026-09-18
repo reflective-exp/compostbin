@@ -165,10 +165,17 @@ impl Key {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::BuildStep;
+  use crate::model::{BuildStep, Resources};
 
   fn plan() -> BuildPlan {
-    let mut plan = BuildPlan::new("docker.io/library/debian:stable-slim", "compostbin/base:latest");
+    let mut plan = BuildPlan::new(
+      "docker.io/library/debian:stable-slim",
+      "compostbin/base:latest",
+      Resources {
+        cpus: 4,
+        memory_in_bytes: 8 << 30,
+      },
+    );
 
     plan.environment = vec!["CLAUDE_CONFIG_DIR=/home/claude/.claude".to_string()];
     plan.steps = vec![

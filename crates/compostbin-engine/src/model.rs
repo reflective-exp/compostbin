@@ -47,12 +47,11 @@ pub struct BuildPlan {
   /// A host directory the steps may read, mounted read-only. This is what a
   /// `COPY` is: a step installs out of it.
   pub context: Option<PathBuf>,
-  pub cpus: Option<u32>,
   /// `NAME=VALUE`, visible to every step and written into the image's config —
   /// `ENV`, in both of its meanings.
   pub environment: Vec<String>,
   /// What the builder runs with, not what a session does.
-  pub memory: Option<String>,
+  pub resources: Resources,
   pub steps: Vec<BuildStep>,
   /// What the built image is registered as.
   pub tag: String,
@@ -62,20 +61,27 @@ pub struct BuildPlan {
 }
 
 impl BuildPlan {
-  pub fn new(base: impl Into<String>, tag: impl Into<String>) -> Self {
+  pub fn new(base: impl Into<String>, tag: impl Into<String>, resources: Resources) -> Self {
     Self {
       base: base.into(),
       cache: true,
       context: None,
-      cpus: None,
       environment: Vec::new(),
-      memory: None,
+      resources,
       steps: Vec::new(),
       tag: tag.into(),
       user: None,
       workdir: None,
     }
   }
+}
+
+/// What a VM is given. Always stated by the caller, never defaulted by an
+/// engine: a session's size is the manifest's, and a build's is its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Resources {
+  pub cpus: u32,
+  pub memory_in_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -140,12 +146,11 @@ pub struct SocketRelay {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunSpec {
   pub arguments: Vec<String>,
-  pub cpus: Option<u32>,
   pub env: Vec<EnvVar>,
   pub image: String,
-  pub memory: Option<String>,
   pub mounts: Vec<Mount>,
   pub name: String,
+  pub resources: Resources,
   /// Relayed after the mounts. Nothing nests inside a socket, so the order
   /// between the two groups does not matter the way it does within `mounts`.
   pub sockets: Vec<SocketRelay>,

@@ -4,7 +4,7 @@ mod report;
 use clap::Parser;
 use cli::{Arguments, Command};
 use compostbin_core::doctor::{self, Status};
-use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest};
+use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, SESSIONS_DIR};
 use compostbin_core::session::credentials::{KEYCHAIN_SERVICE, Keychain};
 use compostbin_core::session::image;
 use compostbin_core::session::{AddOutcome, Notice, Session};
@@ -12,6 +12,7 @@ use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
 use compostbin_engine::engine::Engine;
+use containerization_framework_bridge::{FrameworkBuilder, FrameworkEngine, Store};
 use std::error::Error;
 use std::path::Path;
 
@@ -162,21 +163,13 @@ fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn Error
 /// that has never been used needs a kernel and an init image before anything can
 /// boot, and a separate step for that is exactly the `container system start`
 /// this replaced.
-#[cfg(target_os = "macos")]
 fn build_images(session: &Session, cache: bool) -> Result<(), Box<dyn Error>> {
-  let builder = containerization_framework_bridge::FrameworkBuilder::new(containerization_framework_bridge::Store::at(
-    image::store(session),
-  ));
+  let builder = FrameworkBuilder::new(Store::at(image::store(session)));
 
   builder.provision()?;
   image::build(session, &builder, cache)?;
 
   Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn build_images(_session: &Session, _cache: bool) -> Result<(), Box<dyn Error>> {
-  Err("Containerization.framework is macOS only".into())
 }
 
 /// Prints every check, exiting non-zero when any of them failed so `doctor` is
@@ -199,58 +192,14 @@ fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
 /// One implementation: Containerization.framework, in this process. Nothing else
 /// is installed, started, or asked — which is why the store has to be ready
 /// before a session can begin, and why the error says to build.
-#[cfg(target_os = "macos")]
-fn select(session: &Session) -> Result<containerization_framework_bridge::FrameworkEngine, Box<dyn Error>> {
-  let store = containerization_framework_bridge::Store::at(image::store(session));
+///
+/// Each container's control socket goes in its own session directory.
+fn select(session: &Session) -> Result<FrameworkEngine, Box<dyn Error>> {
+  let store = Store::at(image::store(session));
 
   store.ready()?;
 
-  // The control socket lives here, so the directory has to exist before `run`
-  // binds it — earlier than anything else would have created it.
-  std::fs::create_dir_all(session.state_dir())?;
-
-  Ok(containerization_framework_bridge::FrameworkEngine::new(
-    session.state_dir(),
-    store,
-  ))
-}
-
-/// compostbin only runs on macOS, but it has to compile inside its own Debian
-/// guest — where `cargo check` is how a session checks its work. Nothing
-/// constructs this; it exists so `select` has a type to fail with.
-#[cfg(not(target_os = "macos"))]
-mod unsupported {
-  use compostbin_engine::error::EngineError;
-  use compostbin_engine::model::{ExecSpec, RunSpec};
-
-  pub struct Engine;
-
-  impl compostbin_engine::engine::Engine for Engine {
-    fn exec(&self, _spec: &ExecSpec) -> Result<i32, EngineError> {
-      unreachable!("no session runs off macOS")
-    }
-
-    fn images(&self) -> Result<Vec<String>, EngineError> {
-      unreachable!("no session runs off macOS")
-    }
-
-    fn run(&self, _spec: &RunSpec) -> Result<String, EngineError> {
-      unreachable!("no session runs off macOS")
-    }
-
-    fn running_containers(&self) -> Result<Vec<String>, EngineError> {
-      unreachable!("no session runs off macOS")
-    }
-
-    fn version(&self) -> Result<Option<String>, EngineError> {
-      unreachable!("no session runs off macOS")
-    }
-  }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn select(_session: &Session) -> Result<unsupported::Engine, Box<dyn Error>> {
-  Err("Containerization.framework is macOS only".into())
+  Ok(FrameworkEngine::new(session.resolve(SESSIONS_DIR), store))
 }
 
 /// Writes back whichever file the new entry belongs to, leaving the other

@@ -105,20 +105,6 @@ pub fn nat_address(name: &str) -> String {
   format!("{network}.{host}/{NAT_PREFIX}")
 }
 
-/// `8G`, `512M`, `1024` — the forms the manifest's `[container] memory` takes,
-/// in bytes. An unparseable value is `None`, and the caller defaults.
-pub fn memory(memory: &str) -> Option<u64> {
-  let memory = memory.trim();
-  let (digits, scale) = match memory.chars().last()? {
-    'g' | 'G' => (&memory[..memory.len() - 1], 1024 * 1024 * 1024),
-    'm' | 'M' => (&memory[..memory.len() - 1], 1024 * 1024),
-    'k' | 'K' => (&memory[..memory.len() - 1], 1024),
-    _ => (memory, 1),
-  };
-
-  digits.trim().parse::<u64>().ok()?.checked_mul(scale)
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -206,20 +192,5 @@ mod tests {
         "{name} -> {address} should avoid the gateway and the broadcast address"
       );
     }
-  }
-
-  #[test]
-  fn reads_the_memory_forms_the_manifest_uses() {
-    assert_eq!(memory("8G"), Some(8 * 1024 * 1024 * 1024));
-    assert_eq!(memory("512M"), Some(512 * 1024 * 1024));
-    assert_eq!(memory("1024k"), Some(1024 * 1024));
-    assert_eq!(memory("2048"), Some(2048));
-  }
-
-  #[test]
-  fn reads_no_memory_from_something_that_is_not_a_size() {
-    assert_eq!(memory(""), None);
-    assert_eq!(memory("lots"), None);
-    assert_eq!(memory("8GB"), None);
   }
 }

@@ -1,9 +1,9 @@
 //! Generates the FFI glue, builds the Swift package, and tells cargo how to
 //! link it.
 //!
-//! Only on macOS. Everywhere else the crate is empty — `#![cfg(target_os =
-//! "macos")]` in `lib.rs` — and this does nothing, so the workspace still
-//! checks from inside a compostbin session's Debian guest.
+//! Only on macOS. Everywhere else the crate has no bridge to link — the engine
+//! and builder are stand-ins, in `unsupported.rs` — and this does nothing, so the
+//! workspace still checks from inside a compostbin session's Debian guest.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -160,7 +160,7 @@ fn link_swift_runtime() {
 
 fn main() {
   println!("cargo:rerun-if-changed=build.rs");
-  println!("cargo:rerun-if-changed=src/lib.rs");
+  println!("cargo:rerun-if-changed=src/bridge.rs");
 
   if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
     return;
@@ -174,7 +174,7 @@ fn main() {
 
   let staged = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR")).join("swift-bridge");
 
-  swift_bridge_build::parse_bridges(vec![manifest_dir().join("src/lib.rs")]).write_all_concatenated(&staged, BRIDGE);
+  swift_bridge_build::parse_bridges(vec![manifest_dir().join("src/bridge.rs")]).write_all_concatenated(&staged, BRIDGE);
   publish_bridge_shims(&staged);
   sync_generated(&staged, &swift_source_dir().join("generated"));
 

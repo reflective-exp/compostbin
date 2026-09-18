@@ -10,8 +10,8 @@ use std::cell::RefCell;
 pub enum Call {
   Exec(ExecSpec),
   Images,
+  IsRunning(String),
   Run(RunSpec),
-  Running,
   Version,
 }
 
@@ -93,10 +93,10 @@ impl Engine for RecordingEngine {
     Ok(spec.name.clone())
   }
 
-  fn running_containers(&self) -> Result<Vec<String>, EngineError> {
-    self.calls.record(Call::Running);
+  fn is_running(&self, name: &str) -> Result<bool, EngineError> {
+    self.calls.record(Call::IsRunning(name.to_string()));
 
-    Ok(self.running.borrow().clone())
+    Ok(self.running.borrow().iter().any(|running| running == name))
   }
 
   fn version(&self) -> Result<Option<String>, EngineError> {
@@ -137,15 +137,18 @@ impl Builder for RecordingBuilder {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::model::Resources;
 
   #[test]
   fn records_calls_in_order() {
     let engine = RecordingEngine::new();
 
-    engine.running_containers().expect("running should succeed");
+    engine
+      .is_running("cb-test")
+      .expect("is_running should succeed");
     engine.version().expect("version should succeed");
 
-    assert_eq!(engine.calls(), [Call::Running, Call::Version]);
+    assert_eq!(engine.calls(), [Call::IsRunning("cb-test".to_string()), Call::Version]);
   }
 
   #[test]
@@ -157,7 +160,14 @@ mod tests {
   #[test]
   fn keeps_the_plans_it_was_given() {
     let builder = RecordingBuilder::new();
-    let plan = BuildPlan::new("docker.io/library/debian:stable-slim", "compostbin/base:latest");
+    let plan = BuildPlan::new(
+      "docker.io/library/debian:stable-slim",
+      "compostbin/base:latest",
+      Resources {
+        cpus: 4,
+        memory_in_bytes: 8 << 30,
+      },
+    );
 
     builder.build(&plan).expect("recording should succeed");
 

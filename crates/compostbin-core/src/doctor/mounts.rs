@@ -91,7 +91,7 @@ pub fn dangling_symlinks(session: &Session) -> Check {
 pub fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
   let name = session.container_name();
 
-  let running = match engine.running_containers() {
+  let running = match engine.is_running(&name) {
     Ok(running) => running,
     Err(error) => {
       return check(
@@ -102,7 +102,7 @@ pub fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
     }
   };
 
-  if !running.contains(&name) {
+  if !running {
     return check(
       "container mounts",
       Status::Ok,

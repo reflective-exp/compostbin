@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// Under the session state directory, beside the spool and the port sockets.
+/// In the container's own directory under the engine's runtime directory.
 pub const CONTROL_SOCKET: &str = "control.sock";
 
 /// Separates list elements inside one request line. A unit separator cannot
@@ -98,11 +98,16 @@ pub fn served(path: &Path) -> bool {
   UnixStream::connect(path).is_ok()
 }
 
-/// Binds the control socket, replacing any left by a dead owner.
+/// Binds the control socket, creating its directory and replacing any socket
+/// left by a dead owner.
 ///
 /// The leftover is safe to remove precisely because `served` just said nothing
 /// answers on it.
 pub fn bind(path: &Path) -> io::Result<UnixListener> {
+  if let Some(parent) = path.parent() {
+    std::fs::create_dir_all(parent)?;
+  }
+
   if path.exists() && !served(path) {
     std::fs::remove_file(path)?;
   }
@@ -154,10 +159,9 @@ where
   let (payload, terminal) = receive(&stream)?;
 
   // `served` connects and closes without sending, which is how anything asks
-  // whether this session is still up — `running_containers`, and so `doctor`
-  // and the port relay's watch, repeatedly. That is not a client and not an
-  // error, and saying so would put a line into the middle of someone's
-  // session every time it was asked.
+  // whether this container is still up — `is_running`, and so `run` and
+  // `doctor`. That is not a client and not an error, and saying so would put a
+  // line into the middle of someone's session every time it was asked.
   if probe(&payload, &terminal) {
     return Ok(());
   }
@@ -251,9 +255,9 @@ pub fn request(
   })
 }
 
-/// Where a session's control socket lives.
-pub fn socket_path(state_dir: &Path) -> PathBuf {
-  state_dir.join(CONTROL_SOCKET)
+/// Where a container's control socket lives, given its directory.
+pub fn socket_path(container_dir: &Path) -> PathBuf {
+  container_dir.join(CONTROL_SOCKET)
 }
 
 /// `sendmsg` with the payload and one descriptor in a `SCM_RIGHTS` control
