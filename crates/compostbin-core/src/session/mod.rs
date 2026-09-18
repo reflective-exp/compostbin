@@ -105,6 +105,8 @@ pub enum Notice {
   /// What was copied from the host's own `~/.claude`. Never empty.
   Shared(Vec<String>),
   Port(PortEvent),
+  /// This image's first run, which unpacks it before the container can start.
+  Unpacking(String),
   /// The host command agent gave up; the session carries on without it.
   AgentStopped(PathError),
   /// The spool could not be emptied after Claude exited.
@@ -481,8 +483,14 @@ impl Session {
 
   /// Creates the container and records what it was created with. One step,
   /// because `doctor` can say nothing about unrecorded mounts.
-  fn create(&self, engine: &impl Engine) -> Result<(), SessionError> {
+  fn create(&self, engine: &impl Engine, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
     let spec = self.run_spec();
+
+    // Said first: the unpack is the slow part of a first run, and a silent wait
+    // looks like a hang.
+    if !engine.is_unpacked(&spec.image)? {
+      notify(Notice::Unpacking(spec.image.clone()));
+    }
 
     // Every create mounts a briefing rendered from the manifest as it reads now.
     briefing::write(&self.managed_settings(), &self.manifest)?;
@@ -581,7 +589,7 @@ impl Session {
 
     let bound = host::bind_all(&self.forwards(), &|event| notify(Notice::Port(event))).at(self.port_sockets())?;
 
-    self.create(engine)?;
+    self.create(engine, notify)?;
 
     let stop = AtomicBool::new(false);
     let spool = Spool::new(self.host_spool());
@@ -819,9 +827,38 @@ source   = "~/.cargo/registry"
       engine.calls(),
       [
         Call::IsRunning("compostbin-cb".to_string()),
+        Call::IsUnpacked(session.run_spec().image),
         Call::Run(session.run_spec()),
         Call::Exec(session.exec_spec(&["claude".to_string()])),
       ]
+    );
+  }
+
+  /// Only an image's first run unpacks it, and only that one says so.
+  #[test]
+  fn run_says_when_it_unpacks_the_image_first() {
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp");
+    let session = session_under(&base);
+    let image = session.run_spec().image;
+    let unpacking = |engine: &RecordingEngine| {
+      let said = std::sync::Mutex::new(Vec::new());
+
+      session
+        .run(engine, &NoToken, &[], &|notice| {
+          if let Notice::Unpacking(image) = notice {
+            said.lock().expect("unpoisoned").push(image);
+          }
+        })
+        .expect("run should succeed");
+
+      said.into_inner().expect("unpoisoned")
+    };
+
+    assert_eq!(unpacking(&RecordingEngine::new()), [image.clone()]);
+    assert_eq!(
+      unpacking(&RecordingEngine::with_unpacked(&[&image])),
+      Vec::<String>::new()
     );
   }
 
@@ -888,9 +925,10 @@ source   = "~/.cargo/registry"
     let base = temp.path().canonicalize().expect("canonical temp");
     let session = session_under(&base);
     let said = std::sync::Mutex::new(Vec::new());
+    let engine = RecordingEngine::with_unpacked(&[&session.run_spec().image]);
 
     session
-      .run(&RecordingEngine::new(), &NoToken, &[], &|notice| {
+      .run(&engine, &NoToken, &[], &|notice| {
         said.lock().expect("lock").push(format!("{notice:?}"))
       })
       .expect("run should succeed");

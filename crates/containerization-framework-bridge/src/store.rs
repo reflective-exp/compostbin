@@ -1,10 +1,13 @@
 //! Where the boot artefacts live.
 //!
 //! Containerization's `ImageStore` layout: an image index in `state.json`, blobs
-//! under `content/blobs/sha256`, the kernel under `kernels`, and one unpacked
-//! rootfs per container under `containers/<id>`. `ContainerManager` opens the
-//! directory as-is, so the layout is the library's rather than anything invented
-//! here.
+//! under `content/blobs/sha256`, the kernel under `kernels`, and one rootfs per
+//! container under `containers/<id>`. `ContainerManager` opens the directory
+//! as-is, so the layout is the library's rather than anything invented here.
+//!
+//! Two additions are ours: `build-cache`, the builder's step snapshots, and
+//! `unpacked`, each image's rootfs unpacked once and cloned into every container
+//! that runs it.
 //!
 //! Nothing in it is precious: `provision` fetches the kernel and the init image
 //! when they are missing, and `build` makes the images again. Which is why it

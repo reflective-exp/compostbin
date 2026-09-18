@@ -184,11 +184,10 @@ impl Engine for FrameworkEngine {
   }
 
   fn run(&self, spec: &RunSpec) -> Result<String, EngineError> {
-    // `ContainerManager.create` refuses a container directory that already
-    // exists, and every previous run left one: the VM dies with its process, so
-    // nothing gets the chance to tidy up afterwards. So a run always begins on a
-    // rootfs unpacked fresh from the image, which is what `Session::start`
-    // deleting a stopped container already meant.
+    // Every previous run left a container directory behind: the VM dies with its
+    // process, so nothing gets the chance to tidy up afterwards. So a run always
+    // begins on a fresh clone of the image's rootfs, which is what
+    // `Session::start` deleting a stopped container already meant.
     let _ = std::fs::remove_dir_all(self.store.container_dir(&spec.name));
 
     let code = ffi::compostbin_boot(
@@ -222,6 +221,12 @@ impl Engine for FrameworkEngine {
     // Either we hold it, or whoever does is answering on the socket. A socket
     // file with nothing behind it is a container that died with its owner.
     Ok(control::served(&self.socket(name)))
+  }
+
+  fn is_unpacked(&self, image: &str) -> Result<bool, EngineError> {
+    let code = ffi::compostbin_is_unpacked(&self.store.root().display().to_string(), image);
+
+    Ok(checked(code).map_err(|error| Self::failed("find the image", error))? == 1)
   }
 
   /// Names both halves of what boots a session, because they are pinned

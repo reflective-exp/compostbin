@@ -23,6 +23,7 @@ fn report(notice: Notice) {
     ),
     Notice::Shared(names) => println!("shared from your own ~/.claude: {}", names.join(", ")),
     Notice::Port(event) => eprintln!("compostbin: {event}"),
+    Notice::Unpacking(image) => eprintln!("compostbin: unpacking {image}"),
     Notice::AgentStopped(error) => eprintln!("compostbin: the host command agent stopped: {error}"),
     Notice::CleanupFailed(error) => eprintln!("compostbin: could not clean up after the session: {error}"),
   }

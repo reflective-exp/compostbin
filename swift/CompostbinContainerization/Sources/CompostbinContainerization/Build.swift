@@ -164,7 +164,7 @@ enum Build {
         // its only extra is releasing a network interface, of which there is none.
         try? FileManager.default.removeItem(at: containerDirectory)
 
-        await reclaim(imageStore)
+        await reclaim(imageStore, root: root)
         cache.evict()
     }
 
@@ -313,11 +313,16 @@ enum Build {
     }
 
     /// Deletes blobs no image references — above all the previous build's
-    /// multi-gigabyte layer, orphaned by the re-tag.
+    /// multi-gigabyte layer, orphaned by the re-tag — and the unpacked rootfs
+    /// of images that are gone.
     ///
     /// Only after `create`: until then this build's own blobs are unreferenced.
     /// Failure is logged, not thrown; the image is already usable.
-    private static func reclaim(_ imageStore: ImageStore) async {
+    private static func reclaim(_ imageStore: ImageStore, root: URL) async {
+        if let images = try? await imageStore.list() {
+            Unpacked(store: root).evict(keeping: images.map(\.digest))
+        }
+
         do {
             let (deleted, freed) = try await imageStore.cleanUpOrphanedBlobs()
 

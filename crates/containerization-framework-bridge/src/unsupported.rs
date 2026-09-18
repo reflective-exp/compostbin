@@ -36,6 +36,10 @@ impl Engine for FrameworkEngine {
     Err(unsupported())
   }
 
+  fn is_unpacked(&self, _image: &str) -> Result<bool, EngineError> {
+    Err(unsupported())
+  }
+
   fn run(&self, _spec: &RunSpec) -> Result<String, EngineError> {
     Err(unsupported())
   }

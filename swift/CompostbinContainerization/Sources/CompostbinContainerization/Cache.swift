@@ -193,7 +193,7 @@ struct Cache {
     // MARK: - Copying
 
     /// `clonefile` where supported, else a real copy.
-    private static func clone(_ source: URL, to destination: URL) throws {
+    static func clone(_ source: URL, to destination: URL) throws {
         try? FileManager.default.removeItem(at: destination)
 
         if clonefile(source.path(percentEncoded: false), destination.path(percentEncoded: false), 0) == 0 {

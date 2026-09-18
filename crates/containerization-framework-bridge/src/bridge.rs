@@ -46,5 +46,7 @@ pub(crate) mod ffi {
     fn compostbin_resize(id: &str, terminal: i32) -> i32;
 
     fn compostbin_is_running(name: &str) -> bool;
+
+    fn compostbin_is_unpacked(store_root: &str, image_reference: &str) -> i32;
   }
 }

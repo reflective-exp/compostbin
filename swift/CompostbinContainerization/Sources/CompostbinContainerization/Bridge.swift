@@ -157,6 +157,17 @@ func compostbin_resize(id: RustStr, terminal: Int32) -> Int32 {
     }
 }
 
+/// Whether a run of this image skips the unpack: 1 when it does, 0 when the
+/// next run unpacks it first.
+func compostbin_is_unpacked(store_root: RustStr, image_reference: RustStr) -> Int32 {
+    reporting {
+        let unpacked = Unpacked(store: URL(filePath: store_root.toString()))
+        let reference = image_reference.toString()
+
+        return try blocking { try await unpacked.holds(reference) } ? 1 : 0
+    }
+}
+
 /// Whether this process owns a running session by that name.
 func compostbin_is_running(name: RustStr) -> Bool {
     Sessions.shared.get(name.toString()) != nil

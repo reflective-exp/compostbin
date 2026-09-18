@@ -22,6 +22,10 @@ pub trait Engine {
   /// it.
   fn is_running(&self, name: &str) -> Result<bool, EngineError>;
 
+  /// Whether `run` can start this image without first unpacking it. False
+  /// until an image's first run, which is the slow one.
+  fn is_unpacked(&self, image: &str) -> Result<bool, EngineError>;
+
   /// What is running containers, and at what version. `None` when it cannot
   /// say, which `doctor` reports rather than treating as a failure.
   fn version(&self) -> Result<Option<String>, EngineError>;

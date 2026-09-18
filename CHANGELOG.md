@@ -8,6 +8,9 @@
 - **Breaking:** remove `compostbin stop`, `compostbin port-relay` and
   `compostbin host-agent` -- these commands were all around controlling
   Apple's `container` CLI.
+- Unpack each image once and clone it for every `compostbin run`, instead of
+  unpacking it again on each run. Starting a session is near-instant after the
+  first, and sessions on one image share disk blocks.
 
 ## v0.7.0
 

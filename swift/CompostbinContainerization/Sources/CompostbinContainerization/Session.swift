@@ -57,6 +57,7 @@ enum Session {
             throw BridgeError.unentitled
         }
 
+        let root = URL(filePath: spec.storeRoot)
         let kernel = Kernel(path: URL(filePath: spec.kernelPath), platform: .linuxArm)
 
         // No `Network`: the interface is built below instead. `VmnetNetwork`
@@ -68,8 +69,19 @@ enum Session {
         var manager = try await ContainerManager(
             kernel: kernel,
             initfsReference: spec.initfsReference,
-            root: URL(filePath: spec.storeRoot),
+            root: root,
             network: nil
+        )
+
+        // Not `create(reference:)`, which unpacks the image into a new rootfs
+        // on every run. The container directory is ours to make on this path,
+        // and the library writes its boot log there.
+        let image = try await manager.imageStore.get(reference: spec.imageReference)
+        let containerDirectory = root.appending(components: "containers", spec.name)
+        try FileManager.default.createDirectory(at: containerDirectory, withIntermediateDirectories: true)
+        let rootfs = try await Unpacked(store: root).rootfs(
+            for: image,
+            at: containerDirectory.appending(path: "rootfs.ext4")
         )
 
         let mounts = try spec.mounts.map(share)
@@ -87,7 +99,8 @@ enum Session {
         // the manager there is nothing for it to allocate, and ours is set here.
         let container = try await manager.create(
             spec.name,
-            reference: spec.imageReference,
+            image: image,
+            rootfs: rootfs,
             networking: false
         ) { config in
             config.cpus = spec.cpus
@@ -104,9 +117,7 @@ enum Session {
         try await container.create()
         try await container.start()
 
-        // Read back rather than threaded through `create`: the reference is
-        // already in the store by now, and `exec` needs the user it names.
-        let image = try await manager.imageStore.get(reference: spec.imageReference, pull: false)
+        // Kept for `exec`, which needs the user it names.
         let imageConfig = try? await image.config(for: .current).config
 
         Sessions.shared.insert(

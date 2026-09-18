@@ -11,6 +11,7 @@ pub enum Call {
   Exec(ExecSpec),
   Images,
   IsRunning(String),
+  IsUnpacked(String),
   Run(RunSpec),
   Version,
 }
@@ -40,6 +41,9 @@ pub struct RecordingEngine {
   /// The containers the posed engine is running, and every one `run` has
   /// started since.
   running: RefCell<Vec<String>>,
+  /// The images the posed engine has unpacked, and every one `run` has
+  /// unpacked since.
+  unpacked: RefCell<Vec<String>>,
   /// `None` poses an engine that cannot say what images exist.
   images: Option<Vec<String>>,
   version: Option<String>,
@@ -54,6 +58,14 @@ impl RecordingEngine {
   pub fn with_running(containers: &[&str]) -> Self {
     Self {
       running: RefCell::new(containers.iter().copied().map(str::to_string).collect()),
+      ..Self::default()
+    }
+  }
+
+  /// Poses an engine that has already unpacked these images.
+  pub fn with_unpacked(images: &[&str]) -> Self {
+    Self {
+      unpacked: RefCell::new(images.iter().copied().map(str::to_string).collect()),
       ..Self::default()
     }
   }
@@ -90,6 +102,7 @@ impl Engine for RecordingEngine {
   fn run(&self, spec: &RunSpec) -> Result<String, EngineError> {
     self.calls.record(Call::Run(spec.clone()));
     self.running.borrow_mut().push(spec.name.clone());
+    self.unpacked.borrow_mut().push(spec.image.clone());
     Ok(spec.name.clone())
   }
 
@@ -97,6 +110,18 @@ impl Engine for RecordingEngine {
     self.calls.record(Call::IsRunning(name.to_string()));
 
     Ok(self.running.borrow().iter().any(|running| running == name))
+  }
+
+  fn is_unpacked(&self, image: &str) -> Result<bool, EngineError> {
+    self.calls.record(Call::IsUnpacked(image.to_string()));
+
+    Ok(
+      self
+        .unpacked
+        .borrow()
+        .iter()
+        .any(|unpacked| unpacked == image),
+    )
   }
 
   fn version(&self) -> Result<Option<String>, EngineError> {
