@@ -146,7 +146,7 @@ pub fn watch(container: &str, engine: &impl Engine, stop: &AtomicBool, appear: D
 
   while !stop.load(Ordering::Relaxed) {
     let running = engine
-      .containers()
+      .running_containers()
       .map(|containers| containers.iter().any(|name| name == container))
       .unwrap_or(true);
 

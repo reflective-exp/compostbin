@@ -333,14 +333,6 @@ mod unsupported {
   pub struct Engine;
 
   impl compostbin_engine::engine::Engine for Engine {
-    fn containers(&self) -> Result<Vec<String>, EngineError> {
-      unreachable!("no session runs off macOS")
-    }
-
-    fn delete(&self, _name: &str) -> Result<(), EngineError> {
-      unreachable!("no session runs off macOS")
-    }
-
     fn exec(&self, _spec: &ExecSpec) -> Result<i32, EngineError> {
       unreachable!("no session runs off macOS")
     }

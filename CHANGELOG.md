@@ -5,6 +5,9 @@
 - **Breaking:** build images with Containerization instead of `container build`
   and BuildKit. Removes last references to Apple's `container` CLI.
   - Requires rebuilding images!
+- **Breaking:** remove `compostbin stop`, `compostbin port-relay` and
+  `compostbin host-agent` -- these commands were all around controlling
+  Apple's `container` CLI.
 
 ## v0.7.0
 

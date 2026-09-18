@@ -464,7 +464,7 @@ mod tests {
 
     let checks = diagnose(
       &session,
-      &RecordingEngine::with_containers(&[("compostbin-cb", true)]),
+      &RecordingEngine::with_running(&["compostbin-cb"]),
       &in_keychain(),
       false,
     );
@@ -492,7 +492,7 @@ mod tests {
 
     let checks = diagnose(
       &session,
-      &RecordingEngine::with_containers(&[("compostbin-cb", true)]),
+      &RecordingEngine::with_running(&["compostbin-cb"]),
       &in_keychain(),
       false,
     );
@@ -526,7 +526,7 @@ mod tests {
 
     let checks = diagnose(
       &session(&home, &quoted(&base, "workspace")),
-      &RecordingEngine::with_containers(&[("compostbin-cb", true)]),
+      &RecordingEngine::with_running(&["compostbin-cb"]),
       &in_keychain(),
       false,
     );

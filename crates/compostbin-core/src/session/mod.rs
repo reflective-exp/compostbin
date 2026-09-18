@@ -35,7 +35,8 @@ pub const SPOOL_DIR: &str = "host";
 pub const PORTS_DIR: &str = "ports";
 /// Where the relay says what it could not, while a session is attached.
 pub const PORTS_LOG: &str = "ports.log";
-/// Keeps a detached container alive so `exec` has something to attach to.
+/// The container's own process, keeping it alive so `exec` has something to
+/// attach to.
 pub const KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
 pub const NAME_PREFIX: &str = "compostbin-";
 /// Names no real compositor: nothing in the guest draws, it only has to be set.
@@ -411,7 +412,6 @@ impl Session {
     RunSpec {
       arguments: self.process(),
       cpus: Some(self.manifest.container.cpus),
-      detach: true,
       env: self
         .manifest
         .container
@@ -466,12 +466,6 @@ impl Session {
     Ok(())
   }
 
-  /// Makes the container exist and be running. `container run` refuses a name
-  /// that is taken, so a second `run` attaches rather than recreates; a stopped
-  /// container is deleted first, its mounts no longer trustworthy.
-  ///
-  /// Attaching leaves the record alone: it describes the running container, not
-  /// the manifest as it reads now, and `doctor` checks the gap between them.
   /// Whether the container is already up, and so whether `start` will attach to
   /// it rather than create it. Asked before starting by anything whose work
   /// belongs to the container's creation — binding the port sockets, above all.
@@ -483,32 +477,23 @@ impl Session {
     )
   }
 
+  /// Makes the container be running, attaching to one that already is: a second
+  /// `run` joins the session rather than replacing it.
+  ///
+  /// Attaching leaves the record alone. It describes the running container, not
+  /// the manifest as it reads now, and `doctor` checks the gap between them.
   pub fn start(&self, engine: &impl Engine) -> Result<(), SessionError> {
-    let name = self.container_name();
-
     if self.is_running(engine)? {
       return Ok(());
-    }
-
-    if engine.containers()?.contains(&name) {
-      engine.delete(&name)?;
     }
 
     self.create(engine)
   }
 
-  /// Stops the container if it is running and deletes it if it exists, so a
-  /// container that already stopped, or was deleted by hand, is not an error.
+  /// Stops the container. A session that is already over is not an error, which
+  /// is what `clean` and `add --restart` both rely on.
   pub fn remove_container(&self, engine: &impl Engine) -> Result<(), SessionError> {
-    let name = self.container_name();
-
-    if engine.running_containers()?.contains(&name) {
-      engine.stop(&name)?;
-    }
-
-    if engine.containers()?.contains(&name) {
-      engine.delete(&name)?;
-    }
+    engine.stop(&self.container_name())?;
 
     Ok(())
   }
@@ -672,7 +657,7 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn start_attaches_to_an_already_running_container() {
-    let engine = RecordingEngine::with_containers(&[("compostbin-cb", true)]);
+    let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
     session().start(&engine).expect("start should succeed");
 
@@ -683,40 +668,17 @@ source   = "~/.cargo/registry"
     );
   }
 
+  /// Another session's container is not this one: `start` creates its own.
   #[test]
-  fn start_recreates_a_stopped_container() {
+  fn start_creates_a_container_that_is_not_running() {
     let temp = TempDir::new().expect("temp dir");
     let base = temp.path().canonicalize().expect("canonical temp");
     let session = session_under(&base);
-    let engine = RecordingEngine::with_containers(&[("compostbin-cb", false)]);
+    let engine = RecordingEngine::with_running(&["compostbin-other"]);
 
     session.start(&engine).expect("start should succeed");
 
-    assert_eq!(
-      engine.calls(),
-      [
-        Call::Running,
-        Call::Containers,
-        Call::Delete("compostbin-cb".to_string()),
-        Call::Run(session.run_spec()),
-      ]
-    );
-  }
-
-  #[test]
-  fn start_creates_a_container_that_does_not_exist() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = session_under(&base);
-    let engine = RecordingEngine::with_containers(&[("compostbin-other", true)]);
-
-    session.start(&engine).expect("start should succeed");
-
-    assert_eq!(
-      engine.calls(),
-      [Call::Running, Call::Containers, Call::Run(session.run_spec())],
-      "there was nothing to delete"
-    );
+    assert_eq!(engine.calls(), [Call::Running, Call::Run(session.run_spec())]);
   }
 
   /// The mount source has to exist before the container does, and what it holds
@@ -747,58 +709,34 @@ source   = "~/.cargo/registry"
   }
 
   #[test]
-  fn restarts_by_stopping_deleting_and_continuing() {
+  fn restarts_by_stopping_recreating_and_continuing() {
     let temp = TempDir::new().expect("temp dir");
     let base = temp.path().canonicalize().expect("canonical temp");
     let session = session_under(&base);
-    let engine = RecordingEngine::with_containers(&[("compostbin-cb", true)]);
+    let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
     session.restart(&engine).expect("restart should succeed");
 
     assert_eq!(
       engine.calls(),
       [
-        Call::Running,
         Call::Stop("compostbin-cb".to_string()),
-        Call::Containers,
-        Call::Delete("compostbin-cb".to_string()),
         Call::Run(session.run_spec()),
         Call::Exec(session.exec_spec(&["claude".to_string(), "--continue".to_string()])),
       ]
     );
   }
 
+  /// A session that is already over: stopping it says so and is not an error.
   #[test]
-  fn removes_stopped_container() {
-    let engine = RecordingEngine::with_containers(&[("compostbin-cb", false)]);
+  fn removes_a_container_that_is_not_running() {
+    let engine = RecordingEngine::new();
 
     session()
       .remove_container(&engine)
       .expect("remove should succeed");
 
-    assert_eq!(
-      engine.calls(),
-      [
-        Call::Running,
-        Call::Containers,
-        Call::Delete("compostbin-cb".to_string())
-      ]
-    );
-  }
-
-  #[test]
-  fn removes_missing_container() {
-    let engine = RecordingEngine::with_containers(&[("compostbin-other", true)]);
-
-    session()
-      .remove_container(&engine)
-      .expect("remove should succeed");
-
-    assert_eq!(
-      engine.calls(),
-      [Call::Running, Call::Containers],
-      "another session's container must be left alone"
-    );
+    assert_eq!(engine.calls(), [Call::Stop("compostbin-cb".to_string())]);
   }
 
   #[test]
@@ -810,8 +748,9 @@ source   = "~/.cargo/registry"
 
     session.restart(&engine).expect("restart should succeed");
 
-    let Call::Run(spec) = &engine.calls()[2] else {
-      panic!("the third call should have created the container: {:?}", engine.calls());
+    let calls = engine.calls();
+    let Some(Call::Run(spec)) = calls.iter().find(|call| matches!(call, Call::Run(_))) else {
+      panic!("restart should have recreated the container: {calls:?}");
     };
     assert!(
       spec
@@ -873,7 +812,7 @@ source   = "~/.cargo/registry"
     std::fs::write(&orphan, "stranded\n").expect("write orphan");
 
     session
-      .start(&RecordingEngine::with_containers(&[("compostbin-cb", true)]))
+      .start(&RecordingEngine::with_running(&["compostbin-cb"]))
       .expect("start should succeed");
     assert!(
       orphan.exists(),
@@ -1085,7 +1024,6 @@ source   = "~/.cargo/registry"
       RunSpec {
         arguments: KEEPALIVE_COMMAND.map(str::to_string).to_vec(),
         cpus: Some(4),
-        detach: true,
         env: vec![EnvVar::Inherit("ANTHROPIC_API_KEY".to_string())],
         image: "compostbin/base:latest".to_string(),
         memory: Some("8G".to_string()),

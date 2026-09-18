@@ -8,8 +8,6 @@ use std::cell::RefCell;
 /// of it, so a test asserts against what the caller composed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Call {
-  Containers,
-  Delete(String),
   Exec(ExecSpec),
   Images,
   Run(RunSpec),
@@ -40,8 +38,8 @@ impl Calls {
 #[derive(Debug, Default)]
 pub struct RecordingEngine {
   calls: Calls,
-  /// Every container the posed engine holds, and whether each one is running.
-  containers: Vec<(String, bool)>,
+  /// The containers the posed engine is running.
+  running: Vec<String>,
   /// `None` poses an engine that cannot say what images exist.
   images: Option<Vec<String>>,
   version: Option<String>,
@@ -52,14 +50,10 @@ impl RecordingEngine {
     Self::default()
   }
 
-  /// Poses an engine holding exactly these containers, each paired with whether
-  /// it is running.
-  pub fn with_containers(containers: &[(&str, bool)]) -> Self {
+  /// Poses an engine running exactly these containers.
+  pub fn with_running(containers: &[&str]) -> Self {
     Self {
-      containers: containers
-        .iter()
-        .map(|(name, running)| (name.to_string(), *running))
-        .collect(),
+      running: containers.iter().copied().map(str::to_string).collect(),
       ..Self::default()
     }
   }
@@ -79,23 +73,6 @@ impl RecordingEngine {
 }
 
 impl Engine for RecordingEngine {
-  fn containers(&self) -> Result<Vec<String>, EngineError> {
-    self.calls.record(Call::Containers);
-
-    Ok(
-      self
-        .containers
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect(),
-    )
-  }
-
-  fn delete(&self, name: &str) -> Result<(), EngineError> {
-    self.calls.record(Call::Delete(name.to_string()));
-    Ok(())
-  }
-
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError> {
     self.calls.record(Call::Exec(spec.clone()));
     Ok(0)
@@ -118,14 +95,7 @@ impl Engine for RecordingEngine {
   fn running_containers(&self) -> Result<Vec<String>, EngineError> {
     self.calls.record(Call::Running);
 
-    Ok(
-      self
-        .containers
-        .iter()
-        .filter(|(_, running)| *running)
-        .map(|(name, _)| name.clone())
-        .collect(),
-    )
+    Ok(self.running.clone())
   }
 
   fn stop(&self, name: &str) -> Result<(), EngineError> {
@@ -177,12 +147,9 @@ mod tests {
     let engine = RecordingEngine::new();
 
     engine.stop("cb-test").expect("stop should succeed");
-    engine.delete("cb-test").expect("delete should succeed");
+    engine.version().expect("version should succeed");
 
-    assert_eq!(
-      engine.calls(),
-      [Call::Stop("cb-test".to_string()), Call::Delete("cb-test".to_string())]
-    );
+    assert_eq!(engine.calls(), [Call::Stop("cb-test".to_string()), Call::Version]);
   }
 
   #[test]

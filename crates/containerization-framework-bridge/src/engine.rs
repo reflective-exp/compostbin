@@ -110,14 +110,6 @@ impl FrameworkEngine {
 }
 
 impl Engine for FrameworkEngine {
-  fn containers(&self) -> Result<Vec<String>, EngineError> {
-    self.running_containers()
-  }
-
-  fn delete(&self, name: &str) -> Result<(), EngineError> {
-    self.stop(name)
-  }
-
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError> {
     let descriptor = std::io::stdin().as_raw_fd();
     let attached = terminal::is_tty(descriptor);

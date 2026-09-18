@@ -138,8 +138,6 @@ pub struct SocketRelay {
 pub struct RunSpec {
   pub arguments: Vec<String>,
   pub cpus: Option<u32>,
-  /// Whether the container outlives the call that started it.
-  pub detach: bool,
   pub env: Vec<EnvVar>,
   pub image: String,
   pub memory: Option<String>,

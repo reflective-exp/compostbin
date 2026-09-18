@@ -7,11 +7,6 @@ use crate::error::EngineError;
 use crate::model::{ExecSpec, RunSpec};
 
 pub trait Engine {
-  /// Every container the engine knows, running or not.
-  fn containers(&self) -> Result<Vec<String>, EngineError>;
-
-  fn delete(&self, name: &str) -> Result<(), EngineError>;
-
   /// Runs a command in a live container, attaching it to the terminal so an
   /// interactive session keeps the real one.
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError>;
@@ -22,9 +17,11 @@ pub trait Engine {
   /// Starts a container and returns its id.
   fn run(&self, spec: &RunSpec) -> Result<String, EngineError>;
 
-  /// Only the containers that are running, and so ready for `exec`.
+  /// The containers that are running, and so ready for `exec`. A container that
+  /// is not running does not exist: it dies with the process that started it.
   fn running_containers(&self) -> Result<Vec<String>, EngineError>;
 
+  /// Stops a container. Stopping one that is not running is not an error.
   fn stop(&self, name: &str) -> Result<(), EngineError>;
 
   /// What is running containers, and at what version. `None` when it cannot
