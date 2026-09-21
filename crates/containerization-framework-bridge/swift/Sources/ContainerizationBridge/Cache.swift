@@ -9,7 +9,7 @@
 // Snapshots are APFS clones, so they cost only what they differ by. Off APFS
 // they fall back to a full copy.
 //
-// Keys come from `compostbin-engine`'s `cache` module; `Keys` salts them.
+// Keys come from the Rust side's `cache` module; `Keys` salts them.
 //===----------------------------------------------------------------------===//
 
 import ContainerizationOCI

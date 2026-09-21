@@ -58,12 +58,12 @@ impl FrameworkEngine {
 
   /// Whether this process is the one holding the VM.
   fn owns(&self, name: &str) -> bool {
-    ffi::compostbin_is_running(name)
+    ffi::czbridge_is_running(name)
   }
 
   /// Runs a guest process against the caller's stdio, as the owner of the VM.
   fn attach(name: &str, id: &str, request: &control::Request, stdio: &Stdio) -> i32 {
-    ffi::compostbin_exec(
+    ffi::czbridge_exec(
       name,
       id,
       &spec::lines(&request.arguments),
@@ -91,7 +91,7 @@ impl FrameworkEngine {
         // process's environment.
         |request, stdio, id| Self::attach(&name, id, request, stdio),
         |id, terminal| {
-          let _ = ffi::compostbin_resize(id, terminal);
+          let _ = ffi::czbridge_resize(id, terminal);
         },
         |error| attach_failed(error),
       );
@@ -147,7 +147,7 @@ impl Engine for FrameworkEngine {
         terminal::while_resizing(
           &resized,
           || {
-            let _ = ffi::compostbin_resize(OWNER_ATTACH, descriptor);
+            let _ = ffi::czbridge_resize(OWNER_ATTACH, descriptor);
           },
           attach,
         )
@@ -178,7 +178,7 @@ impl Engine for FrameworkEngine {
     // `Session::start`'s delete-stopped-container semantics.
     let _ = std::fs::remove_dir_all(self.store.container_dir(&spec.name));
 
-    let code = ffi::compostbin_boot(
+    let code = ffi::czbridge_boot(
       &spec.name,
       &self.store.root().display().to_string(),
       &self.store.kernel().display().to_string(),
@@ -206,7 +206,7 @@ impl Engine for FrameworkEngine {
   }
 
   fn is_unpacked(&self, image: &str) -> Result<bool, EngineError> {
-    let code = ffi::compostbin_is_unpacked(&self.store.root().display().to_string(), image);
+    let code = ffi::czbridge_is_unpacked(&self.store.root().display().to_string(), image);
 
     Ok(checked(code).map_err(|error| EngineError::failed("find the image", error))? == 1)
   }

@@ -9,7 +9,7 @@ import PackageDescription
 //
 // Absolute, because the flag reaches the compiler verbatim and its working
 // directory is unspecified.
-let bridgingHeader = "\(URL(fileURLWithPath: #filePath).deletingLastPathComponent().path)/Sources/CompostbinContainerization/bridging-header.h"
+let bridgingHeader = "\(URL(fileURLWithPath: #filePath).deletingLastPathComponent().path)/Sources/ContainerizationBridge/bridging-header.h"
 
 // Pinned exactly: the initfs in the `container` CLI's store (`vminit:0.45.0`)
 // carries a guest agent speaking that release's protocol. A newer library is a
@@ -17,13 +17,13 @@ let bridgingHeader = "\(URL(fileURLWithPath: #filePath).deletingLastPathComponen
 let containerization: Version = "0.45.0"
 
 let package = Package(
-    name: "CompostbinContainerization",
+    name: "ContainerizationBridge",
     platforms: [.macOS("26.0")],
     products: [
         .library(
-            name: "CompostbinContainerization",
+            name: "ContainerizationBridge",
             type: .static,
-            targets: ["CompostbinContainerization"]
+            targets: ["ContainerizationBridge"]
         )
     ],
     dependencies: [
@@ -31,7 +31,7 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "CompostbinContainerization",
+            name: "ContainerizationBridge",
             dependencies: [
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),

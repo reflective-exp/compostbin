@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -28,6 +29,15 @@ impl BuildStep {
   }
 }
 
+/// A host directory mounted into every step of a build: what a `COPY` reads
+/// from, or anything else a step needs from outside the image.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuildMount {
+  pub destination: String,
+  pub readonly: bool,
+  pub source: PathBuf,
+}
+
 /// An image to build: a base, steps, and what the result runs as.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildPlan {
@@ -36,10 +46,14 @@ pub struct BuildPlan {
   pub base: String,
   /// Whether to start from cached snapshots. Off still writes them.
   pub cache: bool,
-  /// A read-only host directory steps install from (the `COPY` equivalent).
-  pub context: Option<PathBuf>,
+  /// Host directories the steps can read, and where each appears in the guest.
+  /// A step that names one is keyed on its contents; see `cache`.
+  pub mounts: Vec<BuildMount>,
   /// `NAME=VALUE`, visible to every step and written into the image config.
   pub environment: Vec<String>,
+  /// Written into the image config as its OCI labels. Whoever builds an image
+  /// says what it is; an engine has no name to put on someone else's work.
+  pub labels: BTreeMap<String, String>,
   /// The builder's own resources, not a session's.
   pub resources: Resources,
   pub steps: Vec<BuildStep>,
@@ -55,8 +69,9 @@ impl BuildPlan {
     Self {
       base: base.into(),
       cache: true,
-      context: None,
       environment: Vec::new(),
+      labels: BTreeMap::new(),
+      mounts: Vec::new(),
       resources,
       steps: Vec::new(),
       tag: tag.into(),

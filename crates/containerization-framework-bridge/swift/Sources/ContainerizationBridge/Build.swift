@@ -36,6 +36,13 @@ struct BuildStep: Decodable {
     var cacheKey: String
 }
 
+/// A host directory shared into the builder, and where it lands in the guest.
+struct BuildMount: Decodable {
+    var source: String
+    var destination: String
+    var readonly: Bool
+}
+
 struct BuildPlan: Decodable {
     /// The builder container's id; its store directory is removed before and
     /// after the build.
@@ -50,13 +57,15 @@ struct BuildPlan: Decodable {
     var cpus: Int
     var memoryInBytes: UInt64
     var rootfsSizeInBytes: UInt64
-    /// A host directory mounted read-only for the steps; the stand-in for
-    /// `COPY`.
-    var context: String?
+    /// Host directories shared into every step, where the caller asked for
+    /// them: what its scripts read in place of `COPY`.
+    var mounts: [BuildMount]
     var steps: [BuildStep]
     /// `NAME=VALUE`, written into the image config and visible to every step,
     /// like `ENV`.
     var environment: [String]
+    /// The finished image's OCI labels, as the caller named them.
+    var labels: [String: String]
     /// The user and directory the finished image runs as.
     var user: String?
     var workingDirectory: String?
@@ -68,9 +77,6 @@ struct BuildPlan: Decodable {
 }
 
 enum Build {
-    /// Where a build's context appears in the guest. Must match the engine's
-    /// `CONTEXT_MOUNT`, which the cache keys match on.
-    static let contextDestination = "/mnt/compostbin-context"
     static let cacheDirectory = "build-cache"
 
     static func run(_ plan: BuildPlan) async throws {
@@ -215,8 +221,9 @@ enum Build {
             network: nil
         )
 
-        let mounts: [Containerization.Mount] =
-            plan.context.map { [.share(source: $0, destination: contextDestination, options: ["ro"])] } ?? []
+        let mounts: [Containerization.Mount] = plan.mounts.map {
+            .share(source: $0.source, destination: $0.destination, options: [$0.readonly ? "ro" : "rw"])
+        }
         let nat = try NAT(address: plan.ipv4Address, gateway: plan.ipv4Gateway)
         let block = Containerization.Mount.ext4Root(rootfs)
 
@@ -260,7 +267,7 @@ enum Build {
 
     /// Marks a `containers` directory as a builder's, not a session's. Holds the
     /// owning build's pid.
-    private static let builderMarker = ".compostbin-builder"
+    private static let builderMarker = ".builder"
 
     private static func markBuilder(_ directory: URL) {
         try? Data("\(getpid())\n".utf8).write(to: directory.appending(path: builderMarker))
@@ -374,6 +381,9 @@ enum Build {
         let index = Box<Descriptor>()
         let user = plan.user ?? base?.user
         let workingDirectory = plan.workingDirectory ?? base?.workingDir
+        // The base's labels carry over, as `LABEL` does; the plan's win on a
+        // key both set.
+        let labels = (base?.labels ?? [:]).merging(plan.labels) { _, mine in mine }
         let entrypoint = base?.entrypoint
         let command = base?.cmd
 
@@ -398,7 +408,7 @@ enum Build {
                     entrypoint: entrypoint,
                     cmd: command,
                     workingDir: workingDirectory,
-                    labels: ["dev.compostbin.built-by": "containerization-framework-bridge"]
+                    labels: labels
                 ),
                 rootfs: Rootfs(type: "layers", diffIDs: [diffID])
             )

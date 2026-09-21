@@ -21,7 +21,7 @@ const CONTAINERS: &str = "containers";
 /// The initfs carrying `vminitd`, the agent the library talks to over vsock.
 ///
 /// Must match the `containerization` release in
-/// `swift/CompostbinContainerization/Package.swift`: they share a protocol,
+/// this crate's `swift/Package.swift`: they share a protocol,
 /// and a mismatch fails at runtime, not build time.
 macro_rules! initfs_version {
   () => {

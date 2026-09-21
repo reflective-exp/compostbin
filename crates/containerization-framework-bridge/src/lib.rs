@@ -68,7 +68,7 @@ impl std::error::Error for BridgeError {}
 #[cfg(target_os = "macos")]
 fn checked(code: i32) -> Result<i32, BridgeError> {
   if code == FAILED {
-    return Err(BridgeError::new(ffi::compostbin_last_error()));
+    return Err(BridgeError::new(ffi::czbridge_last_error()));
   }
 
   Ok(code)

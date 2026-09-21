@@ -4,6 +4,6 @@
 /tmp
 
 # SwiftPM's build directory, and the FFI glue build.rs regenerates from the
-# bridge module in containerization-framework-bridge.
-/swift/*/.build
-/swift/*/Sources/*/generated
+# bridge module beside it.
+/crates/*/swift/.build
+/crates/*/swift/Sources/*/generated

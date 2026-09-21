@@ -3,7 +3,7 @@
 //
 // Modeled on `cctl`'s RunCommand, except: the image is read from the store, not
 // pulled; the boot process is a keepalive, not the workload; and a process
-// attaches to whichever terminal asked (the owner's, or one `compostbin shell`
+// attaches to whichever terminal asked (the owner's, or one a joining caller
 // passed over the control socket).
 //===----------------------------------------------------------------------===//
 
@@ -200,9 +200,9 @@ enum Session {
     /// Runs a process to completion in an already-booted session and returns its
     /// exit code.
     ///
-    /// Takes a descriptor rather than `Terminal.current` because
-    /// `compostbin shell` passes its tty over the control socket; from here the
-    /// two cases are identical.
+    /// Takes a descriptor rather than `Terminal.current` because a joining
+    /// caller passes its tty over the control socket; from here the two cases
+    /// are identical.
     static func exec(_ request: ExecRequest) async throws -> Int32 {
         guard let booted = Sessions.shared.get(request.name) else {
             throw BridgeError.notBooted(request.name)

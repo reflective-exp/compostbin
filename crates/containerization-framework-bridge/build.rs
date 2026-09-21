@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// swift-bridge's generated header directory; `bridging-header.h` imports it.
-const BRIDGE: &str = "compostbin-containerization";
-const PACKAGE: &str = "CompostbinContainerization";
+const BRIDGE: &str = "containerization-bridge";
+const PACKAGE: &str = "ContainerizationBridge";
 
 fn manifest_dir() -> PathBuf {
   PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
@@ -18,10 +18,9 @@ fn manifest_dir() -> PathBuf {
 
 fn swift_package_dir() -> PathBuf {
   manifest_dir()
-    .join("../../swift")
-    .join(PACKAGE)
+    .join("swift")
     .canonicalize()
-    .expect("the swift package is committed alongside this crate")
+    .expect("the swift package is committed inside this crate")
 }
 
 fn swift_source_dir() -> PathBuf {
@@ -54,12 +53,32 @@ fn publish_bridge_shims(generated: &std::path::Path) {
   std::fs::write(&path, published).expect("the generated glue should be writable");
 }
 
-/// Copies generated glue into the package, skipping unchanged files.
+/// Copies generated glue into the package, skipping unchanged files and
+/// removing files this run didn't write.
 ///
 /// SwiftPM and cargo's `rerun-if-changed` both key off mtimes, so rewriting
-/// identical bytes would recompile the module and rerun this script.
+/// identical bytes would recompile the module and rerun this script. SwiftPM
+/// compiles every file in the directory, so glue from an earlier run has to
+/// go: it calls a bridge that no longer exists.
 fn sync_generated(staged: &std::path::Path, generated: &std::path::Path) {
   std::fs::create_dir_all(generated).expect("the generated directory should be creatable");
+
+  for entry in std::fs::read_dir(generated).expect("the generated directory was just created") {
+    let entry = entry.expect("a readable directory entry");
+
+    if staged.join(entry.file_name()).exists() {
+      continue;
+    }
+
+    let stale = entry.path();
+    let removed = if entry.file_type().expect("a stat-able entry").is_dir() {
+      std::fs::remove_dir_all(&stale)
+    } else {
+      std::fs::remove_file(&stale)
+    };
+
+    removed.expect("stale generated glue should be removable");
+  }
 
   for entry in std::fs::read_dir(staged).expect("swift-bridge should have just written the glue") {
     let entry = entry.expect("a readable directory entry");
@@ -159,6 +178,9 @@ fn main() {
   );
 
   let staged = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR")).join("swift-bridge");
+
+  // `OUT_DIR` survives between builds; clearing it leaves only this run's glue.
+  let _ = std::fs::remove_dir_all(&staged);
 
   swift_bridge_build::parse_bridges(vec![manifest_dir().join("src/bridge.rs")]).write_all_concatenated(&staged, BRIDGE);
   publish_bridge_shims(&staged);

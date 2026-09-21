@@ -16,7 +16,7 @@
 import Foundation
 import Synchronization
 
-/// Set by the last failing bridged call, read by `compostbin_last_error`.
+/// Set by the last failing bridged call, read by `czbridge_last_error`.
 /// Locked because two attached terminals can fail at once.
 private let lastError = Mutex("")
 
@@ -49,12 +49,12 @@ private func lines(_ text: RustStr) -> [String] {
     return string.isEmpty ? [] : string.components(separatedBy: "\n")
 }
 
-func compostbin_last_error() -> String {
+func czbridge_last_error() -> String {
     lastError.withLock { $0 }
 }
 
 /// Boots a session's VM and leaves it running, owned by this process.
-func compostbin_boot(
+func czbridge_boot(
     name: RustStr,
     store_root: RustStr,
     kernel_path: RustStr,
@@ -98,7 +98,7 @@ func compostbin_boot(
 ///
 /// The plan crosses as JSON because it nests and build steps are arbitrary
 /// shell that may contain newlines.
-func compostbin_build(plan: RustStr) -> Int32 {
+func czbridge_build(plan: RustStr) -> Int32 {
     reporting {
         let plan = try decoding(BuildPlan.self, from: plan)
 
@@ -109,7 +109,7 @@ func compostbin_build(plan: RustStr) -> Int32 {
 }
 
 /// Puts a kernel and an init image in the store, fetching whatever is missing.
-func compostbin_provision(spec: RustStr) -> Int32 {
+func czbridge_provision(spec: RustStr) -> Int32 {
     reporting {
         let spec = try decoding(ProvisionSpec.self, from: spec)
 
@@ -122,10 +122,10 @@ func compostbin_provision(spec: RustStr) -> Int32 {
 /// Runs a process in a booted session and blocks until it exits, returning its
 /// exit code.
 ///
-/// `terminal` is a descriptor in this process: its own when `run` attaches
-/// Claude, or one `compostbin shell` passed over the control socket. `-1` runs
-/// without a terminal. An empty `user` means the image's default.
-func compostbin_exec(
+/// `terminal` is a descriptor in this process: its own, or one a joining caller
+/// passed over the control socket. `-1` runs without a terminal. An empty
+/// `user` means the image's default.
+func czbridge_exec(
     name: RustStr,
     id: RustStr,
     arguments: RustStr,
@@ -161,7 +161,7 @@ func compostbin_exec(
 /// A failure here is dropped rather than recorded: resizes run beside the
 /// attach they belong to, and one that stored its message in `lastError` would
 /// be read back as the reason that attach failed.
-func compostbin_resize(id: RustStr, terminal: Int32) -> Int32 {
+func czbridge_resize(id: RustStr, terminal: Int32) -> Int32 {
     do {
         let id = id.toString()
 
@@ -174,7 +174,7 @@ func compostbin_resize(id: RustStr, terminal: Int32) -> Int32 {
 }
 
 /// 1 when this image is already unpacked, 0 when the next run must unpack it.
-func compostbin_is_unpacked(store_root: RustStr, image_reference: RustStr) -> Int32 {
+func czbridge_is_unpacked(store_root: RustStr, image_reference: RustStr) -> Int32 {
     reporting {
         let unpacked = Unpacked(store: URL(filePath: store_root.toString()))
         let reference = image_reference.toString()
@@ -184,6 +184,6 @@ func compostbin_is_unpacked(store_root: RustStr, image_reference: RustStr) -> In
 }
 
 /// Whether this process owns a running session by that name.
-func compostbin_is_running(name: RustStr) -> Bool {
+func czbridge_is_running(name: RustStr) -> Bool {
     Sessions.shared.get(name.toString()) != nil
 }

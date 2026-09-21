@@ -10,7 +10,8 @@ use crate::session::briefing::MANAGED_SETTINGS_TARGET;
 use crate::session::{CLAUDE_HOME_TARGET, Session};
 use crate::workspace::WORKSPACE_TARGET;
 use compostbin_engine::builder::Builder;
-use compostbin_engine::model::{BuildPlan, BuildStep, Resources};
+use compostbin_engine::model::{BuildMount, BuildPlan, BuildStep, Resources};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Where the image store lives. Under `.cache` because everything in it is
@@ -20,9 +21,9 @@ pub const IMAGE_STORE: &str = "~/.cache/compostbin/images";
 /// Where the guest scripts are staged for a build to read. Kept afterwards, so
 /// a failed build can be poked at; under `.cache` because it is regenerable.
 pub const BUILD_CONTEXT: &str = "~/.cache/compostbin/build";
-/// Where a build's context appears inside the builder; steps install from it.
-/// Owned by the engine, whose build cache matches on it.
-pub use compostbin_engine::cache::CONTEXT_MOUNT;
+/// Where the staged scripts appear inside the builder. A step that names it is
+/// keyed on what it holds, so editing a guest script rebuilds that step alone.
+pub const CONTEXT_MOUNT: &str = "/mnt/compostbin-context";
 /// The builder's size. Not the manifest's `[container]`: a project asking for a
 /// bigger session must not resize everyone's build. Above 2 GB, which is too
 /// little to install Claude Code.
@@ -33,6 +34,10 @@ pub const BUILD_RESOURCES: Resources = Resources {
 /// What the base image is built from. Registry-qualified: nothing downstream
 /// resolves a bare `debian:stable-slim`.
 pub const BASE_IMAGE: &str = "docker.io/library/debian:stable-slim";
+
+/// Marks an image as this tool's, so a store holding images from elsewhere
+/// still says which are ours.
+pub const BUILT_BY: (&str, &str) = ("dev.compostbin.built-by", env!("CARGO_PKG_VERSION"));
 /// The unprivileged user every session runs as, created by the base image.
 pub const USER: &str = "claude";
 /// Claude's home.
@@ -99,16 +104,25 @@ pub fn build(session: &Session, builder: &impl Builder, cache: bool) -> Result<(
   Ok(())
 }
 
+fn built_by() -> BTreeMap<String, String> {
+  BTreeMap::from([(BUILT_BY.0.to_string(), BUILT_BY.1.to_string())])
+}
+
 /// The base image: debian, the tools a session needs, Claude Code, the guest
 /// side of the host channel, and the user it all ends up running as.
 pub fn base_plan(session: &Session) -> BuildPlan {
   let mut plan = BuildPlan::new(BASE_IMAGE, &session.manifest.project.image, BUILD_RESOURCES);
 
-  plan.context = Some(context(session));
+  plan.mounts = vec![BuildMount {
+    destination: CONTEXT_MOUNT.to_string(),
+    readonly: true,
+    source: context(session),
+  }];
   // Keeps `.claude.json` — the account and the onboarding answers — inside the
   // mounted home. Without it Claude writes to `~/.claude.json`, which dies with
   // the container, and every restart asks for a fresh login.
   plan.environment = vec![format!("CLAUDE_CONFIG_DIR={CLAUDE_HOME_TARGET}")];
+  plan.labels = built_by();
   // Nothing in a session needs root: the mounts are the user's own files, and a
   // container that installs packages at run time is one whose image is wrong.
   plan.user = Some(USER.to_string());
@@ -181,6 +195,7 @@ pub fn project_plan(session: &Session) -> Option<BuildPlan> {
 
   let mut plan = BuildPlan::new(&manifest.project.image, session.image(), BUILD_RESOURCES);
 
+  plan.labels = built_by();
   plan.user = Some(USER.to_string());
   plan.workdir = Some(PathBuf::from(HOME));
 
@@ -256,7 +271,19 @@ mod tests {
 
     assert_eq!(plan.base, BASE_IMAGE);
     assert_eq!(plan.tag, "compostbin/base:latest");
-    assert_eq!(plan.context, Some(context(&session)));
+    assert_eq!(
+      plan.mounts,
+      vec![BuildMount {
+        destination: CONTEXT_MOUNT.to_string(),
+        readonly: true,
+        source: context(&session),
+      }]
+    );
+    assert_eq!(
+      plan.labels.get(BUILT_BY.0).map(String::as_str),
+      Some(BUILT_BY.1),
+      "the engine labels nothing on its own; this side says whose image it is"
+    );
   }
 
   #[test]
@@ -347,6 +374,7 @@ mod tests {
       "the project image extends the base rather than repeating it"
     );
     assert_eq!(plan.tag, session.image());
+    assert_eq!(plan.labels.get(BUILT_BY.0).map(String::as_str), Some(BUILT_BY.1));
     assert!(plan.steps[0].script.contains("      jq"), "{:?}", plan.steps);
     assert_eq!(
       plan.steps[1],

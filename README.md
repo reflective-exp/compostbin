@@ -385,8 +385,8 @@ in an image whose config names `claude`.
 So the image config is kept from boot, and every attach seeds itself from it
 before applying the session's arguments and environment.
 
-The Swift side lives in `swift/CompostbinContainerization`, bridged to Rust by
-`crates/containerization-framework-bridge` with
+The Swift side lives in `crates/containerization-framework-bridge/swift`,
+bridged to the crate around it with
 [swift-bridge](https://github.com/chinedufn/swift-bridge). It needs Xcode 26
 and macOS 26; `cargo build` runs `swift build` from the bridge crate's
 `build.rs`.
@@ -414,7 +414,7 @@ Two non-obvious requirements:
 
 The `vminit` reference pinned in
 `crates/containerization-framework-bridge/src/store.rs` and the package version
-pinned in `swift/CompostbinContainerization/Package.swift` are two ends of one
+pinned in the bridge's `swift/Package.swift` are two ends of one
 protocol (guest agent and library) and must move together.
 
 ## Development

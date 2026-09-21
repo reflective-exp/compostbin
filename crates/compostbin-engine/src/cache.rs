@@ -6,22 +6,18 @@
 //! leaves out:
 //!
 //!   * step names — a label, and renaming one shouldn't cost a rebuild;
-//!   * the context, for steps that don't name `CONTEXT_MOUNT`, so editing a
-//!     guest script doesn't re-run `apt-get`;
+//!   * a mount's contents, for steps whose script doesn't name where it lands,
+//!     so editing a file one step installs doesn't re-run `apt-get`;
 //!   * the base's digest, which only the builder knows and mixes in itself;
 //!   * anything that never reaches the rootfs: the image's user and workdir, the
 //!     builder's cpus and memory.
 
 use crate::error::EngineError;
-use crate::model::BuildPlan;
+use crate::model::{BuildMount, BuildPlan};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-
-/// Where a build's context is mounted in the guest. A step reads the context iff
-/// its script contains this.
-pub const CONTEXT_MOUNT: &str = "/mnt/compostbin-context";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Keys {
@@ -31,12 +27,15 @@ pub struct Keys {
   pub steps: Vec<String>,
 }
 
-/// Reads the context only if some step names it.
+/// Reads a mount only if some step names where it lands.
 pub fn keys(plan: &BuildPlan) -> Result<Keys, EngineError> {
-  let context = match &plan.context {
-    Some(root) if plan.steps.iter().any(|step| reads_context(&step.script)) => Some(digest_of(root)?),
-    _ => None,
-  };
+  let mut digests = Vec::with_capacity(plan.mounts.len());
+
+  for mount in &plan.mounts {
+    let read = plan.steps.iter().any(|step| reads(&step.script, mount));
+
+    digests.push(if read { digest_of(&mount.source)? } else { String::new() });
+  }
 
   let mut key = Key::new();
 
@@ -53,8 +52,10 @@ pub fn keys(plan: &BuildPlan) -> Result<Keys, EngineError> {
     key.field(step.script.as_bytes());
     key.field(step.user.as_deref().unwrap_or("root").as_bytes());
 
-    if reads_context(&step.script) {
-      key.field(context.as_deref().unwrap_or_default().as_bytes());
+    for (mount, digest) in plan.mounts.iter().zip(&digests) {
+      if reads(&step.script, mount) {
+        key.field(digest.as_bytes());
+      }
     }
 
     steps.push(key.clone().finish());
@@ -63,12 +64,13 @@ pub fn keys(plan: &BuildPlan) -> Result<Keys, EngineError> {
   Ok(Keys { base, steps })
 }
 
-fn reads_context(script: &str) -> bool {
-  script.contains(CONTEXT_MOUNT)
+/// A step reads a mount iff its script names where that mount lands.
+fn reads(script: &str, mount: &BuildMount) -> bool {
+  script.contains(&mount.destination)
 }
 
-/// One digest over every file in the context. Sorted, because `read_dir` order
-/// is the filesystem's.
+/// One digest over every file under a mount's source. Sorted, because
+/// `read_dir` order is the filesystem's.
 fn digest_of(root: &Path) -> Result<String, EngineError> {
   let mut entries = Vec::new();
 
@@ -90,7 +92,7 @@ fn digest_of(root: &Path) -> Result<String, EngineError> {
 /// contents. A symlink hashes as its target path, not what it points at.
 fn collect(root: &Path, directory: &Path, into: &mut Vec<(String, bool, Vec<u8>)>) -> Result<(), EngineError> {
   let unreadable = |path: &Path, error: std::io::Error| {
-    EngineError::unavailable(format!("read the build context at {}", path.display()), error)
+    EngineError::unavailable(format!("read the mounted directory at {}", path.display()), error)
   };
 
   let listing = fs::read_dir(directory).map_err(|error| unreadable(directory, error))?;
@@ -166,6 +168,7 @@ impl Key {
 mod tests {
   use super::*;
   use crate::model::{BuildStep, Resources};
+  use std::path::PathBuf;
 
   fn plan() -> BuildPlan {
     let mut plan = BuildPlan::new(
@@ -270,20 +273,31 @@ mod tests {
     );
   }
 
+  /// Where `with_mount` lands what it shares.
+  const MOUNT: &str = "/mnt/scripts";
+
   fn context_with(contents: &str) -> tempfile::TempDir {
     let directory = tempfile::tempdir().expect("a temp dir");
 
     std::fs::create_dir_all(directory.path().join("nested")).expect("a nested directory");
-    std::fs::write(directory.path().join("compostbin-ports"), contents).expect("a script");
+    std::fs::write(directory.path().join("relay"), contents).expect("a script");
     std::fs::write(directory.path().join("nested/other"), "other").expect("another file");
 
     directory
   }
 
-  fn with_context(directory: &tempfile::TempDir, script: &str) -> BuildPlan {
+  fn mounting(source: impl Into<PathBuf>) -> BuildMount {
+    BuildMount {
+      destination: MOUNT.to_string(),
+      readonly: true,
+      source: source.into(),
+    }
+  }
+
+  fn with_mount(directory: &tempfile::TempDir, script: &str) -> BuildPlan {
     let mut plan = plan();
 
-    plan.context = Some(directory.path().to_path_buf());
+    plan.mounts = vec![mounting(directory.path())];
     plan.steps = vec![
       BuildStep::root("packages", "apt-get update"),
       BuildStep::root("guest scripts", script),
@@ -293,41 +307,67 @@ mod tests {
   }
 
   #[test]
-  fn the_context_is_part_of_the_key_of_a_step_that_reads_it() {
-    let reads = format!("install -m 755 {CONTEXT_MOUNT}/compostbin-ports /usr/local/bin/");
+  fn a_mount_is_part_of_the_key_of_a_step_that_reads_it() {
+    let reads = format!("install -m 755 {MOUNT}/relay /usr/local/bin/");
     let before = context_with("one");
     let after = context_with("two");
 
-    let first = keys(&with_context(&before, &reads)).expect("a key");
-    let second = keys(&with_context(&after, &reads)).expect("a key");
+    let first = keys(&with_mount(&before, &reads)).expect("a key");
+    let second = keys(&with_mount(&after, &reads)).expect("a key");
 
     assert_eq!(first.steps[0], second.steps[0], "the step that does not read it");
     assert_ne!(first.steps[1], second.steps[1], "the step that does");
   }
 
   #[test]
-  fn the_context_is_not_read_when_no_step_names_the_mount() {
+  fn a_mount_is_not_read_when_no_step_names_where_it_lands() {
     let before = context_with("one");
     let after = context_with("two");
 
     assert_eq!(
-      keys(&with_context(&before, "apt-get install -y git")).expect("a key"),
-      keys(&with_context(&after, "apt-get install -y git")).expect("a key")
+      keys(&with_mount(&before, "apt-get install -y git")).expect("a key"),
+      keys(&with_mount(&after, "apt-get install -y git")).expect("a key")
+    );
+  }
+
+  /// Each mount is keyed on its own contents, and only where a step names it.
+  #[test]
+  fn keys_every_mount_a_step_reads() {
+    let scripts = context_with("one");
+    let other = context_with("one");
+    let mut plan = with_mount(
+      &scripts,
+      &format!("cp {MOUNT}/relay /usr/local/bin/ && cp /mnt/extra/x /x"),
+    );
+
+    plan.mounts.push(BuildMount {
+      destination: "/mnt/extra".to_string(),
+      ..mounting(other.path())
+    });
+
+    let before = keys(&plan).expect("a key");
+
+    std::fs::write(other.path().join("relay"), "two").expect("a changed file");
+
+    assert_ne!(
+      before.steps[1],
+      keys(&plan).expect("a key").steps[1],
+      "the second mount changed under a step that reads it"
     );
   }
 
   #[test]
-  fn says_where_a_context_it_cannot_read_was() {
+  fn says_where_a_mount_it_cannot_read_was() {
     let mut plan = plan();
 
-    plan.context = Some("/nonexistent/context".into());
-    plan.steps = vec![BuildStep::root("guest scripts", format!("cp {CONTEXT_MOUNT}/x /x"))];
+    plan.mounts = vec![mounting("/nonexistent/context")];
+    plan.steps = vec![BuildStep::root("guest scripts", format!("cp {MOUNT}/x /x"))];
 
-    let error = keys(&plan).expect_err("an unreadable context");
+    let error = keys(&plan).expect_err("an unreadable mount");
 
     assert!(
       error.to_string().contains("/nonexistent/context"),
-      "the error should name the context: {error}"
+      "the error should name the mount: {error}"
     );
   }
 }

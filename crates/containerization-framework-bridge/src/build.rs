@@ -14,8 +14,9 @@ use crate::{checked, ffi, spec};
 use compostbin_engine::builder::Builder;
 use compostbin_engine::cache::{self, Keys};
 use compostbin_engine::error::EngineError;
-use compostbin_engine::model::{BuildPlan, BuildStep};
+use compostbin_engine::model::{BuildMount, BuildPlan, BuildStep};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// Sparse, so a ceiling rather than an allocation — but every build must fit.
 const ROOTFS_SIZE_IN_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -42,6 +43,25 @@ impl<'a> Step<'a> {
   }
 }
 
+/// A host directory the builder shares into the guest, as the wire spells it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Mount<'a> {
+  source: String,
+  destination: &'a str,
+  readonly: bool,
+}
+
+impl<'a> Mount<'a> {
+  fn new(mount: &'a BuildMount) -> Self {
+    Self {
+      source: mount.source.display().to_string(),
+      destination: &mount.destination,
+      readonly: mount.readonly,
+    }
+  }
+}
+
 /// The plan plus what a boot needs beyond it: store, boot artefacts, address.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,9 +75,10 @@ struct Wire<'a> {
   cpus: i32,
   memory_in_bytes: u64,
   rootfs_size_in_bytes: u64,
-  context: Option<String>,
+  mounts: Vec<Mount<'a>>,
   steps: Vec<Step<'a>>,
   environment: &'a [String],
+  labels: &'a BTreeMap<String, String>,
   user: Option<&'a str>,
   working_directory: Option<String>,
   ipv4_address: String,
@@ -78,7 +99,7 @@ impl<'a> Wire<'a> {
       cpus: plan.resources.cpus as i32,
       memory_in_bytes: plan.resources.memory_in_bytes,
       rootfs_size_in_bytes: ROOTFS_SIZE_IN_BYTES,
-      context: plan.context.as_ref().map(|path| path.display().to_string()),
+      mounts: plan.mounts.iter().map(Mount::new).collect(),
       steps: plan
         .steps
         .iter()
@@ -86,6 +107,7 @@ impl<'a> Wire<'a> {
         .map(|(step, key)| Step::new(step, key))
         .collect(),
       environment: &plan.environment,
+      labels: &plan.labels,
       user: plan.user.as_deref(),
       working_directory: plan.workdir.as_ref().map(|path| path.display().to_string()),
       ipv4_address: spec::nat_address(&name),
@@ -127,7 +149,7 @@ impl FrameworkBuilder {
       initfs_reference: INITFS_REFERENCE,
     };
 
-    checked(ffi::compostbin_provision(&Self::json(
+    checked(ffi::czbridge_provision(&Self::json(
       "provision the image store",
       &wire,
     )?))
@@ -153,7 +175,7 @@ impl Builder for FrameworkBuilder {
       &keys,
     );
 
-    checked(ffi::compostbin_build(&Self::json(&action, &wire)?))
+    checked(ffi::czbridge_build(&Self::json(&action, &wire)?))
       .map(|_| ())
       .map_err(|error| EngineError::failed(action, error))
   }
@@ -183,8 +205,13 @@ mod tests {
       },
     );
 
-    plan.context = Some("/Users/user/.cache/containerization/build/base".into());
+    plan.mounts = vec![BuildMount {
+      destination: "/mnt/scripts".to_string(),
+      readonly: true,
+      source: "/Users/user/.cache/containerization/build/base".into(),
+    }];
     plan.environment = vec!["CONFIG_DIR=/home/app/.config".to_string()];
+    plan.labels = BTreeMap::from([("com.example.built-by".to_string(), "example".to_string())]);
     plan.steps = vec![
       BuildStep::root("packages", "apt-get update"),
       BuildStep::as_user("bashrc", "app", "echo hook >> ~/.bashrc"),
@@ -235,9 +262,10 @@ mod tests {
       "cpus",
       "memoryInBytes",
       "rootfsSizeInBytes",
-      "context",
+      "mounts",
       "steps",
       "environment",
+      "labels",
       "user",
       "workingDirectory",
       "ipv4Address",
@@ -248,6 +276,7 @@ mod tests {
       assert!(json.get(key).is_some(), "the plan should carry {key}: {json}");
     }
 
+    assert_eq!(json["labels"]["com.example.built-by"], "example");
     assert_eq!(json["steps"][0]["user"], serde_json::Value::Null);
     assert_eq!(json["steps"][1]["user"], "app");
     assert_eq!(json["steps"][1]["name"], "bashrc");
