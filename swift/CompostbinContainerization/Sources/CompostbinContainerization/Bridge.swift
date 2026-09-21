@@ -156,13 +156,19 @@ func compostbin_exec(
 }
 
 /// Tells the guest the terminal changed size. A no-op once the process has gone.
+///
+/// A failure here is dropped rather than recorded: resizes run beside the
+/// attach they belong to, and one that stored its message in `lastError` would
+/// be read back as the reason that attach failed.
 func compostbin_resize(id: RustStr, terminal: Int32) -> Int32 {
-    reporting {
+    do {
         let id = id.toString()
 
         try blocking { try await Session.resize(id: id, terminal: terminal) }
 
         return 0
+    } catch {
+        return failed
     }
 }
 

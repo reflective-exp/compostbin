@@ -17,8 +17,6 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 /// Socket file name, inside the container's runtime directory.
 pub const CONTROL_SOCKET: &str = "control.sock";
@@ -32,10 +30,6 @@ const RESIZE: u8 = b'R';
 
 /// Enough for any plausible argv and environment; larger is a bug.
 const MAX_REQUEST: usize = 64 * 1024;
-
-/// How often the client checks for a window resize. Also the longest an attach
-/// can take to end.
-const RESIZE_POLL: Duration = Duration::from_millis(100);
 
 /// A stream the caller leaves unattached; the guest neither reads nor writes it.
 pub const UNATTACHED: RawFd = -1;
@@ -59,9 +53,9 @@ pub struct Stdio {
 impl Stdio {
   /// A terminal the guest reads, writing what it has to say to `stdout`.
   ///
-  /// Its stderr goes there too: a process on a terminal has one pty carrying
-  /// every stream, so only the caller's shell can tell them apart, and only by
-  /// being given a terminal that isn't also its stdout.
+  /// Its stderr arrives there too. One pty carries every stream a process on a
+  /// terminal writes, so by the time the bytes leave the guest nothing
+  /// distinguishes them.
   pub fn terminal(terminal: RawFd, stdout: RawFd) -> Self {
     Self {
       terminal,
@@ -342,45 +336,35 @@ where
 /// Asks the owner to run something on this process's stdio; blocks until the
 /// guest exits and returns its exit code. Nothing is relayed meanwhile.
 ///
-/// `resized` returns whether the terminal changed size since last asked. It is
-/// polled, not signal-driven, so nothing here must be async-signal-safe.
+/// `resized` returns whether this process's window changed size since last
+/// asked. The owner cannot see that for itself, so each change crosses as a
+/// nudge, and the owner resizes the guest's pty on our behalf.
 pub fn request(path: &Path, request: &Request, stdio: &Stdio, resized: &(dyn Fn() -> bool + Sync)) -> io::Result<i32> {
   let stream = UnixStream::connect(path)?;
 
   send(&stream, request.encode(stdio).as_bytes(), &stdio.descriptors())?;
 
-  let attached = AtomicBool::new(true);
-
-  std::thread::scope(|scope| {
-    let mut nudging = stream.try_clone()?;
-    let attached = &attached;
-
-    // Nothing to nudge about without a terminal of our own.
-    if stdio.terminal != UNATTACHED {
-      scope.spawn(move || {
-        // Polled so clearing the flag ends this thread within one interval. A
-        // watcher woken only by resizes would keep `scope` (and the process)
-        // hanging after the guest exits.
-        while attached.load(Ordering::Relaxed) {
-          if resized() && nudging.write_all(&[RESIZE]).is_err() {
-            return;
-          }
-
-          std::thread::sleep(RESIZE_POLL);
-        }
-      });
-    }
-
+  let wait = || {
     let mut code = [0u8; 4];
-    let read = (&stream).read_exact(&mut code);
-
-    // Before `scope` joins, even on error, or an owner that died without
-    // answering would strand us.
-    attached.store(false, Ordering::Relaxed);
-    read?;
+    (&stream).read_exact(&mut code)?;
 
     Ok(i32::from_be_bytes(code))
-  })
+  };
+
+  // Only a caller with a terminal has a window that can change size.
+  if stdio.terminal == UNATTACHED {
+    return wait();
+  }
+
+  crate::terminal::while_resizing(
+    resized,
+    || {
+      // A write that fails needs no handling: the owner is gone, and the read
+      // below is about to say so.
+      let _ = (&stream).write_all(&[RESIZE]);
+    },
+    wait,
+  )
 }
 
 /// Where a container's control socket lives, given its directory.

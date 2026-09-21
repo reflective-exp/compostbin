@@ -123,7 +123,21 @@ impl Engine for FrameworkEngine {
         .try_clone()
         .map_err(|error| EngineError::failed("duplicate the caller's stdio", error))?;
 
-      let code = Self::attach(&spec.name, OWNER_ATTACH, &request, &duplicated);
+      let attach = || Self::attach(&spec.name, OWNER_ATTACH, &request, &duplicated);
+
+      // This process holds the terminal and the VM, so it resizes the guest
+      // directly; a joiner has to ask over the control socket.
+      let code = if attached {
+        terminal::while_resizing(
+          &resized,
+          || {
+            let _ = ffi::compostbin_resize(OWNER_ATTACH, descriptor);
+          },
+          attach,
+        )
+      } else {
+        attach()
+      };
 
       return checked(code).map_err(|error| EngineError::failed("exec", error));
     }

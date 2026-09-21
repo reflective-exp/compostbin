@@ -11,6 +11,7 @@
   creates the container or joins one already running.
 - Run `[container] setup` lines without the caller's stdin, which they could
   otherwise read before the attached process started.
+- Host terminal resizes get passed through to guest processes.
 
 ## v0.8.1
 
