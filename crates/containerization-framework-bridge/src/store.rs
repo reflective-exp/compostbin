@@ -43,6 +43,10 @@ pub const INITFS_REFERENCE: &str = concat!("ghcr.io/apple/containerization/vmini
 /// Kata Containers' static build, the release Containerization's Makefile
 /// pins. Downloaded, since no one publishes a kernel as an image.
 pub const KERNEL_VERSION: &str = kernel_version!();
+
+/// Where the kernel comes from. Only the provisioner reads these, and only
+/// macOS has one.
+#[cfg(target_os = "macos")]
 pub const KERNEL_URL: &str = concat!(
   "https://github.com/kata-containers/kata-containers/releases/download/",
   kernel_version!(),
@@ -50,6 +54,7 @@ pub const KERNEL_URL: &str = concat!(
   kernel_version!(),
   "-arm64.tar.xz"
 );
+#[cfg(target_os = "macos")]
 pub const KERNEL_IN_ARCHIVE: &str = "opt/kata/share/kata-containers/vmlinux.container";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
