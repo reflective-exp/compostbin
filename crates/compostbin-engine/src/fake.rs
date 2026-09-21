@@ -1,8 +1,14 @@
+//! Fakes for the traits here, so code generic over them can be tested without
+//! an engine.
+
 use crate::builder::Builder;
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::model::{BuildPlan, ExecSpec, RunSpec};
 use std::cell::RefCell;
+
+/// What a posed engine reports as its version.
+pub const VERSION: &str = "fake engine 1.0";
 
 /// A recorded call, carrying the spec itself so tests assert on what the
 /// caller composed.
@@ -16,8 +22,7 @@ pub enum Call {
   Version,
 }
 
-/// Records calls instead of running them, so tests can assert exactly what
-/// was asked.
+/// The calls a fake has been given, in order.
 #[derive(Debug, Default)]
 pub struct Calls {
   recorded: RefCell<Vec<Call>>,
@@ -34,13 +39,13 @@ impl Calls {
   }
 }
 
-/// An `Engine` that runs nothing.
+/// An `Engine` that runs nothing and records what it was asked.
 #[derive(Debug, Default)]
 pub struct RecordingEngine {
   calls: Calls,
-  /// Posed as running, plus every one `run` has started.
+  /// The containers posed as running, plus every one `run` has started.
   running: RefCell<Vec<String>>,
-  /// Posed as unpacked, plus every one `run` has unpacked.
+  /// The images posed as unpacked, plus every one `run` has unpacked.
   unpacked: RefCell<Vec<String>>,
   /// `None` poses an engine that cannot say what images exist.
   images: Option<Vec<String>>,
@@ -69,11 +74,12 @@ impl RecordingEngine {
     }
   }
 
-  /// Poses an engine holding exactly these images.
+  /// Poses a working engine holding exactly these images: one that can also
+  /// say its version, which `RecordingEngine::new()` cannot.
   pub fn with_images(images: &[&str]) -> Self {
     Self {
       images: Some(images.iter().copied().map(str::to_string).collect()),
-      version: Some("Containerization 0.45.0".to_string()),
+      version: Some(VERSION.to_string()),
       ..Self::default()
     }
   }

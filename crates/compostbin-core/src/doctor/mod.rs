@@ -191,7 +191,7 @@ mod tests {
         .collect::<Vec<_>>(),
       Vec::<&Check>::new()
     );
-    assert_eq!(check(&checks, "engine").detail, "Containerization 0.45.0");
+    assert_eq!(check(&checks, "engine").detail, compostbin_engine::fake::VERSION);
   }
 
   #[test]

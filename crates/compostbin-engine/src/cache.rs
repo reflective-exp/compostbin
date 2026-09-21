@@ -17,7 +17,7 @@ use crate::model::{BuildMount, BuildPlan};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Keys {
@@ -27,14 +27,15 @@ pub struct Keys {
   pub steps: Vec<String>,
 }
 
-/// Reads a mount only if some step names where it lands.
+/// The key chain for `plan`. Digests a mount's source only when some step
+/// reads it, so an untouched mount costs nothing to key.
 pub fn keys(plan: &BuildPlan) -> Result<Keys, EngineError> {
-  let mut digests = Vec::with_capacity(plan.mounts.len());
+  let mut digests = Vec::new();
 
   for mount in &plan.mounts {
-    let read = plan.steps.iter().any(|step| reads(&step.script, mount));
-
-    digests.push(if read { digest_of(&mount.source)? } else { String::new() });
+    if plan.steps.iter().any(|step| reads(&step.script, mount)) {
+      digests.push((mount, digest_of(&mount.source)?));
+    }
   }
 
   let mut key = Key::new();
@@ -52,7 +53,7 @@ pub fn keys(plan: &BuildPlan) -> Result<Keys, EngineError> {
     key.field(step.script.as_bytes());
     key.field(step.user.as_deref().unwrap_or("root").as_bytes());
 
-    for (mount, digest) in plan.mounts.iter().zip(&digests) {
+    for (mount, digest) in &digests {
       if reads(&step.script, mount) {
         key.field(digest.as_bytes());
       }
@@ -69,32 +70,49 @@ fn reads(script: &str, mount: &BuildMount) -> bool {
   script.contains(&mount.destination)
 }
 
-/// One digest over every file under a mount's source. Sorted, because
-/// `read_dir` order is the filesystem's.
+/// What one entry under a mount contributes to its digest. A symlink counts as
+/// its target path, not what it points at, and is tagged so that it cannot
+/// collide with a file holding that same path.
+enum Entry {
+  File { executable: bool, path: PathBuf },
+  Link { target: String },
+}
+
+/// One digest over every file under a mount's source, in path order, because
+/// `read_dir` order is the filesystem's. Contents are read while hashing, so
+/// the whole tree is never in memory at once.
 fn digest_of(root: &Path) -> Result<String, EngineError> {
   let mut entries = Vec::new();
 
   collect(root, root, &mut entries)?;
-  entries.sort();
+  entries.sort_by(|(left, _), (right, _)| left.cmp(right));
 
   let mut key = Key::new();
 
-  for (path, executable, contents) in entries {
-    key.field(path.as_bytes());
-    key.field(if executable { b"755" } else { b"644" });
-    key.field(&contents);
+  for (relative, entry) in entries {
+    key.field(relative.as_bytes());
+
+    match entry {
+      Entry::File { executable, path } => {
+        key.field(if executable { b"755" } else { b"644" });
+        key.field(&fs::read(&path).map_err(|error| unreadable(&path, error))?);
+      }
+      Entry::Link { target } => {
+        key.field(b"symlink");
+        key.field(target.as_bytes());
+      }
+    }
   }
 
   Ok(key.finish())
 }
 
-/// Every file under `directory`: path relative to `root`, executable bit,
-/// contents. A symlink hashes as its target path, not what it points at.
-fn collect(root: &Path, directory: &Path, into: &mut Vec<(String, bool, Vec<u8>)>) -> Result<(), EngineError> {
-  let unreadable = |path: &Path, error: std::io::Error| {
-    EngineError::unavailable(format!("read the mounted directory at {}", path.display()), error)
-  };
+fn unreadable(path: &Path, error: std::io::Error) -> EngineError {
+  EngineError::unavailable(format!("read the mounted directory at {}", path.display()), error)
+}
 
+/// Every file under `directory`, each paired with its path relative to `root`.
+fn collect(root: &Path, directory: &Path, into: &mut Vec<(String, Entry)>) -> Result<(), EngineError> {
   let listing = fs::read_dir(directory).map_err(|error| unreadable(directory, error))?;
 
   for entry in listing {
@@ -111,14 +129,19 @@ fn collect(root: &Path, directory: &Path, into: &mut Vec<(String, bool, Vec<u8>)
 
     let relative = path
       .strip_prefix(root)
-      .unwrap_or(&path)
+      .expect("collect only descends into root")
       .to_string_lossy()
       .into_owned();
 
     if kind.is_symlink() {
       let target = fs::read_link(&path).map_err(|error| unreadable(&path, error))?;
 
-      into.push((relative, false, target.to_string_lossy().into_owned().into_bytes()));
+      into.push((
+        relative,
+        Entry::Link {
+          target: target.to_string_lossy().into_owned(),
+        },
+      ));
       continue;
     }
 
@@ -130,8 +153,10 @@ fn collect(root: &Path, directory: &Path, into: &mut Vec<(String, bool, Vec<u8>)
 
     into.push((
       relative,
-      mode & 0o111 != 0,
-      fs::read(&path).map_err(|error| unreadable(&path, error))?,
+      Entry::File {
+        executable: mode & 0o111 != 0,
+        path,
+      },
     ));
   }
 
@@ -148,10 +173,9 @@ impl Key {
     Self(Sha256::new())
   }
 
-  fn field(&mut self, value: &[u8]) -> &mut Self {
+  fn field(&mut self, value: &[u8]) {
     self.0.update((value.len() as u64).to_le_bytes());
     self.0.update(value);
-    self
   }
 
   fn finish(self) -> String {
@@ -168,7 +192,6 @@ impl Key {
 mod tests {
   use super::*;
   use crate::model::{BuildStep, Resources};
-  use std::path::PathBuf;
 
   fn plan() -> BuildPlan {
     let mut plan = BuildPlan::new(
@@ -353,6 +376,21 @@ mod tests {
       before.steps[1],
       keys(&plan).expect("a key").steps[1],
       "the second mount changed under a step that reads it"
+    );
+  }
+
+  #[test]
+  fn keys_a_symlink_apart_from_a_file_holding_its_target_path() {
+    let reads = format!("cp -r {MOUNT}/. /usr/local/bin/");
+    let linked = context_with("one");
+    let written = context_with("one");
+
+    std::os::unix::fs::symlink("relay", linked.path().join("link")).expect("a symlink");
+    std::fs::write(written.path().join("link"), "relay").expect("a file of the same bytes");
+
+    assert_ne!(
+      keys(&with_mount(&linked, &reads)).expect("a key").steps[1],
+      keys(&with_mount(&written, &reads)).expect("a key").steps[1]
     );
   }
 

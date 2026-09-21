@@ -1,5 +1,4 @@
-//! Building images. Separate from `Engine`: a session never builds, and a
-//! build is not a session.
+//! Building images. Separate from `Engine` because a session never builds.
 
 use crate::error::EngineError;
 use crate::model::BuildPlan;

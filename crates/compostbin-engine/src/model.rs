@@ -47,12 +47,11 @@ pub struct BuildPlan {
   /// Whether to start from cached snapshots. Off still writes them.
   pub cache: bool,
   /// Host directories the steps can read, and where each appears in the guest.
-  /// A step that names one is keyed on its contents; see `cache`.
+  /// A step that names one is keyed on its contents; see [`crate::cache`].
   pub mounts: Vec<BuildMount>,
   /// `NAME=VALUE`, visible to every step and written into the image config.
   pub environment: Vec<String>,
-  /// Written into the image config as its OCI labels. Whoever builds an image
-  /// says what it is; an engine has no name to put on someone else's work.
+  /// Written into the image config as its OCI labels.
   pub labels: BTreeMap<String, String>,
   /// The builder's own resources, not a session's.
   pub resources: Resources,

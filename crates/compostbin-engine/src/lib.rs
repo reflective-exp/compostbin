@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "strict", deny(warnings))]
+
 //! The engine and builder traits, their models, and the build cache keys.
 //!
 //! Platform-free, so code generic over them (most of `compostbin-core`)
