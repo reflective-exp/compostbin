@@ -1,8 +1,8 @@
 //! How a second caller reaches a session this process owns.
 //!
-//! The VM dies with the process that created it, so a joining `run`, `exec` or
-//! `shell` connects to a socket in the session's state directory and the owning
-//! process runs the command on its behalf.
+//! The VM dies with the process that created it, so a later caller connects to
+//! a socket in the session's state directory and the owning process runs the
+//! command on its behalf.
 //!
 //! What crosses is the client's **stdio**, not its bytes: the request carries
 //! the client's descriptors via `SCM_RIGHTS` — its tty, or its stdin, stdout
@@ -250,11 +250,14 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 ///
 /// `run` gets the request and the client's stdio and returns the guest's exit
 /// code. `resize` gets the client's terminal on each window change, and is
-/// never called for a client that sent none.
-pub fn serve<R, S>(listener: &UnixListener, run: R, resize: S)
+/// never called for a client that sent none. `failed` gets a client whose
+/// attach broke: one client going away leaves the rest of the session running,
+/// so there is nothing to return it to and nowhere here to report it.
+pub fn serve<R, S, F>(listener: &UnixListener, run: R, resize: S, failed: F)
 where
   R: Fn(&Request, &Stdio, &str) -> i32 + Sync,
   S: Fn(&str, RawFd) + Sync,
+  F: Fn(io::Error) + Sync,
 {
   std::thread::scope(|scope| {
     for (sequence, stream) in listener.incoming().enumerate() {
@@ -265,13 +268,14 @@ where
 
       let run = &run;
       let resize = &resize;
+      let failed = &failed;
 
       scope.spawn(move || {
         // Unique per attach, so a resize reaches only its own process.
         let id = format!("attach-{sequence}");
 
         if let Err(error) = attend(stream, &id, run, resize) {
-          eprintln!("compostbin: a session client went away: {error}");
+          failed(error);
         }
       });
     }
@@ -287,8 +291,8 @@ where
 {
   let (payload, received) = receive(&stream)?;
 
-  // `served` (via `is_running`, `run`, `doctor`) connects and closes without
-  // sending. Reporting it would print into the session on every check.
+  // `served` (via `is_running`) connects and closes without sending. Reporting
+  // it would report on every liveness check.
   if probe(&payload, &received) {
     return Ok(());
   }
@@ -477,7 +481,7 @@ mod tests {
       arguments: vec!["bash".to_string()],
       environment: vec!["IS_SANDBOX=1".to_string(), "TERM=xterm".to_string()],
       user: Some("root".to_string()),
-      working_directory: "/workspace/compostbin".to_string(),
+      working_directory: "/workspace/project".to_string(),
     }
   }
 

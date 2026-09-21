@@ -137,43 +137,43 @@ mod tests {
   fn writes_a_relayed_socket_as_a_pair_of_paths() {
     let declared = [SocketRelay {
       source: PathBuf::from("/state/ports/7001.sock"),
-      target: PathBuf::from("/run/compostbin/ports/7001.sock"),
+      target: PathBuf::from("/run/session/ports/7001.sock"),
     }];
 
     assert_eq!(
       sockets(&declared),
-      ["/state/ports/7001.sock\t/run/compostbin/ports/7001.sock"]
+      ["/state/ports/7001.sock\t/run/session/ports/7001.sock"]
     );
   }
 
   #[test]
   fn sets_a_variable_and_drops_an_unset_inherited_one() {
     // SAFETY: single-threaded test, and the name is this test's own.
-    unsafe { std::env::set_var("COMPOSTBIN_SPEC_TEST", "present") };
+    unsafe { std::env::set_var("BRIDGE_SPEC_TEST", "present") };
 
     let declared = [
-      EnvVar::Inherit("COMPOSTBIN_SPEC_TEST".to_string()),
-      EnvVar::Inherit("COMPOSTBIN_SPEC_TEST_UNSET".to_string()),
+      EnvVar::Inherit("BRIDGE_SPEC_TEST".to_string()),
+      EnvVar::Inherit("BRIDGE_SPEC_TEST_UNSET".to_string()),
       EnvVar::Set {
         name: "IS_SANDBOX".to_string(),
         value: "1".to_string(),
       },
     ];
 
-    assert_eq!(environment(&declared), ["COMPOSTBIN_SPEC_TEST=present", "IS_SANDBOX=1"]);
+    assert_eq!(environment(&declared), ["BRIDGE_SPEC_TEST=present", "IS_SANDBOX=1"]);
   }
 
   #[test]
   fn gives_a_session_a_stable_address_on_the_nat_network() {
-    let address = nat_address("compostbin-compostbin");
+    let address = nat_address("session-one");
 
-    assert_eq!(nat_address("compostbin-compostbin"), address);
-    assert_ne!(nat_address("compostbin-mudbrick"), address);
+    assert_eq!(nat_address("session-one"), address);
+    assert_ne!(nat_address("session-two"), address);
   }
 
   #[test]
   fn keeps_every_address_inside_the_gateways_subnet() {
-    for name in ["a", "compostbin-compostbin", "compostbin-mudbrick", "", "-"] {
+    for name in ["a", "session-one", "session-two", "", "-"] {
       let address = nat_address(name);
       let host: u32 = address
         .strip_prefix("192.168.64.")

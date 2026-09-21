@@ -70,16 +70,10 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Self::Missing(root) => write!(
-        formatter,
-        "no image store at {}; run `compostbin build`",
-        root.display()
-      ),
-      Self::Incomplete { root, missing } => write!(
-        formatter,
-        "the image store at {} has no {missing}; run `compostbin build`",
-        root.display()
-      ),
+      Self::Missing(root) => write!(formatter, "no image store at {}", root.display()),
+      Self::Incomplete { root, missing } => {
+        write!(formatter, "the image store at {} has no {missing}", root.display())
+      }
       Self::Unreadable { path, source } => write!(formatter, "cannot read {}: {source}", path.display()),
     }
   }
@@ -94,7 +88,7 @@ impl Store {
   }
 
   /// Whether this store holds what a boot needs, naming the first thing
-  /// missing. Checked by `run` and `doctor` first.
+  /// missing. Worth asking before a boot, which would fail late instead.
   pub fn ready(&self) -> Result<(), StoreError> {
     if !self.root.is_dir() {
       return Err(StoreError::Missing(self.root.clone()));
@@ -212,7 +206,7 @@ mod tests {
     let root = tempfile::tempdir().expect("a temp dir");
     std::fs::write(
       root.path().join(INDEX),
-      r#"{"compostbin\/base:latest":{"digest":"sha256:aa","annotations":{"org.opencontainers.image.ref.name":"latest"}},"docker.io\/library\/debian:stable-slim":{"digest":"sha256:bb"}}"#,
+      r#"{"example\/base:latest":{"digest":"sha256:aa","annotations":{"org.opencontainers.image.ref.name":"latest"}},"docker.io\/library\/debian:stable-slim":{"digest":"sha256:bb"}}"#,
     )
     .expect("index");
 
@@ -222,7 +216,7 @@ mod tests {
 
     assert_eq!(
       store.images().expect("the index should be readable"),
-      ["compostbin/base:latest", "docker.io/library/debian:stable-slim"]
+      ["docker.io/library/debian:stable-slim", "example/base:latest"]
     );
   }
 
@@ -266,8 +260,8 @@ mod tests {
     assert_eq!(store.root(), root.path());
     assert_eq!(store.kernel(), root.path().join(KERNEL));
     assert_eq!(
-      store.container_dir("compostbin-cb"),
-      root.path().join("containers/compostbin-cb")
+      store.container_dir("session-cb"),
+      root.path().join("containers/session-cb")
     );
   }
 }

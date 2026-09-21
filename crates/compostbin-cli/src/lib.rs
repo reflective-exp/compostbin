@@ -11,7 +11,7 @@ use compostbin_core::session::{AddOutcome, Notice, Process, Session};
 use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
-use containerization_framework_bridge::{FrameworkBuilder, FrameworkEngine, Store};
+use containerization_framework_bridge::{FrameworkBuilder, FrameworkEngine, Store, StoreError};
 use std::error::Error;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -211,12 +211,21 @@ fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
 
 /// The engine a session runs on: Containerization.framework, in-process.
 /// Nothing else provides images, so the store must be ready first.
+///
+/// The bridge reports what it found; which command fixes it is this side's to
+/// say, as is what to print when a joined client's attach breaks.
 fn select(session: &Session) -> Result<FrameworkEngine, Box<dyn Error>> {
   let store = Store::at(image::store(session));
 
-  store.ready()?;
+  store.ready().map_err(|error| match error {
+    StoreError::Unreadable { .. } => error.to_string(),
+    unbuilt => format!("{unbuilt}; run `compostbin build`"),
+  })?;
 
-  Ok(FrameworkEngine::new(session.resolve(SESSIONS_DIR), store))
+  Ok(
+    FrameworkEngine::new(session.resolve(SESSIONS_DIR), store)
+      .reporting(|error| eprintln!("compostbin: a session client went away: {error}")),
+  )
 }
 
 /// Writes back only the file the new entry belongs to.

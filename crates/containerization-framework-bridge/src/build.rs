@@ -117,7 +117,7 @@ impl FrameworkBuilder {
   }
 
   /// Fetches the kernel and init image into the store if missing. Idempotent
-  /// and cheap, so `build` always calls it first.
+  /// and cheap, so a caller can run it before every build.
   pub fn provision(&self) -> Result<(), EngineError> {
     let wire = ProvisionWire {
       store_root: self.store.root().display().to_string(),
@@ -176,20 +176,20 @@ mod tests {
   fn plan() -> BuildPlan {
     let mut plan = BuildPlan::new(
       "docker.io/library/debian:stable-slim",
-      "compostbin/base:latest",
+      "example/base:latest",
       Resources {
         cpus: 4,
         memory_in_bytes: 8 << 30,
       },
     );
 
-    plan.context = Some("/Users/user/.cache/compostbin/build/base".into());
-    plan.environment = vec!["CLAUDE_CONFIG_DIR=/home/claude/.claude".to_string()];
+    plan.context = Some("/Users/user/.cache/containerization/build/base".into());
+    plan.environment = vec!["CONFIG_DIR=/home/app/.config".to_string()];
     plan.steps = vec![
       BuildStep::root("packages", "apt-get update"),
-      BuildStep::as_user("bashrc", "claude", "echo hook >> ~/.bashrc"),
+      BuildStep::as_user("bashrc", "app", "echo hook >> ~/.bashrc"),
     ];
-    plan.user = Some("claude".to_string());
+    plan.user = Some("app".to_string());
     plan.workdir = Some("/workspace".into());
 
     plan
@@ -249,7 +249,7 @@ mod tests {
     }
 
     assert_eq!(json["steps"][0]["user"], serde_json::Value::Null);
-    assert_eq!(json["steps"][1]["user"], "claude");
+    assert_eq!(json["steps"][1]["user"], "app");
     assert_eq!(json["steps"][1]["name"], "bashrc");
     assert!(json["steps"][0]["cacheKey"].is_string());
   }

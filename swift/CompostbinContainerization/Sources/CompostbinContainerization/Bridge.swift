@@ -33,9 +33,10 @@ private func reporting(_ body: () throws -> Int32) -> Int32 {
     }
 }
 
-/// A line in the build log, on stderr.
+/// A line in the build log, on stderr. Unprefixed: what to call this belongs to
+/// whoever linked the bridge, not to the bridge.
 func note(_ message: String) {
-    try? FileHandle.standardError.write(contentsOf: Data("compostbin: \(message)\n".utf8))
+    try? FileHandle.standardError.write(contentsOf: Data("\(message)\n".utf8))
 }
 
 private func decoding<T: Decodable>(_ type: T.Type, from json: RustStr) throws -> T {

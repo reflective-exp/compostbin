@@ -13,8 +13,10 @@ use crate::{checked, control, ffi, spec, terminal};
 use compostbin_engine::engine::Engine;
 use compostbin_engine::error::EngineError;
 use compostbin_engine::model::{ExecSpec, RunSpec};
+use std::io;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Set by the SIGWINCH handler. One per process: a process attaches at most
@@ -25,6 +27,9 @@ static RESIZED: AtomicBool = AtomicBool::new(false);
 const OWNER_ATTACH: &str = "attach-owner";
 
 pub struct FrameworkEngine {
+  /// Told about a joined client whose attach broke, since that leaves the rest
+  /// of the session running and has no call to return to. Ignored by default.
+  attach_failed: Arc<dyn Fn(io::Error) + Send + Sync>,
   /// One directory per container, holding its control socket.
   runtime_dir: PathBuf,
   store: Store,
@@ -33,8 +38,17 @@ pub struct FrameworkEngine {
 impl FrameworkEngine {
   pub fn new(runtime_dir: impl Into<PathBuf>, store: Store) -> Self {
     Self {
+      attach_failed: Arc::new(|_| {}),
       runtime_dir: runtime_dir.into(),
       store,
+    }
+  }
+
+  /// Hands broken attaches to `report`, which decides what to say about them.
+  pub fn reporting(self, report: impl Fn(io::Error) + Send + Sync + 'static) -> Self {
+    Self {
+      attach_failed: Arc::new(report),
+      ..self
     }
   }
 
@@ -68,6 +82,7 @@ impl FrameworkEngine {
   fn serve_control_socket(&self, name: String) -> Result<(), EngineError> {
     let path = self.socket(&name);
     let listener = control::bind(&path).map_err(|error| EngineError::failed("bind the control socket", error))?;
+    let attach_failed = Arc::clone(&self.attach_failed);
 
     std::thread::spawn(move || {
       control::serve(
@@ -78,6 +93,7 @@ impl FrameworkEngine {
         |id, terminal| {
           let _ = ffi::compostbin_resize(id, terminal);
         },
+        |error| attach_failed(error),
       );
     });
 
