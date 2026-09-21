@@ -1,16 +1,66 @@
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use tempfile::TempDir;
 
-/// Cargo rebuilds the binary and points this at it; finding it via
-/// `current_exe` could test a stale build.
 const BINARY: &str = env!("CARGO_BIN_EXE_compostbin");
 
-fn compostbin(project_dir: &std::path::Path, arguments: &[&str]) -> std::process::Output {
+fn compostbin(project_dir: &Path, arguments: &[&str]) -> Output {
   Command::new(BINARY)
     .args(arguments)
     .current_dir(project_dir)
     .output()
     .expect("compostbin should run")
+}
+
+/// An `init`ed project under a canonical temp path, so the paths it prints back
+/// are comparable.
+fn initialized_project(temp: &TempDir) -> PathBuf {
+  let project_dir = temp
+    .path()
+    .canonicalize()
+    .expect("canonical temp")
+    .join("my-project");
+  std::fs::create_dir(&project_dir).expect("create project dir");
+  compostbin(&project_dir, &["init"]);
+
+  project_dir
+}
+
+/// The state directory `compostbin` keeps for a project of that name.
+fn state_dir() -> PathBuf {
+  let home = std::env::var("HOME").expect("HOME");
+
+  Path::new(&home).join(".local/state/compostbin/sessions/compostbin-my-project")
+}
+
+/// A project whose `workspace.roots` names a sibling `workspace/` tree, holding
+/// `inside` and next to an `outside` that no root covers.
+struct Rooted {
+  project_dir: PathBuf,
+  manifest_path: PathBuf,
+  inside: PathBuf,
+  outside: PathBuf,
+}
+
+fn project_with_a_root(temp: &TempDir) -> Rooted {
+  let base = temp.path().canonicalize().expect("canonical temp");
+  let project_dir = base.join("my-project");
+  let manifest_path = project_dir.join(".config/compostbin.toml");
+  std::fs::create_dir_all(project_dir.join(".config")).expect("create project dir");
+  std::fs::create_dir_all(base.join("workspace/inside")).expect("create root");
+  std::fs::create_dir_all(base.join("outside")).expect("create outside dir");
+  std::fs::write(
+    &manifest_path,
+    format!("[workspace]\nroots = [\"{}\"]\n", base.join("workspace").display()),
+  )
+  .expect("write manifest");
+
+  Rooted {
+    project_dir,
+    manifest_path,
+    inside: base.join("workspace/inside"),
+    outside: base.join("outside"),
+  }
 }
 
 #[test]
@@ -49,13 +99,7 @@ roots = []
 #[test]
 fn ls_shows_where_each_path_lands_in_the_container() {
   let temp = TempDir::new().expect("temp dir");
-  let project_dir = temp
-    .path()
-    .canonicalize()
-    .expect("canonical temp")
-    .join("my-project");
-  std::fs::create_dir(&project_dir).expect("create project dir");
-  compostbin(&project_dir, &["init"]);
+  let project_dir = initialized_project(&temp);
 
   let output = compostbin(&project_dir, &["ls"]);
 
@@ -63,13 +107,13 @@ fn ls_shows_where_each_path_lands_in_the_container() {
     .lines()
     .map(|line| line.to_string())
     .collect();
-  let home = std::env::var("HOME").expect("HOME");
   assert_eq!(
     listed,
     [
       format!("{} -> /workspace/my-project (project)", project_dir.display()),
       format!(
-        "{home}/.local/state/compostbin/sessions/compostbin-my-project/claude-home -> /home/claude/.claude (claude home)"
+        "{} -> /home/claude/.claude (claude home)",
+        state_dir().join("claude-home").display()
       ),
     ]
   );
@@ -78,16 +122,9 @@ fn ls_shows_where_each_path_lands_in_the_container() {
 #[test]
 fn clean_empties_the_spool_and_keeps_the_conversation() {
   let temp = TempDir::new().expect("temp dir");
-  let project_dir = temp
-    .path()
-    .canonicalize()
-    .expect("canonical temp")
-    .join("my-project");
-  std::fs::create_dir(&project_dir).expect("create project dir");
-  compostbin(&project_dir, &["init"]);
+  let project_dir = initialized_project(&temp);
 
-  let home = std::env::var("HOME").expect("HOME");
-  let state = std::path::Path::new(&home).join(".local/state/compostbin/sessions/compostbin-my-project");
+  let state = state_dir();
   std::fs::create_dir_all(state.join("host/requests")).expect("create spool");
   std::fs::write(state.join("host/requests/0001.request"), "run\n").expect("write a request");
   std::fs::create_dir_all(state.join("claude-home")).expect("create claude home");
@@ -118,14 +155,14 @@ fn clean_empties_the_spool_and_keeps_the_conversation() {
 #[test]
 fn add_refuses_a_path_full_of_credentials() {
   let temp = TempDir::new().expect("temp dir");
-  let project_dir = project_with_a_root(&temp);
+  let project = project_with_a_root(&temp);
   let home = std::env::var("HOME").expect("HOME");
-  let ssh = std::path::Path::new(&home).join(".ssh");
+  let ssh = Path::new(&home).join(".ssh");
   if !ssh.is_dir() {
     return;
   }
 
-  let output = compostbin(&project_dir, &["add", &ssh.display().to_string()]);
+  let output = compostbin(&project.project_dir, &["add", &ssh.display().to_string()]);
 
   assert!(!output.status.success(), "add should refuse ~/.ssh");
   let stderr = String::from_utf8_lossy(&output.stderr);
@@ -133,44 +170,22 @@ fn add_refuses_a_path_full_of_credentials() {
     stderr.contains("--force"),
     "the refusal should name the override: {stderr}"
   );
-  let manifest = std::fs::read_to_string(project_dir.join(".config/compostbin.toml")).expect("manifest");
+  let manifest = std::fs::read_to_string(&project.manifest_path).expect("manifest");
   assert!(
     !manifest.contains("[[paths]]"),
     "a refused path must not be recorded: {manifest}"
   );
 }
 
-/// A project with `workspace.roots` pointing at a sibling `workspace/` tree.
-fn project_with_a_root(temp: &TempDir) -> std::path::PathBuf {
-  let base = temp.path().canonicalize().expect("canonical temp");
-  let project_dir = base.join("my-project");
-  std::fs::create_dir_all(project_dir.join(".config")).expect("create project dir");
-  std::fs::create_dir_all(base.join("workspace/inside")).expect("create root");
-  std::fs::create_dir_all(base.join("outside")).expect("create outside dir");
-  std::fs::write(
-    project_dir.join(".config/compostbin.toml"),
-    format!("[workspace]\nroots = [\"{}\"]\n", base.join("workspace").display()),
-  )
-  .expect("write manifest");
-
-  project_dir
-}
-
 #[test]
 fn add_inside_a_root_records_no_path_entry() {
   let temp = TempDir::new().expect("temp dir");
-  let project_dir = project_with_a_root(&temp);
-  let inside = temp
-    .path()
-    .canonicalize()
-    .expect("canonical temp")
-    .join("workspace/inside");
-  let manifest_path = project_dir.join(".config/compostbin.toml");
-  let mut before = std::fs::read_to_string(&manifest_path).expect("manifest");
+  let project = project_with_a_root(&temp);
+  let mut before = std::fs::read_to_string(&project.manifest_path).expect("manifest");
   before.insert_str(0, "# the user's own comment\n");
-  std::fs::write(&manifest_path, &before).expect("write manifest");
+  std::fs::write(&project.manifest_path, &before).expect("write manifest");
 
-  let output = compostbin(&project_dir, &["add", &inside.display().to_string()]);
+  let output = compostbin(&project.project_dir, &["add", &project.inside.display().to_string()]);
 
   assert!(
     output.status.success(),
@@ -182,21 +197,19 @@ fn add_inside_a_root_records_no_path_entry() {
     "stdout: {}",
     String::from_utf8_lossy(&output.stdout)
   );
-  let manifest = std::fs::read_to_string(&manifest_path).expect("manifest");
+  let manifest = std::fs::read_to_string(&project.manifest_path).expect("manifest");
   assert_eq!(manifest, before, "an in-root path must leave the manifest untouched");
 }
 
 #[test]
 fn add_outside_every_root_records_a_path_and_says_how_to_mount_it() {
   let temp = TempDir::new().expect("temp dir");
-  let project_dir = project_with_a_root(&temp);
-  let outside = temp
-    .path()
-    .canonicalize()
-    .expect("canonical temp")
-    .join("outside");
+  let project = project_with_a_root(&temp);
 
-  let output = compostbin(&project_dir, &["add", &outside.display().to_string(), "--readonly"]);
+  let output = compostbin(
+    &project.project_dir,
+    &["add", &project.outside.display().to_string(), "--readonly"],
+  );
 
   assert!(
     output.status.success(),
@@ -208,9 +221,9 @@ fn add_outside_every_root_records_a_path_and_says_how_to_mount_it() {
     "stdout must say how to make the path visible: {}",
     String::from_utf8_lossy(&output.stdout)
   );
-  let manifest = std::fs::read_to_string(project_dir.join(".config/compostbin.toml")).expect("manifest");
+  let manifest = std::fs::read_to_string(&project.manifest_path).expect("manifest");
   assert!(
-    manifest.contains(&format!("source = \"{}\"", outside.display())),
+    manifest.contains(&format!("source = \"{}\"", project.outside.display())),
     "manifest: {manifest}"
   );
   assert!(manifest.contains("readonly = true"), "manifest: {manifest}");
@@ -219,16 +232,13 @@ fn add_outside_every_root_records_a_path_and_says_how_to_mount_it() {
 #[test]
 fn add_local_records_the_path_beside_the_committed_manifest() {
   let temp = TempDir::new().expect("temp dir");
-  let project_dir = project_with_a_root(&temp);
-  let outside = temp
-    .path()
-    .canonicalize()
-    .expect("canonical temp")
-    .join("outside");
-  let manifest_path = project_dir.join(".config/compostbin.toml");
-  let committed = std::fs::read_to_string(&manifest_path).expect("manifest");
+  let project = project_with_a_root(&temp);
+  let committed = std::fs::read_to_string(&project.manifest_path).expect("manifest");
 
-  let output = compostbin(&project_dir, &["add", &outside.display().to_string(), "--local"]);
+  let output = compostbin(
+    &project.project_dir,
+    &["add", &project.outside.display().to_string(), "--local"],
+  );
 
   assert!(
     output.status.success(),
@@ -236,21 +246,22 @@ fn add_local_records_the_path_beside_the_committed_manifest() {
     String::from_utf8_lossy(&output.stderr)
   );
   assert_eq!(
-    std::fs::read_to_string(&manifest_path).expect("manifest"),
+    std::fs::read_to_string(&project.manifest_path).expect("manifest"),
     committed,
     "--local must leave the committed manifest untouched"
   );
-  let local = std::fs::read_to_string(project_dir.join(".config/compostbin.local.toml")).expect("local manifest");
+  let local =
+    std::fs::read_to_string(project.project_dir.join(".config/compostbin.local.toml")).expect("local manifest");
   assert!(
-    local.contains(&format!("source = \"{}\"", outside.display())),
+    local.contains(&format!("source = \"{}\"", project.outside.display())),
     "local manifest: {local}"
   );
 
   // And the session mounts it, saying where it came from.
-  let listed = compostbin(&project_dir, &["ls"]);
+  let listed = compostbin(&project.project_dir, &["ls"]);
   let stdout = String::from_utf8_lossy(&listed.stdout);
   assert!(
-    stdout.contains("local") && stdout.contains(&outside.display().to_string()),
+    stdout.contains("local") && stdout.contains(&project.outside.display().to_string()),
     "ls should list the local path as local: {stdout}"
   );
 }

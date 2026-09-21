@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
 use compostbin_core::session::image;
-use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "compostbin", about = "Run Claude Code in a container")]
@@ -14,7 +13,8 @@ pub struct Arguments {
 pub enum Command {
   /// Mount a path into the session
   Add {
-    path: PathBuf,
+    /// The host path to mount, `~` included
+    path: String,
     /// Mount a path `add` would otherwise refuse as too broad or too sensitive
     #[arg(long)]
     force: bool,
@@ -84,7 +84,7 @@ mod tests {
       Command::Add {
         force: false,
         local: false,
-        path: PathBuf::from("../libfoo"),
+        path: "../libfoo".to_string(),
         readonly: true,
       }
     );
@@ -93,7 +93,7 @@ mod tests {
       Command::Add {
         force: false,
         local: false,
-        path: PathBuf::from("../libfoo"),
+        path: "../libfoo".to_string(),
         readonly: false,
       }
     );

@@ -1,11 +1,10 @@
-//! Terminal rendering of a diagnosis. Core decides what's wrong; layout is
-//! only meaningful in a terminal.
+//! Terminal rendering of a diagnosis.
 
 use compostbin_core::doctor::{Check, Status};
 use std::fmt::{Display, Formatter, Result};
 
-/// Every check, as the terminal shows it. A newtype for the orphan rule, and
-/// so the whole report is one assertable value.
+/// Every check, as the terminal shows it. A newtype so `Display` can be
+/// implemented for core's checks.
 pub struct Diagnosis<'a>(pub &'a [Check]);
 
 impl Display for Diagnosis<'_> {

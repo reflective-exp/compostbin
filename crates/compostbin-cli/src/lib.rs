@@ -16,7 +16,7 @@ use std::error::Error;
 use std::io::IsTerminal;
 use std::path::Path;
 
-fn report(notice: Notice) {
+fn notify(notice: Notice) {
   match notice {
     Notice::NotInKeychain => eprintln!(
       "no \"{KEYCHAIN_SERVICE}\" entry in the login Keychain; the session will need ANTHROPIC_API_KEY or an interactive login"
@@ -44,7 +44,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       path,
       readonly,
     } => {
-      let canonical = resolver.canonicalize(&path.display().to_string())?;
+      let canonical = resolver.canonicalize(&path)?;
 
       // A guardrail against slips, not a security boundary (the container has
       // the user's privileges anyway), hence `--force`.
@@ -103,8 +103,6 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
     Command::Ls => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
 
-      // Origin matters: in-root vs explicit decides whether `add` needed a
-      // restart.
       for entry in session.workspace().entries() {
         let origin = match entry.origin {
           Origin::Explicit => "explicit",
@@ -132,7 +130,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
     Command::Run { arguments } => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
 
-      Ok(session.run(&select(&session)?, &Keychain, &Process::claude(&arguments), &report)?)
+      Ok(session.run(&select(&session)?, &Keychain, &Process::claude(&arguments), &notify)?)
     }
 
     Command::Exec { argv, tty, user } => exec(
@@ -192,7 +190,7 @@ fn exec(
 
   let session = load_session(manifest_path, resolver, project_dir)?;
 
-  Ok(session.run(&select(&session)?, &Keychain, process, &report)?)
+  Ok(session.run(&select(&session)?, &Keychain, process, &notify)?)
 }
 
 /// Prints every check; non-zero if any failed, so scripts can gate on it.
@@ -211,9 +209,6 @@ fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
 
 /// The engine a session runs on: Containerization.framework, in-process.
 /// Nothing else provides images, so the store must be ready first.
-///
-/// The bridge reports what it found; which command fixes it is this side's to
-/// say, as is what to print when a joined client's attach breaks.
 fn select(session: &Session) -> Result<FrameworkEngine, Box<dyn Error>> {
   let store = Store::at(image::store(session));
 
