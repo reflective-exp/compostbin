@@ -131,7 +131,10 @@ func compostbin_exec(
     environment: RustStr,
     user: RustStr,
     working_directory: RustStr,
-    terminal: Int32
+    terminal: Int32,
+    stdin: Int32,
+    stdout: Int32,
+    stderr: Int32
 ) -> Int32 {
     reporting {
         let user = user.toString()
@@ -142,7 +145,10 @@ func compostbin_exec(
             environment: lines(environment),
             user: user.isEmpty ? nil : user,
             workingDirectory: working_directory.toString(),
-            terminal: terminal
+            terminal: terminal,
+            stdin: stdin,
+            stdout: stdout,
+            stderr: stderr
         )
 
         return try blocking { try await Session.exec(request) }

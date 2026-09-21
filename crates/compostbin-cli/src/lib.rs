@@ -11,10 +11,9 @@ use compostbin_core::session::{AddOutcome, Notice, Process, Session};
 use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
-use compostbin_engine::engine::Engine;
-use compostbin_engine::model::ExecSpec;
 use containerization_framework_bridge::{FrameworkBuilder, FrameworkEngine, Store};
 use std::error::Error;
+use std::io::IsTerminal;
 use std::path::Path;
 
 fn report(notice: Notice) {
@@ -130,30 +129,25 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       Ok(0)
     }
 
-    Command::Run {
-      arguments,
-      entrypoint,
-      user,
-    } => {
+    Command::Run { arguments } => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
-      let process = Process {
-        arguments,
-        entrypoint,
-        user,
-      };
 
-      Ok(session.run(&select(&session)?, &Keychain, &process, &report)?)
+      Ok(session.run(&select(&session)?, &Keychain, &Process::claude(&arguments), &report)?)
     }
 
-    Command::Shell { user } => {
-      let session = load_session(&manifest_path, resolver, &project_dir)?;
-      let spec = ExecSpec {
-        user: Some(user),
-        ..session.exec_spec(&["bash".to_string()])
-      };
+    Command::Exec { argv, tty, user } => exec(
+      &Process::command(&argv, tty, &user),
+      &manifest_path,
+      resolver,
+      &project_dir,
+    ),
 
-      Ok(select(&session)?.exec(&spec)?)
-    }
+    Command::Shell { user } => exec(
+      &Process::command(&["bash".to_string()], true, &user),
+      &manifest_path,
+      resolver,
+      &project_dir,
+    ),
   }
 }
 
@@ -178,6 +172,27 @@ fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn Error
   image::build(session, &builder, cache)?;
 
   Ok(0)
+}
+
+/// Runs a command in the session, creating the container if it isn't up.
+///
+/// A terminal asked for is a terminal required: this side can only pass on one
+/// it has, and silently running without would leave whatever wanted it — a
+/// shell, anything drawing a UI — with pipes and no way to say so.
+fn exec(
+  process: &Process,
+  manifest_path: &Path,
+  resolver: PathResolver,
+  project_dir: &Path,
+) -> Result<i32, Box<dyn Error>> {
+  if process.tty && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+    eprintln!("compostbin: -t needs a terminal on stdin and stdout");
+    return Ok(1);
+  }
+
+  let session = load_session(manifest_path, resolver, project_dir)?;
+
+  Ok(session.run(&select(&session)?, &Keychain, process, &report)?)
 }
 
 /// Prints every check; non-zero if any failed, so scripts can gate on it.

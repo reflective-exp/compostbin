@@ -12,8 +12,8 @@
 use std::io;
 use std::os::fd::RawFd;
 
-/// Whether a descriptor is a terminal. When it isn't (e.g. `run > log`), the
-/// guest runs without one rather than failing.
+/// Whether a descriptor is a terminal. When stdin or stdout isn't (e.g.
+/// `run > log`), the guest runs on plain streams rather than failing.
 pub fn is_tty(descriptor: RawFd) -> bool {
   // SAFETY: isatty only reads, and tolerates any integer.
   unsafe { libc::isatty(descriptor) == 1 }
@@ -24,10 +24,10 @@ pub fn is_tty(descriptor: RawFd) -> bool {
 /// Swift closes it when the attach ends, and this side must not: the close is
 /// what stops reading, and must happen exactly once.
 ///
-/// `LinuxProcess` pumps stdin with a task reading the terminal; cancelling it
+/// `LinuxProcess` pumps stdin with a task reading the descriptor; cancelling it
 /// doesn't interrupt a pending read, so until the descriptor closes the stale
-/// reader keeps stealing keystrokes. Duplicating makes that close safe, since
-/// the caller's own descriptor keeps the terminal alive.
+/// reader keeps stealing input. Duplicating makes that close safe, since the
+/// caller's own descriptor keeps its stream open.
 pub fn lend(descriptor: RawFd) -> io::Result<RawFd> {
   // SAFETY: dup only reads the descriptor table, and returns < 0 on failure.
   let lent = unsafe { libc::dup(descriptor) };

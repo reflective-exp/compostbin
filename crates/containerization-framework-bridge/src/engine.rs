@@ -2,17 +2,18 @@
 //!
 //! A container lives *in* this process, not a daemon. So:
 //!
-//! - The VM lives exactly as long as this process; `run` also starts the
-//!   control socket through which other terminals join it.
+//! - The VM lives exactly as long as this process; whichever command creates it
+//!   also starts the control socket through which later ones join.
 //! - Nothing lists containers. A container is up iff something answers on its
 //!   control socket (one per container, under the runtime directory).
 
+use crate::control::Stdio;
 use crate::store::{INITFS_REFERENCE, Store};
 use crate::{checked, control, ffi, spec, terminal};
 use compostbin_engine::engine::Engine;
 use compostbin_engine::error::EngineError;
 use compostbin_engine::model::{ExecSpec, RunSpec};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -22,8 +23,6 @@ static RESIZED: AtomicBool = AtomicBool::new(false);
 
 /// The owner's exec id; can't collide with a joiner's `attach-<n>`.
 const OWNER_ATTACH: &str = "attach-owner";
-
-const NO_TERMINAL: RawFd = -1;
 
 pub struct FrameworkEngine {
   /// One directory per container, holding its control socket.
@@ -48,8 +47,8 @@ impl FrameworkEngine {
     ffi::compostbin_is_running(name)
   }
 
-  /// Runs a guest process against a terminal, as the owner of the VM.
-  fn attach(name: &str, id: &str, request: &control::Request, terminal: RawFd) -> i32 {
+  /// Runs a guest process against the caller's stdio, as the owner of the VM.
+  fn attach(name: &str, id: &str, request: &control::Request, stdio: &Stdio) -> i32 {
     ffi::compostbin_exec(
       name,
       id,
@@ -57,11 +56,14 @@ impl FrameworkEngine {
       &spec::lines(&request.environment),
       request.user.as_deref().unwrap_or(""),
       &request.working_directory,
-      terminal,
+      stdio.terminal,
+      stdio.stdin,
+      stdio.stdout,
+      stdio.stderr,
     )
   }
 
-  /// Serves attaches from other terminals on a detached thread, never joined:
+  /// Serves attaches from other callers on a detached thread, never joined:
   /// it ends with the process, as does the VM.
   fn serve_control_socket(&self, name: String) -> Result<(), EngineError> {
     let path = self.socket(&name);
@@ -72,7 +74,7 @@ impl FrameworkEngine {
         &listener,
         // Use the client's resolved request as-is; never substitute this
         // process's environment.
-        |request, terminal, id| Self::attach(&name, id, request, terminal),
+        |request, stdio, id| Self::attach(&name, id, request, stdio),
         |id, terminal| {
           let _ = ffi::compostbin_resize(id, terminal);
         },
@@ -86,7 +88,11 @@ impl FrameworkEngine {
 impl Engine for FrameworkEngine {
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError> {
     let descriptor = std::io::stdin().as_raw_fd();
-    let attached = terminal::is_tty(descriptor);
+    // A terminal is the caller's to give, and it gives one only when both the
+    // streams it interacts through are terminals. A piped prompt or a
+    // redirected `run > log` leaves the guest without one, rather than writing
+    // a terminal's escapes into whatever the caller redirected to.
+    let attached = spec.tty && terminal::is_tty(descriptor) && terminal::is_tty(libc::STDOUT_FILENO);
 
     // Raw while attached, restored on drop. See `terminal` for why.
     let _raw = if attached {
@@ -102,32 +108,29 @@ impl Engine for FrameworkEngine {
       working_directory: spec::working_directory(spec.workdir.as_deref()),
     };
 
-    watch_for_resize();
+    let stdio = if attached {
+      // Only a terminal has a window, so only then is there anything to watch.
+      watch_for_resize();
+      Stdio::terminal(descriptor, libc::STDOUT_FILENO)
+    } else {
+      Stdio::inherit(spec.interactive)
+    };
 
     // The owner attaches directly; anyone else asks the owner to.
     if self.owns(&spec.name) {
-      // A duplicate, since Swift closes what it's given and we keep stdin. A
-      // non-terminal isn't handed over; the guest runs without one.
-      let lent = if attached {
-        terminal::lend(descriptor).map_err(|error| EngineError::failed("lend the terminal", error))?
-      } else {
-        NO_TERMINAL
-      };
+      // Duplicates, since the Swift side closes what it is given.
+      let duplicated = stdio
+        .try_clone()
+        .map_err(|error| EngineError::failed("duplicate the caller's stdio", error))?;
 
-      let code = Self::attach(&spec.name, OWNER_ATTACH, &request, lent);
+      let code = Self::attach(&spec.name, OWNER_ATTACH, &request, &duplicated);
 
       return checked(code).map_err(|error| EngineError::failed("exec", error));
     }
 
-    if !attached {
-      return Err(EngineError::failed(
-        "attach",
-        "a session can only be attached from a terminal",
-      ));
-    }
-
-    // Not duplicated: `SCM_RIGHTS` already copies it, and the owner dups again.
-    control::request(&self.socket(&spec.name), &request, descriptor, &resized)
+    // Not duplicated: `SCM_RIGHTS` already copies each one, and the owner dups
+    // again.
+    control::request(&self.socket(&spec.name), &request, &stdio, &resized)
       .map_err(|error| EngineError::failed("attach", error))
   }
 

@@ -450,27 +450,6 @@ enum Build {
     }
 }
 
-/// Streams the build log to stderr. Locked so stdout and stderr chunks never
-/// interleave mid-write.
-private final class FileWriter: Writer, Sendable {
-    private let handle: Mutex<FileHandle>
-
-    init(_ handle: FileHandle) {
-        self.handle = Mutex(handle)
-    }
-
-    func write(_ data: Data) throws {
-        try handle.withLock { try $0.write(contentsOf: data) }
-    }
-
-    func line(_ text: String) {
-        try? write(Data("\(text)\n".utf8))
-    }
-
-    /// The handle is this process's stderr, which outlives every build.
-    func close() throws {}
-}
-
 /// Carries a result out of `ingest`'s `@Sendable` body, which cannot return one
 /// or capture a bare `Mutex`.
 private final class Box<Value: Sendable>: Sendable {

@@ -2,8 +2,15 @@
 
 ## Unreleased
 
-- Add `--entrypoint <cmd>` and `-U` / `--user <user>` to `run`, to attach
-  something other than Claude.
+- Add `compostbin exec <command>`, which runs something other than Claude in the
+  session, with `-t` for a terminal and `-U` / `--user <user>` for the guest
+  user. `run` always attaches Claude, and `shell` is now `exec -t bash`.
+- Attach every process to the caller's own stdin, stdout and stderr, instead of
+  running it with no streams at all when the caller has no terminal. Piping a
+  prompt in, or redirecting output to a file, now works, whether the command
+  creates the container or joins one already running.
+- Run `[container] setup` lines without the caller's stdin, which they could
+  otherwise read before the attached process started.
 
 ## v0.8.1
 

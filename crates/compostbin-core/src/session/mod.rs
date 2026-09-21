@@ -76,41 +76,46 @@ fn clear(target: &Path) -> Result<(), PathError> {
   Ok(())
 }
 
-/// What `run` attaches when told nothing else.
-const DEFAULT_ENTRYPOINT: &str = "claude";
+/// What `run` attaches.
+const CLAUDE: &str = "claude";
 
-/// The process `run` attaches to the session, and the guest user it runs as.
+/// The process attached to the session, the guest user it runs as, and whether
+/// it gets a terminal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Process {
-  /// Passed through to the entrypoint.
-  pub arguments: Vec<String>,
-  /// `None` is `claude`.
-  pub entrypoint: Option<String>,
+  /// The command and its arguments.
+  pub argv: Vec<String>,
+  /// Whether the guest process gets a terminal, which it can only have if the
+  /// caller has one to give.
+  pub tty: bool,
   pub user: String,
 }
 
 impl Process {
+  /// What `run` attaches: Claude, on a terminal whenever the caller has one.
   pub fn claude(arguments: &[String]) -> Self {
     Self {
-      arguments: arguments.to_vec(),
-      entrypoint: None,
+      argv: std::iter::once(CLAUDE.to_string())
+        .chain(arguments.iter().cloned())
+        .collect(),
+      tty: true,
       user: image::USER.to_string(),
     }
   }
 
-  fn entrypoint(&self) -> &str {
-    self.entrypoint.as_deref().unwrap_or(DEFAULT_ENTRYPOINT)
+  /// What `exec` attaches: a command of the caller's own, reading and writing
+  /// the caller's streams unless it asked for a terminal.
+  pub fn command(argv: &[String], tty: bool, user: &str) -> Self {
+    Self {
+      argv: argv.to_vec(),
+      tty,
+      user: user.to_string(),
+    }
   }
 
   /// Only Claude needs setup to succeed; anything else may be debugging it.
   fn needs_setup(&self) -> bool {
-    self.entrypoint() == DEFAULT_ENTRYPOINT
-  }
-
-  fn argv(&self) -> Vec<String> {
-    std::iter::once(self.entrypoint().to_string())
-      .chain(self.arguments.iter().cloned())
-      .collect()
+    self.argv.first().is_some_and(|command| command == CLAUDE)
   }
 }
 
@@ -689,13 +694,7 @@ impl Session {
     notify: &(dyn Fn(Notice) + Sync),
   ) -> Result<i32, SessionError> {
     for line in &self.manifest.container.setup {
-      let code = engine.exec(&self.exec_spec(&[
-        "bash".to_string(),
-        "-euo".to_string(),
-        "pipefail".to_string(),
-        "-c".to_string(),
-        line.clone(),
-      ]))?;
+      let code = engine.exec(&self.setup_spec(line))?;
 
       if code != 0 {
         notify(Notice::SetupFailed {
@@ -707,6 +706,20 @@ impl Session {
     }
 
     Ok(0)
+  }
+
+  /// One `[container] setup` line, as the process that runs it.
+  ///
+  /// Neither interactive nor on a terminal: a setup line is the session's own
+  /// work, not the caller's. Given the caller's stdin it would read what was
+  /// meant for the process being attached, swallowing a piped prompt before
+  /// Claude starts.
+  pub fn setup_spec(&self, line: &str) -> ExecSpec {
+    ExecSpec {
+      interactive: false,
+      tty: false,
+      ..self.exec_spec(&["bash", "-euo", "pipefail", "-c", line].map(str::to_string))
+    }
   }
 
   /// An exec doesn't inherit the boot environment, so `[container] env` is
@@ -753,11 +766,12 @@ impl Session {
     }
   }
 
-  /// `exec_spec` for what `run` attaches, as its user.
+  /// `exec_spec` for an attached process, as its user and on its streams.
   pub fn process_spec(&self, process: &Process) -> ExecSpec {
     ExecSpec {
+      tty: process.tty,
       user: Some(process.user.clone()),
-      ..self.exec_spec(&process.argv())
+      ..self.exec_spec(&process.argv)
     }
   }
 
@@ -828,11 +842,7 @@ source   = "~/.cargo/registry"
   }
 
   fn root_shell() -> Process {
-    Process {
-      arguments: Vec::new(),
-      entrypoint: Some("bash".to_string()),
-      user: "root".to_string(),
-    }
+    Process::command(&["bash".to_string()], true, "root")
   }
 
   #[test]
@@ -1023,7 +1033,20 @@ source   = "~/.cargo/registry"
   }
 
   fn setup_spec(session: &Session, line: &str) -> ExecSpec {
-    session.exec_spec(&["bash", "-euo", "pipefail", "-c", line].map(str::to_string))
+    session.setup_spec(line)
+  }
+
+  /// Otherwise a line reads the stdin a piped `run -- -p` meant for Claude.
+  #[test]
+  fn a_setup_line_reads_no_input_and_asks_for_no_terminal() {
+    let spec = session().setup_spec("./bin/setup");
+
+    assert!(!spec.interactive);
+    assert!(!spec.tty);
+    assert_eq!(
+      spec.arguments,
+      ["bash", "-euo", "pipefail", "-c", "./bin/setup"].map(str::to_string)
+    );
   }
 
   #[test]

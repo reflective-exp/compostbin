@@ -89,26 +89,39 @@ conversation.
 compostbin serves the session's host commands while Claude is attached; both
 stop when Claude exits.
 
-`--entrypoint` runs something else in Claude's place, taking the arguments after
-`--`; `-U`/`--user` picks the guest user (default `claude`). Handy for working
-out what the manifest needs:
+Claude gets a terminal whenever this side has one on both stdin and stdout.
+Redirect or pipe either, and the session runs on plain streams instead, so
+`echo "..." | compostbin run -- -p` and `compostbin run -- -p > answer.txt`
+work as written.
 
-``` sh
-compostbin run -U root --entrypoint bash
-compostbin run -U root --entrypoint apt-cache -- search ripgrep
-```
-
-Whichever `run` creates the container owns it: when that process exits, the
+Whichever command creates the container owns it: when that process exits, the
 container goes, with everything that joined it. A failing `[container] setup`
 line stops only Claude. Changes to the container (an `apt-get install`) die with
 it; keep them in `[image]`.
 
+### exec
+
+`compostbin exec <command>` runs something other than Claude in the session,
+starting the container if it isn't up. `-U`/`--user` picks the guest user
+(default `claude`). Everything after the command belongs to the command:
+
+``` sh
+compostbin exec ls -l
+compostbin exec -U root apt-cache search ripgrep
+```
+
+Its stdin, stdout and stderr are this side's own, so redirections and pipes
+behave as the shell wrote them. `-t` asks for a terminal instead, which a
+command drawing a UI needs; this side must have one on stdin and stdout, or
+`exec` says so and stops. A `[container] setup` line that fails doesn't stop an
+`exec`, which may well be what's debugging it.
+
 ### shell
 
-`compostbin shell` opens a bash prompt in a running container, as the
+`compostbin shell` is `exec -t bash`: a bash prompt in the session, as the
 unprivileged `claude` user, in the project's directory under `/workspace`.
-`-U`/`--user` opens it as another user the image knows, such as `root`. To
-start the container at a shell, use `run --entrypoint bash`.
+`-U`/`--user` opens it as another user the image knows, such as `root`. It
+starts the container if nothing else has.
 
 ### add
 

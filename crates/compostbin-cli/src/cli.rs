@@ -43,19 +43,25 @@ pub enum Command {
   Init,
   /// List the session's mounts
   Ls,
-  /// Start or join the session and attach Claude
-  Run {
-    /// Arguments passed to the entrypoint
-    #[arg(last = true)]
-    arguments: Vec<String>,
-    /// Run this instead of `claude`, such as `bash`
-    #[arg(long)]
-    entrypoint: Option<String>,
+  /// Start or join the session and run a command in it
+  Exec {
+    /// The command and its arguments
+    #[arg(required = true, trailing_var_arg = true)]
+    argv: Vec<String>,
+    /// Give it a terminal, which needs one on this side too
+    #[arg(short = 't', long)]
+    tty: bool,
     /// The guest user to run it as
     #[arg(short = 'U', long, default_value = image::USER)]
     user: String,
   },
-  /// Open a shell in the session
+  /// Start or join the session and attach Claude
+  Run {
+    /// Arguments passed to Claude
+    #[arg(last = true)]
+    arguments: Vec<String>,
+  },
+  /// Open a shell in the session: `exec -t bash`
   Shell {
     /// The guest user to open it as
     #[arg(short = 'U', long, default_value = image::USER)]
@@ -100,8 +106,6 @@ mod tests {
         .iter()
         .map(|argument| argument.to_string())
         .collect(),
-      entrypoint: None,
-      user: "claude".to_string(),
     };
 
     assert_eq!(
@@ -111,34 +115,44 @@ mod tests {
     assert_eq!(parse(&["compostbin", "run"]), claude(&[]));
   }
 
+  /// The command's own flags are its own: only what precedes it is ours.
   #[test]
-  fn parses_run_with_another_entrypoint_and_user() {
+  fn parses_exec_with_the_commands_own_arguments() {
     assert_eq!(
-      parse(&[
-        "compostbin",
-        "run",
-        "-U",
-        "root",
-        "--entrypoint",
-        "apt-cache",
-        "--",
-        "search",
-        "ripgrep"
-      ]),
-      Command::Run {
-        arguments: vec!["search".to_string(), "ripgrep".to_string()],
-        entrypoint: Some("apt-cache".to_string()),
+      parse(&["compostbin", "exec", "-U", "root", "apt-cache", "search", "ripgrep"]),
+      Command::Exec {
+        argv: ["apt-cache", "search", "ripgrep"]
+          .map(str::to_string)
+          .to_vec(),
+        tty: false,
         user: "root".to_string(),
       }
     );
     assert_eq!(
-      parse(&["compostbin", "run", "--user", "root", "--entrypoint", "bash"]),
-      Command::Run {
-        arguments: Vec::new(),
-        entrypoint: Some("bash".to_string()),
+      parse(&["compostbin", "exec", "ls", "-l"]),
+      Command::Exec {
+        argv: ["ls", "-l"].map(str::to_string).to_vec(),
+        tty: false,
+        user: "claude".to_string(),
+      }
+    );
+  }
+
+  #[test]
+  fn parses_exec_asking_for_a_terminal() {
+    assert_eq!(
+      parse(&["compostbin", "exec", "-t", "--user", "root", "bash"]),
+      Command::Exec {
+        argv: vec!["bash".to_string()],
+        tty: true,
         user: "root".to_string(),
       }
     );
+  }
+
+  #[test]
+  fn refuses_an_exec_with_no_command() {
+    assert!(Arguments::try_parse_from(["compostbin", "exec"]).is_err());
   }
 
   #[test]

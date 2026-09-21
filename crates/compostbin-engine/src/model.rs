@@ -88,11 +88,12 @@ pub enum EnvVar {
 pub struct ExecSpec {
   pub arguments: Vec<String>,
   pub env: Vec<EnvVar>,
-  /// Whether the process gets the caller's stdin.
+  /// Whether the process reads the caller's stdin.
   pub interactive: bool,
   /// The container to run it in.
   pub name: String,
-  /// Whether it gets a terminal.
+  /// Whether it gets the caller's terminal. Only the caller's own stdio says
+  /// whether there is one, so an engine may run without it.
   pub tty: bool,
   /// The guest user, as the image names it. `None` is the image's default.
   pub user: Option<String>,

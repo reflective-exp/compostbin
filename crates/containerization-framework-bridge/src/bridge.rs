@@ -33,6 +33,9 @@ pub(crate) mod ffi {
       user: &str,
       working_directory: &str,
       terminal: i32,
+      stdin: i32,
+      stdout: i32,
+      stderr: i32,
     ) -> i32;
 
     // `plan` is JSON: it nests, and a step's script may contain the newline the

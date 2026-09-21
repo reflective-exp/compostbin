@@ -45,8 +45,16 @@ struct ExecRequest {
     /// The guest user, as the image names it. The image's default when absent.
     var user: String?
     var workingDirectory: String
-    /// The terminal to attach. `-1` runs the process without one.
+    /// The terminal the process reads and is sized against, or `-1` for a
+    /// caller that has none and attaches `stdin` instead.
     var terminal: Int32
+    /// The caller's own streams. Each is `-1` when it leaves that stream
+    /// unattached, and the guest reads or writes nothing on it. A process on a
+    /// terminal still writes to `stdout`, wherever that points, and has no
+    /// separate `stderr`.
+    var stdin: Int32
+    var stdout: Int32
+    var stderr: Int32
 }
 
 /// Virtualization's built-in NAT, as a guest joins it.
@@ -207,9 +215,19 @@ enum Session {
         // reads.
         let terminal = request.terminal < 0 ? nil : try Terminal(descriptor: request.terminal, setInitState: false)
 
+        // Descriptors are ours, duplicated for this attach; the writers close
+        // theirs, and the reader only stops reading, since it shares the
+        // caller's stdin.
+        let reader = handle(request.stdin).map(FileReader.init)
+        let out = handle(request.stdout).map { FileWriter($0, owned: true) }
+        let error = handle(request.stderr).map { FileWriter($0, owned: true) }
+
         // `defer`, so an error before the wait doesn't leave a reader on a
         // terminal someone is still typing at.
-        defer { try? terminal?.close() }
+        defer {
+            try? terminal?.close()
+            reader?.close()
+        }
 
         let process = try await booted.container.exec(request.id) { config in
             // Seeded from the image: a bare exec config runs as uid 0 with only
@@ -235,8 +253,20 @@ enum Session {
                 config.user = User(username: user)
             }
 
+            // Not `setTerminalIO`, which writes back to the terminal it reads.
+            // The caller's stdout may be somewhere else entirely, and this is
+            // what keeps a redirection its shell made. Its stderr has nowhere
+            // else to go: one pty carries every stream, and Containerization
+            // refuses a separate stderr beside `terminal`.
             if let terminal {
-                config.setTerminalIO(terminal: terminal)
+                config.terminal = true
+                config.environmentVariables.append("TERM=xterm")
+                config.stdin = terminal
+                config.stdout = out
+            } else {
+                config.stdin = reader
+                config.stdout = out
+                config.stderr = error
             }
         }
 
