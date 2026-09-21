@@ -144,10 +144,17 @@ impl Engine for RecordingEngine {
   }
 }
 
+/// What a posed builder has been asked to do.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BuildCall {
+  Build(BuildPlan),
+  Provision,
+}
+
 /// A `Builder` that builds nothing and keeps the plans it was given.
 #[derive(Debug, Default)]
 pub struct RecordingBuilder {
-  plans: RefCell<Vec<BuildPlan>>,
+  calls: RefCell<Vec<BuildCall>>,
 }
 
 impl RecordingBuilder {
@@ -155,15 +162,33 @@ impl RecordingBuilder {
     Self::default()
   }
 
+  /// Everything asked of it, in order.
+  pub fn calls(&self) -> Vec<BuildCall> {
+    self.calls.borrow().clone()
+  }
+
   /// Every plan given, in call order.
   pub fn plans(&self) -> Vec<BuildPlan> {
-    self.plans.borrow().clone()
+    self
+      .calls
+      .borrow()
+      .iter()
+      .filter_map(|call| match call {
+        BuildCall::Build(plan) => Some(plan.clone()),
+        BuildCall::Provision => None,
+      })
+      .collect()
   }
 }
 
 impl Builder for RecordingBuilder {
   fn build(&self, plan: &BuildPlan) -> Result<(), EngineError> {
-    self.plans.borrow_mut().push(plan.clone());
+    self.calls.borrow_mut().push(BuildCall::Build(plan.clone()));
+    Ok(())
+  }
+
+  fn provision(&self) -> Result<(), EngineError> {
+    self.calls.borrow_mut().push(BuildCall::Provision);
     Ok(())
   }
 }

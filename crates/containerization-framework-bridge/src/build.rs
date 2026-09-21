@@ -138,25 +138,6 @@ impl FrameworkBuilder {
     Self { store }
   }
 
-  /// Fetches the kernel and init image into the store if missing. Idempotent
-  /// and cheap, so a caller can run it before every build.
-  pub fn provision(&self) -> Result<(), EngineError> {
-    let wire = ProvisionWire {
-      store_root: self.store.root().display().to_string(),
-      kernel_path: self.store.kernel().display().to_string(),
-      kernel_url: KERNEL_URL,
-      kernel_in_archive: KERNEL_IN_ARCHIVE,
-      initfs_reference: INITFS_REFERENCE,
-    };
-
-    checked(ffi::czbridge_provision(&Self::json(
-      "provision the image store",
-      &wire,
-    )?))
-    .map(|_| ())
-    .map_err(|error| EngineError::failed("provision the image store", error))
-  }
-
   fn json(action: &str, wire: &impl Serialize) -> Result<String, EngineError> {
     serde_json::to_string(wire).map_err(|error| EngineError::failed(action.to_string(), error))
   }
@@ -178,6 +159,24 @@ impl Builder for FrameworkBuilder {
     checked(ffi::czbridge_build(&Self::json(&action, &wire)?))
       .map(|_| ())
       .map_err(|error| EngineError::failed(action, error))
+  }
+
+  /// Fetches the kernel and init image into the store if missing.
+  fn provision(&self) -> Result<(), EngineError> {
+    let wire = ProvisionWire {
+      store_root: self.store.root().display().to_string(),
+      kernel_path: self.store.kernel().display().to_string(),
+      kernel_url: KERNEL_URL,
+      kernel_in_archive: KERNEL_IN_ARCHIVE,
+      initfs_reference: INITFS_REFERENCE,
+    };
+
+    checked(ffi::czbridge_provision(&Self::json(
+      "provision the image store",
+      &wire,
+    )?))
+    .map(|_| ())
+    .map_err(|error| EngineError::failed("provision the image store", error))
   }
 }
 

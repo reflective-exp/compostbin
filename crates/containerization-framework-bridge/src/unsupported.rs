@@ -67,14 +67,14 @@ impl FrameworkBuilder {
   pub fn new(_store: Store) -> Self {
     Self
   }
-
-  pub fn provision(&self) -> Result<(), EngineError> {
-    Err(unsupported())
-  }
 }
 
 impl Builder for FrameworkBuilder {
   fn build(&self, _plan: &BuildPlan) -> Result<(), EngineError> {
+    Err(unsupported())
+  }
+
+  fn provision(&self) -> Result<(), EngineError> {
     Err(unsupported())
   }
 }

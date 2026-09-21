@@ -64,7 +64,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
           Ok(0)
         }
         AddOutcome::NeedsRestart => {
-          save_manifest(&session, &manifest_path, local)?;
+          session.manifest.save_to(&manifest_path, local)?;
           println!(
             "{} recorded; exit the running session and `compostbin run -- --continue` to mount it",
             canonical.display()
@@ -91,11 +91,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
     Command::Doctor => report_diagnosis(&load_session(&manifest_path, resolver, &project_dir)?),
 
     Command::Init => {
-      let mut manifest = Manifest::default();
-      manifest.project.name = project_dir
-        .file_name()
-        .map(|basename| basename.to_string_lossy().into_owned());
-      manifest.save(&manifest_path)?;
+      Manifest::named_after(&project_dir).save(&manifest_path)?;
       println!("wrote {}", manifest_path.display());
       Ok(0)
     }
@@ -149,10 +145,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
   }
 }
 
-/// Builds the base image, and the project's own when the manifest adds to it.
-///
-/// Provisions the store (kernel and init image) first so there's no separate
-/// setup command to remember.
+/// Says what a build is about to do, and builds it.
 fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn Error>> {
   println!(
     "building {} into {}",
@@ -164,10 +157,7 @@ fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn Error
     println!("then {}", session.image());
   }
 
-  let builder = FrameworkBuilder::new(Store::at(image::store(session)));
-
-  builder.provision()?;
-  image::build(session, &builder, cache)?;
+  image::build(session, &FrameworkBuilder::new(Store::at(image::store(session))), cache)?;
 
   Ok(0)
 }
@@ -221,17 +211,6 @@ fn select(session: &Session) -> Result<FrameworkEngine, Box<dyn Error>> {
     FrameworkEngine::new(session.resolve(SESSIONS_DIR), store)
       .reporting(|error| eprintln!("compostbin: a session client went away: {error}")),
   )
-}
-
-/// Writes back only the file the new entry belongs to.
-fn save_manifest(session: &Session, manifest_path: &Path, local: bool) -> Result<(), Box<dyn Error>> {
-  if local {
-    session.manifest.save_local(manifest_path)?;
-  } else {
-    session.manifest.save(manifest_path)?;
-  }
-
-  Ok(())
 }
 
 fn load_session(manifest_path: &Path, resolver: PathResolver, project_dir: &Path) -> Result<Session, Box<dyn Error>> {

@@ -41,6 +41,19 @@ pub struct Manifest {
 }
 
 impl Manifest {
+  /// The defaults, named after the project directory, as `init` writes them.
+  pub fn named_after(project_dir: &Path) -> Self {
+    Self {
+      project: ProjectConfig {
+        name: project_dir
+          .file_name()
+          .map(|basename| basename.to_string_lossy().into_owned()),
+        ..ProjectConfig::default()
+      },
+      ..Self::default()
+    }
+  }
+
   /// The committed manifest, plus the local one beside it when there is one.
   pub fn load(path: &Path) -> Result<Self, ManifestError> {
     let mut manifest = Self::parse(path)?;
@@ -100,6 +113,15 @@ impl Manifest {
   /// Creates the parent directory, so `init` works in a project with no `.config`.
   pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
     write_toml(path, self)
+  }
+
+  /// Writes back the file a new entry belongs to, and only that one.
+  pub fn save_to(&self, manifest_path: &Path, local: bool) -> Result<(), ManifestError> {
+    if local {
+      self.save_local(manifest_path)
+    } else {
+      self.save(manifest_path)
+    }
   }
 }
 
@@ -641,6 +663,21 @@ tty = true
     assert!(!rendered.contains("ports"), "{rendered}");
   }
 
+  #[test]
+  fn names_a_new_manifest_after_the_project_directory() {
+    let manifest = Manifest::named_after(Path::new("/home/someone/code/my-project"));
+
+    assert_eq!(manifest.project.name.as_deref(), Some("my-project"));
+    assert_eq!(manifest.project.image, DEFAULT_IMAGE);
+  }
+
+  /// A directory with no basename — `/`, or a relative `..` — is still a
+  /// project; it just goes unnamed.
+  #[test]
+  fn leaves_a_manifest_unnamed_when_the_directory_has_no_basename() {
+    assert_eq!(Manifest::named_after(Path::new("/")).project.name, None);
+  }
+
   /// TOML cannot express a bare value after a table, so `concurrency` has to
   /// serialise before `commands`; reversing that order breaks this save.
   #[test]
@@ -724,6 +761,31 @@ tty = true
     let rendered = toml::to_string(&manifest).expect("should serialize");
 
     assert!(!rendered.contains("paths"), "{rendered}");
+  }
+
+  /// `add --local` must leave the file the project commits alone.
+  #[test]
+  fn save_to_writes_only_the_file_the_new_entry_belongs_to() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
+    let mut manifest = Manifest::default();
+    manifest.save(&path).expect("save should succeed");
+    let committed = std::fs::read_to_string(&path).expect("manifest should exist");
+    manifest.paths.push(PathEntry {
+      local: true,
+      readonly: false,
+      source: "~/scratch".to_string(),
+      target: None,
+    });
+
+    manifest.save_to(&path, true).expect("save should succeed");
+
+    assert_eq!(std::fs::read_to_string(&path).expect("manifest"), committed);
+    assert!(
+      std::fs::read_to_string(local_path(&path))
+        .expect("local manifest should exist")
+        .contains("~/scratch")
+    );
   }
 
   #[test]

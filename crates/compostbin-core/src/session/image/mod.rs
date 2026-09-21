@@ -82,7 +82,11 @@ pub const GUEST_SCRIPTS: [(&str, &str); 3] = [
 ///
 /// The base is shared by every project, so anything belonging to one (a
 /// language toolchain, a private CA) goes in the derived image.
+///
+/// Provisions the store first, so there is no separate setup step to remember.
 pub fn build(session: &Session, builder: &impl Builder, cache: bool) -> Result<(), ImageError> {
+  builder.provision()?;
+
   let context = context(session);
   std::fs::create_dir_all(&context).at(&context)?;
 
@@ -232,7 +236,7 @@ pub fn store(session: &Session) -> PathBuf {
 mod tests {
   use super::*;
   use crate::fixtures::session;
-  use compostbin_engine::fake::RecordingBuilder;
+  use compostbin_engine::fake::{BuildCall, RecordingBuilder};
 
   /// The steps install each script by name, so a context missing one fails the
   /// build.
@@ -422,6 +426,17 @@ mod tests {
     assert_eq!(plans[0].tag, "compostbin/base:latest");
     assert_eq!(plans[1].tag, session.image());
     assert_eq!(plans[1].base, plans[0].tag);
+  }
+
+  /// Nothing builds without a kernel and an init image in the store.
+  #[test]
+  fn provisions_the_store_before_the_first_build() {
+    let (_home, session) = session("", "project");
+    let builder = RecordingBuilder::new();
+
+    build(&session, &builder, true).expect("build should succeed");
+
+    assert_eq!(builder.calls().first(), Some(&BuildCall::Provision));
   }
 
   #[test]
