@@ -155,15 +155,13 @@ enum Session {
         )
     }
 
-    /// `source\tdestination` — the wire form of
-    /// `apple_container::model::SocketRelay`.
+    /// `source\tdestination`, as `spec::sockets` writes it.
     ///
     /// Always `.into`: the guest reaches host services, never the reverse.
     ///
-    /// Mode 0666 matches what the CLI path gets incidentally (the host mode
-    /// copied onto a root-owned guest socket), which lets the unprivileged
-    /// `claude` open it. It could narrow once the guest-side owner is known.
-    /// Confinement comes from the session directory, not the mode.
+    /// Mode 0666 lets an unprivileged guest user open a socket the guest owns
+    /// as root. It could narrow once that user is known here. Confinement comes
+    /// from the session directory, not the mode.
     private static func relay(_ socket: String) throws -> UnixSocketConfiguration {
         let parts = try fields(socket, count: 2, kind: "socket")
 
@@ -175,7 +173,7 @@ enum Session {
         )
     }
 
-    /// `source\tdestination\tro?` — the wire form of `apple_container::model::Mount`.
+    /// `source\tdestination\tro?`, as `spec::mounts` writes it.
     private static func share(_ mount: String) throws -> Containerization.Mount {
         let parts = try fields(mount, count: 3, kind: "mount")
 
@@ -215,9 +213,8 @@ enum Session {
         // reads.
         let terminal = request.terminal < 0 ? nil : try Terminal(descriptor: request.terminal, setInitState: false)
 
-        // Descriptors are ours, duplicated for this attach; the writers close
-        // theirs, and the reader only stops reading, since it shares the
-        // caller's stdin.
+        // Every descriptor is a duplicate made for this attach, and closes with
+        // it; the caller keeps the streams they came from.
         let reader = handle(request.stdin).map(FileReader.init)
         let out = handle(request.stdout).map { FileWriter($0, owned: true) }
         let error = handle(request.stderr).map { FileWriter($0, owned: true) }
@@ -231,8 +228,8 @@ enum Session {
 
         let process = try await booted.container.exec(request.id) { config in
             // Seeded from the image: a bare exec config runs as uid 0 with only
-            // a default PATH, attaching Claude as root to an image that ends
-            // `USER claude`.
+            // a default PATH, so an image ending in a non-root `USER` would
+            // still run this process as root.
             if let imageConfig {
                 let fallback = config.environmentVariables
                 config = .init(from: imageConfig)
@@ -271,7 +268,7 @@ enum Session {
         }
 
         Sessions.shared.insert(process: process, id: request.id)
-        defer { Sessions.shared.removeProcess(request.id) }
+        defer { Sessions.shared.remove(process: request.id) }
 
         try await process.start()
 

@@ -28,8 +28,7 @@ import SystemPackage
 struct BuildStep: Decodable {
     /// The step's label in the build log.
     var name: String
-    /// The guest user, as the image names it. Root when absent, as `packages`
-    /// and `run_as_root` need.
+    /// The guest user, as the image names it. Root when absent.
     var user: String?
     var script: String
     /// Unsalted; see `Keys`.
@@ -106,8 +105,7 @@ enum Build {
             await Cache.holds(descriptor, in: contentStore)
         {
             note("\(plan.tag) is already built")
-            try? await imageStore.delete(reference: plan.tag)
-            try await imageStore.create(description: .init(reference: plan.tag, descriptor: descriptor))
+            try await retag(plan.tag, to: descriptor, in: imageStore)
             cache.evict()
             return
         }
@@ -150,10 +148,7 @@ enum Build {
             contentStore: contentStore
         )
 
-        // `create` will not replace an existing reference, which a rebuild
-        // always has.
-        try? await imageStore.delete(reference: plan.tag)
-        try await imageStore.create(description: .init(reference: plan.tag, descriptor: descriptor))
+        try await retag(plan.tag, to: descriptor, in: imageStore)
 
         cache.save(image: descriptor, as: keys.image)
 
@@ -243,8 +238,8 @@ enum Build {
                 config.process.workingDirectory = "/"
                 config.process.environmentVariables = environment
                 config.mounts += mounts
-                // Same NAT as a session: `apt-get` and `claude.ai/install.sh`
-                // need the network.
+                // Same NAT as a session: a step that installs anything needs
+                // the network.
                 nat.join(&config)
             }
 
@@ -297,6 +292,15 @@ enum Build {
             note("removing the rootfs left by \(directory.lastPathComponent)")
             try? FileManager.default.removeItem(at: directory)
         }
+    }
+
+    /// Points a reference at what this build produced.
+    ///
+    /// Delete first: `create` will not replace an existing reference, which a
+    /// rebuild always has.
+    private static func retag(_ reference: String, to descriptor: Descriptor, in imageStore: ImageStore) async throws {
+        try? await imageStore.delete(reference: reference)
+        try await imageStore.create(description: .init(reference: reference, descriptor: descriptor))
     }
 
     /// Deletes unreferenced blobs (chiefly the previous build's multi-gigabyte

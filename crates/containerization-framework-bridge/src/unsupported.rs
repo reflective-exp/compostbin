@@ -1,22 +1,33 @@
-//! Non-macOS engine and builder: same names and constructors, failing on first
-//! use, so the workspace compiles on Linux.
+//! Non-macOS engine and builder: the same surface as the macOS ones, failing on
+//! first use of anything that needs a VM, so the workspace compiles on Linux.
+//!
+//! Every method the macOS types have belongs here too, or the crates above
+//! stop building on Linux while still building on macOS.
 
 use crate::store::Store;
 use compostbin_engine::builder::Builder;
 use compostbin_engine::engine::Engine;
 use compostbin_engine::error::EngineError;
 use compostbin_engine::model::{BuildPlan, ExecSpec, RunSpec};
+use std::io;
 use std::path::PathBuf;
 
 fn unsupported() -> EngineError {
   EngineError::unavailable("use Containerization.framework", "it is macOS only")
 }
 
-pub struct FrameworkEngine;
+pub struct FrameworkEngine {
+  store: Store,
+}
 
 impl FrameworkEngine {
-  pub fn new(_runtime_dir: impl Into<PathBuf>, _store: Store) -> Self {
-    Self
+  pub fn new(_runtime_dir: impl Into<PathBuf>, store: Store) -> Self {
+    Self { store }
+  }
+
+  /// Nothing here attaches, so nothing ever breaks off.
+  pub fn reporting(self, _report: impl Fn(io::Error) + Send + Sync + 'static) -> Self {
+    self
   }
 }
 
@@ -25,8 +36,12 @@ impl Engine for FrameworkEngine {
     Err(unsupported())
   }
 
+  /// The store is plain files, so this answers on Linux as it does on macOS.
   fn images(&self) -> Result<Vec<String>, EngineError> {
-    Err(unsupported())
+    self
+      .store
+      .images()
+      .map_err(|error| EngineError::unavailable("read the image index", error))
   }
 
   fn is_running(&self, _name: &str) -> Result<bool, EngineError> {

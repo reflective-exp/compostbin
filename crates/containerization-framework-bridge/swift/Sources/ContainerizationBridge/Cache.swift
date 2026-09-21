@@ -20,7 +20,8 @@ import Foundation
 struct Keys {
     let base: String
     let steps: [String]
-    /// The last rootfs plus the config that never reaches it.
+    /// The last rootfs plus the user and working directory, which a rootfs
+    /// does not record.
     let image: String
 
     init(plan: BuildPlan, baseDigest: String) {
@@ -137,7 +138,6 @@ struct Cache {
             }
 
             for blob in manifest.layers + [manifest.config] {
-                // `try?` flattens the optional: nil is both missing and unreadable.
                 guard (try? await contentStore.get(digest: blob.digest)) != nil else {
                     return false
                 }

@@ -5,10 +5,10 @@
 //! command on its behalf.
 //!
 //! What crosses is the client's **stdio**, not its bytes: the request carries
-//! the client's descriptors via `SCM_RIGHTS` — its tty, or its stdin, stdout
-//! and stderr when it has none — and the owner hands them straight to the guest
-//! process. Nothing relays keystrokes, and the owner's code path is the same as
-//! for its own.
+//! the client's descriptors via `SCM_RIGHTS` — its tty and stdout, or its
+//! stdin, stdout and stderr when it has no tty — and the owner hands them
+//! straight to the guest process. Nothing relays keystrokes, and the owner's
+//! code path is the same as for its own.
 //!
 //! The socket carries only what a descriptor cannot: the request, a nudge per
 //! window resize, and the exit code back.
@@ -81,26 +81,25 @@ impl Stdio {
   /// Whoever runs the guest process closes what it is handed, and a caller
   /// keeps its own streams open, so each side works from a duplicate.
   pub fn try_clone(&self) -> io::Result<Self> {
-    self.mapped(crate::terminal::lend)
+    let mut cloned = Self::nothing();
+
+    for (label, descriptor) in self.attached() {
+      cloned.set(label, crate::terminal::lend(descriptor)?);
+    }
+
+    Ok(cloned)
   }
 
-  /// The same streams, each descriptor replaced by what `replace` makes of it.
-  fn mapped<E>(&self, replace: impl Fn(RawFd) -> Result<RawFd, E>) -> Result<Self, E> {
-    let mut mapped = Self {
+  fn nothing() -> Self {
+    Self {
       terminal: UNATTACHED,
       stdin: UNATTACHED,
       stdout: UNATTACHED,
       stderr: UNATTACHED,
-    };
-
-    for (label, descriptor) in self.attached() {
-      mapped.set(label, replace(descriptor)?);
     }
-
-    Ok(mapped)
   }
 
-  fn labelled(&self) -> [(char, RawFd); 4] {
+  fn labelled(&self) -> [(char, RawFd); MAX_DESCRIPTORS] {
     [
       ('t', self.terminal),
       ('i', self.stdin),
@@ -109,53 +108,49 @@ impl Stdio {
     ]
   }
 
+  /// Only `labelled` names the labels; anything else is a decoding bug, and
+  /// filing it under a stream would attach the caller to the wrong one.
   fn set(&mut self, label: char, descriptor: RawFd) {
     match label {
       't' => self.terminal = descriptor,
       'i' => self.stdin = descriptor,
       'o' => self.stdout = descriptor,
-      _ => self.stderr = descriptor,
+      'e' => self.stderr = descriptor,
+      other => unreachable!("{other} is not a stream `labelled` names"),
     }
   }
 
   /// Only the streams the caller attached, in the order they cross.
-  fn attached(&self) -> Vec<(char, RawFd)> {
+  fn attached(&self) -> impl Iterator<Item = (char, RawFd)> {
     self
       .labelled()
       .into_iter()
       .filter(|(_, descriptor)| *descriptor != UNATTACHED)
-      .collect()
   }
 
   fn descriptors(&self) -> Vec<RawFd> {
-    self
-      .attached()
-      .into_iter()
-      .map(|(_, descriptor)| descriptor)
-      .collect()
+    self.attached().map(|(_, descriptor)| descriptor).collect()
   }
 
   fn labels(&self) -> String {
-    self
-      .attached()
-      .into_iter()
-      .map(|(label, _)| label)
-      .collect()
+    self.attached().map(|(label, _)| label).collect()
   }
 
   /// Pairs the labels a request carried with the descriptors that came beside
   /// it. `None` when they disagree, or a label names no stream.
   fn from_labels(labels: &str, descriptors: &[RawFd]) -> Option<Self> {
-    if labels.chars().count() != descriptors.len() || labels.chars().any(|label| !"tioe".contains(label)) {
+    let named = |label: char| {
+      Self::nothing()
+        .labelled()
+        .iter()
+        .any(|(named, _)| *named == label)
+    };
+
+    if labels.chars().count() != descriptors.len() || !labels.chars().all(named) {
       return None;
     }
 
-    let mut stdio = Self {
-      terminal: UNATTACHED,
-      stdin: UNATTACHED,
-      stdout: UNATTACHED,
-      stderr: UNATTACHED,
-    };
+    let mut stdio = Self::nothing();
 
     for (label, descriptor) in labels.chars().zip(descriptors) {
       stdio.set(label, *descriptor);
@@ -337,8 +332,8 @@ where
   })
 }
 
-/// Asks the owner to run something on this process's stdio; blocks until the
-/// guest exits and returns its exit code. Nothing is relayed meanwhile.
+/// Asks the owner to run something on the given stdio; blocks until the guest
+/// exits and returns its exit code. Nothing is relayed meanwhile.
 ///
 /// `resized` returns whether this process's window changed size since last
 /// asked. The owner cannot see that for itself, so each change crosses as a
@@ -457,13 +452,22 @@ fn receive(stream: &UnixStream) -> io::Result<(String, Vec<OwnedFd>)> {
     (read as usize, descriptors)
   };
 
+  // A filled buffer is a request longer than `MAX_REQUEST`, whose tail the
+  // kernel dropped. Decoding what is left would run some truncated argument.
+  if read == payload.len() {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      format!("a request longer than {MAX_REQUEST} bytes"),
+    ));
+  }
+
   payload.truncate(read);
 
   Ok((String::from_utf8_lossy(&payload).into_owned(), descriptors))
 }
 
-/// A terminal, or stdin, stdout and stderr.
-const MAX_DESCRIPTORS: usize = 3;
+/// One per stream `Stdio` labels, which is every descriptor that can cross.
+const MAX_DESCRIPTORS: usize = 4;
 
 /// Buffer capacity for one `SCM_RIGHTS` message carrying `MAX_DESCRIPTORS`.
 /// `CMSG_SPACE` isn't const, so the exact length is computed at the call; this
@@ -647,7 +651,7 @@ mod tests {
 
     sending.join().expect("the sender should finish");
 
-    assert_eq!(descriptors.len(), MAX_DESCRIPTORS, "stdin, stdout and stderr");
+    assert_eq!(descriptors.len(), 3, "stdin, stdout and stderr");
 
     let numbers: Vec<RawFd> = descriptors.iter().map(AsRawFd::as_raw_fd).collect();
     let (decoded, received) = Request::decode(&payload, &numbers).expect("decode");

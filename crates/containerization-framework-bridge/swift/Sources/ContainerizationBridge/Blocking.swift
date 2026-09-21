@@ -33,11 +33,11 @@ func blocking<T>(_ body: @escaping @Sendable () async throws -> T) throws -> T {
 enum BridgeError: Error, CustomStringConvertible {
     /// Cannot happen: the semaphore is only signalled after `outcome` is set.
     case noOutcome
-    /// A bridged string had an unexpected shape: a bug in the Rust encoder.
+    /// A value the bridge could not parse: a malformed wire string, or a
+    /// setting that never made sense.
     case malformed(String, String)
-    /// An `exec`, `resize` or `stop` for a session this process does not own,
-    /// e.g. a second terminal reaching the wrong process. The control socket
-    /// prevents it.
+    /// An `exec` for a session this process does not hold, e.g. a joining
+    /// caller reaching the wrong process. The control socket prevents it.
     case notBooted(String)
     /// The binary is not signed for virtualization, usually a rebuild that was
     /// not re-signed.

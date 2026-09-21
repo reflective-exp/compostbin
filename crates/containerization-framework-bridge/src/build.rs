@@ -223,8 +223,8 @@ mod tests {
   }
 
   fn wire(plan: &BuildPlan) -> serde_json::Value {
-    // No step names the context mount, so the nonexistent context isn't read.
-    let keys = cache::keys(plan).expect("a plan with no context to read should key");
+    // No step names the mount's destination, so its source is never read.
+    let keys = cache::keys(plan).expect("a plan with no mount to read should key");
 
     serde_json::to_value(Wire::new(
       "cb-0123abcd".to_string(),
@@ -274,6 +274,13 @@ mod tests {
       "useCache",
     ] {
       assert!(json.get(key).is_some(), "the plan should carry {key}: {json}");
+    }
+
+    for key in ["source", "destination", "readonly"] {
+      assert!(
+        json["mounts"][0].get(key).is_some(),
+        "a mount should carry {key}: {json}"
+      );
     }
 
     assert_eq!(json["labels"]["com.example.built-by"], "example");

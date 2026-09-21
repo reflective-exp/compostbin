@@ -1,4 +1,5 @@
-//! The host end of an attached terminal.
+//! The host end of what a guest process is attached to: a terminal, and the
+//! descriptors of any stream.
 //!
 //! The guest has its own pty in the VM, so the host end must be raw: no line
 //! buffering, echo, or signal characters. Doing it twice shows up as doubled

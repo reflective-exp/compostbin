@@ -9,8 +9,7 @@
 // `@_cdecl` shims call with them, so they are part of the contract.
 //
 // Lists cross as newline-separated strings, so no element may contain a
-// newline (`host::request::Request::render` likewise refuses them in guest
-// requests).
+// newline; `spec::lines` writes them on the Rust side.
 //===----------------------------------------------------------------------===//
 
 import Foundation
@@ -33,8 +32,7 @@ private func reporting(_ body: () throws -> Int32) -> Int32 {
     }
 }
 
-/// A line in the build log, on stderr. Unprefixed: what to call this belongs to
-/// whoever linked the bridge, not to the bridge.
+/// A line in the build log, on stderr, unprefixed for the host to label.
 func note(_ message: String) {
     try? FileHandle.standardError.write(contentsOf: Data("\(message)\n".utf8))
 }

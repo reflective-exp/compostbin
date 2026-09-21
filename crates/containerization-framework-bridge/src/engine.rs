@@ -56,7 +56,9 @@ impl FrameworkEngine {
     control::socket_path(&self.runtime_dir.join(name))
   }
 
-  /// Whether this process is the one holding the VM.
+  /// Whether the VM belongs to this process, which only this process can say:
+  /// `Engine::is_running` asks the control socket, and that answers for any
+  /// process holding it.
   fn owns(&self, name: &str) -> bool {
     ffi::czbridge_is_running(name)
   }
@@ -87,8 +89,7 @@ impl FrameworkEngine {
     std::thread::spawn(move || {
       control::serve(
         &listener,
-        // Use the client's resolved request as-is; never substitute this
-        // process's environment.
+        // The request arrives resolved against the client's environment.
         |request, stdio, id| Self::attach(&name, id, request, stdio),
         |id, terminal| {
           let _ = ffi::czbridge_resize(id, terminal);

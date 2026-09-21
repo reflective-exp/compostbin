@@ -1,17 +1,18 @@
 //===----------------------------------------------------------------------===//
 // Descriptors as the streams Containerization reads and writes.
 //
-// A process with a terminal needs none of this: `Terminal` is both a
-// `ReaderStream` and a `Writer`. These cover everything else — a build step
-// logging to stderr, and a process attached to a caller that has no terminal.
+// `Terminal` is already both a `ReaderStream` and a `Writer`, so it needs none
+// of this. These cover every other stream: a build step's log, a caller's
+// stdin, stdout and stderr, and the stdout of a process reading a terminal.
 //===----------------------------------------------------------------------===//
 
 import Containerization
 import Foundation
 import Synchronization
 
-/// A descriptor the caller passed, as a handle this side closes. Negative is
-/// no descriptor: a stream the guest process leaves unattached.
+/// A descriptor as a handle, which neither closes nor is closed by the
+/// descriptor; whoever wraps it says when it closes. Negative is no descriptor:
+/// a stream the guest process leaves unattached.
 func handle(_ descriptor: Int32) -> FileHandle? {
     descriptor < 0 ? nil : FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
 }
@@ -45,8 +46,8 @@ final class FileReader: ReaderStream, @unchecked Sendable {
         }
     }
 
-    /// Drops the handler, so a process that exits with input still unread
-    /// leaves nothing reading the caller's stdin.
+    /// Drops the handler and closes the descriptor, so a process that exits
+    /// with input unread leaves nothing reading.
     func close() {
         handle.readabilityHandler = nil
         try? handle.close()

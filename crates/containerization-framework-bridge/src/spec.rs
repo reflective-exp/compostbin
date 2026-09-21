@@ -1,9 +1,9 @@
 //! Turning `compostbin_engine`'s specs into what the bridge carries.
 //!
 //! Lists cross as newline-separated strings, mounts as tab-separated triples
-//! within them. Neither separator can occur in the values: a mount is two
-//! host paths and a flag, and `host::request::Request` refuses arguments
-//! containing a newline.
+//! within them. Both separators are assumed absent from the values: a mount is
+//! two paths and a flag, and an argument or environment variable holding a
+//! newline would be read as two elements on the far side.
 
 use compostbin_engine::model::{EnvVar, Mount, SocketRelay};
 use std::path::Path;

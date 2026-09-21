@@ -50,7 +50,7 @@ final class Sessions: Sendable {
         processes.withLock { $0[id] }
     }
 
-    func removeProcess(_ id: String) {
+    func remove(process id: String) {
         _ = processes.withLock { $0.removeValue(forKey: id) }
     }
 }
