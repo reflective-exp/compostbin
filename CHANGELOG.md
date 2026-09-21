@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.9.0
+
 - Add `compostbin exec <command>`, which runs something other than Claude in the
   session, with `-t` for a terminal and `-U` / `--user <user>` for the guest
   user. `run` always attaches Claude, and `shell` is now `exec -t bash`.

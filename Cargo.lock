@@ -121,7 +121,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "compostbin-cli"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "clap",
  "compostbin-core",
@@ -132,7 +132,7 @@ dependencies = [
 
 [[package]]
 name = "compostbin-core"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "compostbin-engine",
  "libc",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "compostbin-engine"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "sha2",
  "tempfile",
@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "compostbin-test"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "compostbin-core",
  "tempfile",
@@ -166,7 +166,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "containerization-framework-bridge"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "compostbin-engine",
  "getrandom",
