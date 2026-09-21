@@ -789,10 +789,10 @@ impl Session {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::fixtures;
   use crate::session::credentials::FakeSource;
   use compostbin_engine::fake::{Call, RecordingEngine};
   use std::os::unix::fs::{FileTypeExt, MetadataExt};
-  use tempfile::TempDir;
 
   const MANIFEST: &str = r#"
 [project]
@@ -819,15 +819,9 @@ source   = "~/.cargo/registry"
     )
   }
 
-  /// A session whose home really exists, for the tests that create a container
-  /// and so write a mount record.
-  fn session_under(base: &std::path::Path) -> Session {
-    Session::new(
-      toml::from_str(MANIFEST).expect("manifest should parse"),
-      PathResolver::new(base.join("workspace/compostbin"), base),
-      base.join("workspace/compostbin"),
-    )
-  }
+  /// Where `MANIFEST`'s project sits under a temp home: inside `~/workspace`,
+  /// so it is covered by that root.
+  const PROJECT: &str = "workspace/compostbin";
 
   fn quiet(_: Notice) {}
 
@@ -903,9 +897,7 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn run_attaches_to_an_already_running_container() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = session_under(&base);
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
     let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
     run(&session, &engine);
@@ -919,9 +911,7 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn run_attaches_another_process_to_a_running_container() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = session_under(&base);
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
     let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
     session
@@ -940,9 +930,7 @@ source   = "~/.cargo/registry"
   /// A shell can start the session as well as Claude can.
   #[test]
   fn run_creates_a_container_for_another_process() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = session_under(&base);
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
     let engine = RecordingEngine::new();
 
     session
@@ -965,9 +953,7 @@ source   = "~/.cargo/registry"
   /// Another session's container is not this one: `run` creates its own.
   #[test]
   fn run_creates_a_container_that_is_not_running() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = session_under(&base);
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
     let engine = RecordingEngine::with_running(&["compostbin-other"]);
 
     run(&session, &engine);
@@ -986,9 +972,7 @@ source   = "~/.cargo/registry"
   /// Only an image's first run unpacks it, and only that one says so.
   #[test]
   fn run_says_when_it_unpacks_the_image_first() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = session_under(&base);
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
     let image = session.run_spec().image;
     let unpacking = |engine: &RecordingEngine| {
       let said = std::sync::Mutex::new(Vec::new());
@@ -1013,9 +997,7 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn run_passes_its_arguments_through_to_claude() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = session_under(&base);
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
     let engine = RecordingEngine::new();
 
     let process = Process::claude(&["--continue".to_string()]);
@@ -1030,10 +1012,6 @@ source   = "~/.cargo/registry"
       ["claude".to_string(), "--continue".to_string()]
     );
     assert_eq!(session.process_spec(&process).user, Some("claude".to_string()));
-  }
-
-  fn setup_spec(session: &Session, line: &str) -> ExecSpec {
-    session.setup_spec(line)
   }
 
   /// Otherwise a line reads the stdin a piped `run -- -p` meant for Claude.
@@ -1051,9 +1029,7 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn run_sets_up_a_new_container_before_starting_claude() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let mut session = session_under(&base);
+    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
     session.manifest.container.setup = vec!["./bin/setup".to_string(), "true".to_string()];
     let engine = RecordingEngine::new();
 
@@ -1062,8 +1038,8 @@ source   = "~/.cargo/registry"
     assert_eq!(
       engine.calls()[3..],
       [
-        Call::Exec(setup_spec(&session, "./bin/setup")),
-        Call::Exec(setup_spec(&session, "true")),
+        Call::Exec(session.setup_spec("./bin/setup")),
+        Call::Exec(session.setup_spec("true")),
         claude(&session),
       ]
     );
@@ -1072,9 +1048,7 @@ source   = "~/.cargo/registry"
   /// The creator already set it up.
   #[test]
   fn joining_a_running_session_sets_nothing_up() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let mut session = session_under(&base);
+    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
     session.manifest.container.setup = vec!["./bin/setup".to_string()];
     let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
@@ -1086,9 +1060,7 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn failed_setup_does_not_start_claude() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let mut session = session_under(&base);
+    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
     session.manifest.container.setup = vec!["false".to_string(), "true".to_string()];
     let engine = RecordingEngine::exiting_with(3);
     let said = std::sync::Mutex::new(Vec::new());
@@ -1103,15 +1075,13 @@ source   = "~/.cargo/registry"
 
     assert_eq!(code, 3);
     assert_eq!(said.into_inner().expect("unpoisoned"), [("false".to_string(), 3)]);
-    assert_eq!(engine.calls().last(), Some(&Call::Exec(setup_spec(&session, "false"))));
+    assert_eq!(engine.calls().last(), Some(&Call::Exec(session.setup_spec("false"))));
   }
 
   /// A shell may be there to find out why setup fails.
   #[test]
   fn failed_setup_still_starts_another_process() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let mut session = session_under(&base);
+    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
     session.manifest.container.setup = vec!["false".to_string(), "true".to_string()];
     let engine = RecordingEngine::exiting_with(3);
     let said = std::sync::Mutex::new(Vec::new());
@@ -1128,7 +1098,7 @@ source   = "~/.cargo/registry"
     assert_eq!(
       engine.calls()[3..],
       [
-        Call::Exec(setup_spec(&session, "false")),
+        Call::Exec(session.setup_spec("false")),
         Call::Exec(session.process_spec(&root_shell())),
       ],
       "setup stops at the failing line"
@@ -1144,8 +1114,7 @@ source   = "~/.cargo/registry"
     let temp = tempfile::Builder::new()
       .tempdir_in("/tmp")
       .expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let mut session = session_under(&base);
+    let (_temp, mut session) = fixtures::session_in(temp, MANIFEST, PROJECT);
     session.manifest.host.ports = vec![7001];
     let engine = RecordingEngine::new();
 
@@ -1163,9 +1132,7 @@ source   = "~/.cargo/registry"
   /// is using.
   #[test]
   fn joining_a_running_session_binds_nothing() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let mut session = session_under(&base);
+    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
     session.manifest.host.ports = vec![7001];
 
     run(&session, &RecordingEngine::with_running(&["compostbin-cb"]));
@@ -1175,9 +1142,7 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn run_says_when_there_is_no_token_to_seed() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = session_under(&base);
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
     let said = std::sync::Mutex::new(Vec::new());
     let engine = RecordingEngine::with_unpacked(&[&session.run_spec().image]);
 
@@ -1195,9 +1160,7 @@ source   = "~/.cargo/registry"
   /// reaches the session it creates, not the one after.
   #[test]
   fn creating_the_container_writes_the_briefing() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = session_under(&base);
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
 
     run(&session, &RecordingEngine::new());
 
@@ -1219,9 +1182,8 @@ source   = "~/.cargo/registry"
   /// which the manifest stops describing once edited.
   #[test]
   fn records_the_mounts_the_container_was_created_with() {
-    let temp = TempDir::new().expect("temp dir");
+    let (temp, mut session) = fixtures::session(MANIFEST, PROJECT);
     let base = temp.path().canonicalize().expect("canonical temp");
-    let mut session = session_under(&base);
     let engine = RecordingEngine::new();
 
     run(&session, &engine);
@@ -1251,9 +1213,7 @@ source   = "~/.cargo/registry"
   /// that container is still up.
   #[test]
   fn creating_a_container_sweeps_the_last_ones_leftovers() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let mut session = session_under(&base);
+    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
     session.manifest.host =
       toml::from_str("[commands.test]\nargv = [\"cargo\", \"nextest\", \"run\"]\n").expect("host config should parse");
     session
@@ -1277,9 +1237,8 @@ source   = "~/.cargo/registry"
   /// The same edit, once the container has actually been recreated.
   #[test]
   fn recreating_the_container_records_the_new_mounts() {
-    let temp = TempDir::new().expect("temp dir");
+    let (temp, mut session) = fixtures::session(MANIFEST, PROJECT);
     let base = temp.path().canonicalize().expect("canonical temp");
-    let mut session = session_under(&base);
 
     run(&session, &RecordingEngine::new());
     session.manifest.paths.push(PathEntry {
@@ -1437,13 +1396,7 @@ source   = "~/.cargo/registry"
   /// nothing behind.
   #[test]
   fn prepares_the_spool_only_when_commands_are_declared() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let mut session = Session::new(
-      toml::from_str(MANIFEST).expect("manifest should parse"),
-      PathResolver::new(base.join("project"), &base),
-      base.join("project"),
-    );
+    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
 
     session
       .prepare_host_spool()
@@ -1626,13 +1579,7 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn cleans_transient_state_but_keeps_the_conversation() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = Session::new(
-      toml::from_str(MANIFEST).expect("manifest should parse"),
-      PathResolver::new(base.join("project"), &base),
-      base.join("project"),
-    );
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
     Spool::new(session.host_spool())
       .create()
       .expect("create spool");
@@ -1677,13 +1624,7 @@ source   = "~/.cargo/registry"
   /// present and permanently empty.
   #[test]
   fn cleaning_keeps_the_inode_a_running_container_mounts() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = Session::new(
-      toml::from_str(MANIFEST).expect("manifest should parse"),
-      PathResolver::new(base.join("project"), &base),
-      base.join("project"),
-    );
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
     Spool::new(session.host_spool())
       .create()
       .expect("create spool");
@@ -1704,13 +1645,7 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn exit_cleanup_keeps_managed_settings() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = Session::new(
-      toml::from_str(MANIFEST).expect("manifest should parse"),
-      PathResolver::new(base.join("project"), &base),
-      base.join("project"),
-    );
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
     Spool::new(session.host_spool())
       .create()
       .expect("create spool");
@@ -1739,13 +1674,7 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn cleaning_everything_takes_the_session_directory() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = Session::new(
-      toml::from_str(MANIFEST).expect("manifest should parse"),
-      PathResolver::new(base.join("project"), &base),
-      base.join("project"),
-    );
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
     std::fs::create_dir_all(session.claude_home()).expect("create claude home");
 
     assert_eq!(
@@ -1757,13 +1686,7 @@ source   = "~/.cargo/registry"
 
   #[test]
   fn cleaning_state_that_is_already_gone_is_not_an_error() {
-    let temp = TempDir::new().expect("temp dir");
-    let base = temp.path().canonicalize().expect("canonical temp");
-    let session = Session::new(
-      toml::from_str(MANIFEST).expect("manifest should parse"),
-      PathResolver::new(base.join("project"), &base),
-      base.join("project"),
-    );
+    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
 
     assert_eq!(
       session.clean(true).expect("clean should succeed"),

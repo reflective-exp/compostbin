@@ -75,10 +75,9 @@ fn listed(name: &str, status: Status, detail: impl Into<String>, items: Vec<Stri
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::manifest::Manifest;
+  use crate::fixtures;
   use crate::session::credentials::{CREDENTIALS_FILE_NAME, FakeSource};
   use crate::session::record::Record;
-  use crate::workspace::paths::PathResolver;
   use compostbin_engine::fake::RecordingEngine;
   use std::path::Path;
   use tempfile::TempDir;
@@ -91,16 +90,14 @@ mod tests {
   fn session(home: &TempDir, roots: &str) -> Session {
     let base = home.path().canonicalize().expect("canonical temp");
     std::fs::create_dir_all(base.join("workspace")).expect("create root");
-    let manifest: Manifest = toml::from_str(&format!(
-      "[claude]\nhome = \"{}\"\n\n[project]\nname = \"cb\"\n\n[workspace]\nroots = [{roots}]\n",
-      base.join("claude-home").display()
-    ))
-    .expect("manifest should parse");
 
-    Session::new(
-      manifest,
-      PathResolver::new(base.join("project"), &base),
-      base.join("project"),
+    fixtures::session_at(
+      &base,
+      &format!(
+        "[claude]\nhome = \"{}\"\n\n[project]\nname = \"cb\"\n\n[workspace]\nroots = [{roots}]\n",
+        base.join("claude-home").display()
+      ),
+      "project",
     )
   }
 

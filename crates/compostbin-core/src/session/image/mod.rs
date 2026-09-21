@@ -231,27 +231,14 @@ pub fn store(session: &Session) -> PathBuf {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::manifest::Manifest;
-  use crate::workspace::paths::PathResolver;
+  use crate::fixtures::session;
   use compostbin_engine::fake::RecordingBuilder;
-  use tempfile::TempDir;
-
-  fn session(home: &TempDir) -> Session {
-    let base = home.path().canonicalize().expect("canonical temp");
-
-    Session::new(
-      Manifest::default(),
-      PathResolver::new(base.join("project"), &base),
-      base.join("project"),
-    )
-  }
 
   /// The steps install each script by name, so a context missing one fails the
   /// build.
   #[test]
   fn writes_every_guest_script_into_the_build_context() {
-    let home = TempDir::new().expect("temp dir");
-    let session = session(&home);
+    let (_home, session) = session("", "project");
 
     build(&session, &RecordingBuilder::new(), true).expect("build should succeed");
 
@@ -265,8 +252,7 @@ mod tests {
 
   #[test]
   fn builds_the_base_from_debian_into_the_manifests_image() {
-    let home = TempDir::new().expect("temp dir");
-    let session = session(&home);
+    let (_home, session) = session("", "project");
     let plan = base_plan(&session);
 
     assert_eq!(plan.base, BASE_IMAGE);
@@ -288,8 +274,8 @@ mod tests {
 
   #[test]
   fn base_image_ends_as_an_unprivileged_user_in_the_workspace() {
-    let home = TempDir::new().expect("temp dir");
-    let plan = base_plan(&session(&home));
+    let (_home, session) = session("", "project");
+    let plan = base_plan(&session);
 
     assert_eq!(plan.user, Some(USER.to_string()), "a session must not run as root");
     assert_eq!(plan.workdir, Some(PathBuf::from(WORKSPACE_TARGET)));
@@ -298,8 +284,8 @@ mod tests {
 
   #[test]
   fn base_image_installs_claude_code_and_the_guest_scripts() {
-    let home = TempDir::new().expect("temp dir");
-    let plan = base_plan(&session(&home));
+    let (_home, session) = session("", "project");
+    let plan = base_plan(&session);
     let scripts = plan
       .steps
       .iter()
@@ -329,9 +315,9 @@ mod tests {
   /// user at the end, and there is no user to drop to until `useradd` has run.
   #[test]
   fn every_base_step_runs_as_root() {
-    let home = TempDir::new().expect("temp dir");
+    let (_home, session) = session("", "project");
 
-    for step in base_plan(&session(&home)).steps {
+    for step in base_plan(&session).steps {
       assert_eq!(step.user, None, "{} should run as root", step.name);
     }
   }
@@ -340,8 +326,7 @@ mod tests {
   /// bigger session must not resize the build.
   #[test]
   fn the_session_memory_does_not_reach_the_build() {
-    let home = TempDir::new().expect("temp dir");
-    let mut session = session(&home);
+    let (_home, mut session) = session("", "project");
     session.manifest.container.cpus = 16;
     session.manifest.container.memory = crate::manifest::Memory::gibibytes(16);
     session.manifest.image.packages = vec!["jq".to_string()];
@@ -356,17 +341,17 @@ mod tests {
 
   #[test]
   fn adds_nothing_to_the_base_image_by_default() {
-    let home = TempDir::new().expect("temp dir");
+    let (_home, session) = session("", "project");
 
-    assert_eq!(project_plan(&session(&home)), None);
+    assert_eq!(project_plan(&session), None);
   }
 
   #[test]
   fn builds_a_project_image_from_manifest_additions() {
-    let home = TempDir::new().expect("temp dir");
-    let mut session = session(&home);
-    session.manifest = toml::from_str("[image]\npackages = [\"jq\"]\nrun = [\"echo hook >> ~/.bashrc\"]\n")
-      .expect("manifest should parse");
+    let (_home, session) = session(
+      "[image]\npackages = [\"jq\"]\nrun = [\"echo hook >> ~/.bashrc\"]\n",
+      "project",
+    );
     let plan = project_plan(&session).expect("additions should produce a plan");
 
     assert_eq!(
@@ -393,12 +378,10 @@ mod tests {
   /// image drops to the user the session runs as.
   #[test]
   fn runs_root_lines_between_the_packages_and_the_user_lines() {
-    let home = TempDir::new().expect("temp dir");
-    let mut session = session(&home);
-    session.manifest = toml::from_str(
+    let (_home, session) = session(
       "[image]\npackages = [\"ca-certificates\"]\nrun_as_root = [\"cp /tmp/ca.crt /usr/local/share/ca-certificates/\", \"update-ca-certificates\"]\nrun = [\"echo hook >> ~/.bashrc\"]\n",
-    )
-    .expect("manifest should parse");
+      "project",
+    );
 
     let steps = project_plan(&session)
       .expect("additions should produce a plan")
@@ -415,10 +398,7 @@ mod tests {
   /// Root lines with no packages: the only steps, and still as root.
   #[test]
   fn runs_root_lines_alone() {
-    let home = TempDir::new().expect("temp dir");
-    let mut session = session(&home);
-    session.manifest =
-      toml::from_str("[image]\nrun_as_root = [\"install -d /opt/vendor\"]\n").expect("manifest should parse");
+    let (_home, session) = session("[image]\nrun_as_root = [\"install -d /opt/vendor\"]\n", "project");
 
     let plan = project_plan(&session).expect("additions should produce a plan");
 
@@ -431,8 +411,7 @@ mod tests {
 
   #[test]
   fn builds_the_project_image_after_the_base() {
-    let home = TempDir::new().expect("temp dir");
-    let mut session = session(&home);
+    let (_home, mut session) = session("", "project");
     session.manifest.image.packages = vec!["jq".to_string()];
     let builder = RecordingBuilder::new();
 
@@ -447,8 +426,7 @@ mod tests {
 
   #[test]
   fn builds_only_the_base_when_the_manifest_adds_nothing() {
-    let home = TempDir::new().expect("temp dir");
-    let session = session(&home);
+    let (_home, session) = session("", "project");
     let builder = RecordingBuilder::new();
 
     build(&session, &builder, true).expect("build should succeed");

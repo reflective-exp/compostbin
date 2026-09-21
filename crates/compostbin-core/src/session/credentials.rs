@@ -84,16 +84,10 @@ pub fn seed(claude_home: &Path, enabled: bool, source: &impl CredentialSource) -
   Ok(SeedOutcome::Seeded)
 }
 
-#[cfg(unix)]
 fn restrict_to_owner(path: &Path) -> Result<(), CredentialError> {
   use std::os::unix::fs::PermissionsExt;
 
   Ok(std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).at(path)?)
-}
-
-#[cfg(not(unix))]
-fn restrict_to_owner(_path: &Path) -> Result<(), CredentialError> {
-  Ok(())
 }
 
 #[cfg(test)]
@@ -108,12 +102,12 @@ mod tests {
     FakeSource(Some(SECRET.to_string()))
   }
 
-  fn credentials_path(home: &TempDir) -> PathBuf {
-    home.path().join("claude-home").join(CREDENTIALS_FILE_NAME)
-  }
-
   fn claude_home(home: &TempDir) -> PathBuf {
     home.path().join("claude-home")
+  }
+
+  fn credentials_path(home: &TempDir) -> PathBuf {
+    claude_home(home).join(CREDENTIALS_FILE_NAME)
   }
 
   #[test]
@@ -165,7 +159,6 @@ mod tests {
   }
 
   #[test]
-  #[cfg(unix)]
   fn writes_the_token_readable_only_by_its_owner() {
     use std::os::unix::fs::PermissionsExt;
     let home = TempDir::new().expect("temp dir");

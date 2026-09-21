@@ -10,12 +10,13 @@ use crate::host::request::{Request, Resolved, resolve};
 use crate::host::spool::{Spool, publish};
 use crate::host::{
   CHUNK_SIZE, ERROR_STREAM, INPUT_EOF_SUFFIX, INPUT_SUFFIX, OUTPUT_STREAM, REJECTED_EXIT_CODE, REQUEST_SUFFIX,
-  SEQUENCE_WIDTH, SIGNALLED_EXIT_CODE, STATUS_SUFFIX, TTY_SUFFIX,
+  SEQUENCE_WIDTH, SIGNAL_EXIT_BASE, STATUS_SUFFIX, TTY_SUFFIX,
 };
 use crate::manifest::HostCommand;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -129,7 +130,11 @@ fn run_claimed(
   });
 
   match status {
-    Ok(status) => Ok(status.code().unwrap_or(SIGNALLED_EXIT_CODE)),
+    Ok(status) => Ok(
+      status
+        .code()
+        .unwrap_or_else(|| SIGNAL_EXIT_BASE + status.signal().unwrap_or_default()),
+    ),
     Err(source) => Err(PathError::new(&argv[0], source)),
   }
 }

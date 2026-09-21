@@ -329,13 +329,13 @@ mod tests {
   fn mounts_by_basename_under_workspace() {
     let mut workspace = Workspace::new();
 
-    workspace.push("/Users/sax/workspace/compostbin", None, Origin::Project, false);
+    workspace.push("/Users/user/workspace/compostbin", None, Origin::Project, false);
 
     assert_eq!(
       workspace.entries(),
       [Entry {
         guest: "/workspace/compostbin".into(),
-        host: "/Users/sax/workspace/compostbin".into(),
+        host: "/Users/user/workspace/compostbin".into(),
         origin: Origin::Project,
         readonly: false,
       }]
@@ -346,11 +346,11 @@ mod tests {
   fn keeps_the_host_layout_out_of_the_guest_path() {
     let mut workspace = Workspace::new();
 
-    workspace.push("/Users/sax/code/libfoo", None, Origin::Explicit, true);
+    workspace.push("/Users/user/code/libfoo", None, Origin::Explicit, true);
 
     let guest = &workspace.entries()[0].guest;
     assert!(
-      !guest.display().to_string().contains("sax"),
+      !guest.display().to_string().contains("/Users"),
       "the guest path must not leak the host account: {}",
       guest.display()
     );
@@ -360,8 +360,8 @@ mod tests {
   fn disambiguates_a_repeated_basename() {
     let mut workspace = Workspace::new();
 
-    workspace.push("/Users/sax/work/libfoo", None, Origin::Root, false);
-    workspace.push("/Users/sax/vendor/libfoo", None, Origin::Explicit, true);
+    workspace.push("/Users/user/work/libfoo", None, Origin::Root, false);
+    workspace.push("/Users/user/vendor/libfoo", None, Origin::Explicit, true);
     workspace.push("/opt/libfoo", None, Origin::Explicit, true);
 
     let guests: Vec<String> = workspace
@@ -380,7 +380,7 @@ mod tests {
     let mut workspace = Workspace::new();
 
     workspace.push(
-      "/Users/sax/code/libfoo",
+      "/Users/user/code/libfoo",
       Some("/opt/libfoo".into()),
       Origin::Explicit,
       false,
@@ -392,14 +392,14 @@ mod tests {
   #[test]
   fn translates_a_path_under_an_entry() {
     let mut workspace = Workspace::new();
-    workspace.push("/Users/sax/workspace", None, Origin::Root, false);
+    workspace.push("/Users/user/workspace", None, Origin::Root, false);
 
     assert_eq!(
-      workspace.guest_path(Path::new("/Users/sax/workspace/compostbin/src")),
+      workspace.guest_path(Path::new("/Users/user/workspace/compostbin/src")),
       Some(PathBuf::from("/workspace/workspace/compostbin/src"))
     );
     assert_eq!(
-      workspace.guest_path(Path::new("/Users/sax/workspace")),
+      workspace.guest_path(Path::new("/Users/user/workspace")),
       Some(PathBuf::from("/workspace/workspace"))
     );
   }
@@ -407,9 +407,9 @@ mod tests {
   #[test]
   fn translates_nothing_outside_every_entry() {
     let mut workspace = Workspace::new();
-    workspace.push("/Users/sax/workspace", None, Origin::Root, false);
+    workspace.push("/Users/user/workspace", None, Origin::Root, false);
 
-    assert_eq!(workspace.guest_path(Path::new("/Users/sax/other")), None);
-    assert_eq!(workspace.guest_path(Path::new("/Users/sax/workspace-old")), None);
+    assert_eq!(workspace.guest_path(Path::new("/Users/user/other")), None);
+    assert_eq!(workspace.guest_path(Path::new("/Users/user/workspace-old")), None);
   }
 }

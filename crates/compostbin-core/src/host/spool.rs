@@ -45,9 +45,18 @@ impl Spool {
 
     for directory in [self.requests(), self.running(), self.responses()] {
       for entry in std::fs::read_dir(&directory).at(&directory)? {
-        let path = entry.at(&directory)?.path();
+        let entry = entry.at(&directory)?;
+        let path = entry.path();
 
-        std::fs::remove_file(&path).at(&path)?;
+        // The guest writes here too, and nothing stops it leaving a directory
+        // behind: one left in place would fail every later `clean`.
+        let removed = if entry.file_type().at(&path)?.is_dir() {
+          std::fs::remove_dir_all(&path)
+        } else {
+          std::fs::remove_file(&path)
+        };
+
+        removed.at(&path)?;
       }
     }
 

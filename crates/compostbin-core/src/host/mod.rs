@@ -41,9 +41,9 @@ pub const PARTIAL_SUFFIX: &str = ".partial";
 
 /// The shell's "found but not executable" — the closest existing meaning.
 pub const REJECTED_EXIT_CODE: i32 = 126;
-/// Killed by a signal. The shell says 128 + signal, but the number is not worth
-/// a unix-only import.
-pub const SIGNALLED_EXIT_CODE: i32 = 128;
+/// Killed by a signal: this plus the signal, as a shell reports it. Seven bits
+/// of signal, so the sum still fits the guest's `exit` byte.
+pub const SIGNAL_EXIT_BASE: i32 = 128;
 
 /// Numbered chunks (`<id>.out.000001`, …), not one growing file: a growing file
 /// stays stale across the mount, so every inode the guest opens must already be

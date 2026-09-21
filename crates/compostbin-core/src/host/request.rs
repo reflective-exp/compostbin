@@ -106,9 +106,11 @@ pub fn resolve(commands: &BTreeMap<String, HostCommand>, request: &Request) -> R
 fn is_denied(deny: &[String], argument: &str) -> bool {
   deny.iter().any(|denied| {
     let short = denied.len() == 2 && denied.starts_with('-') && denied != "--";
-    argument == denied
-      || argument.starts_with(&format!("{denied}="))
-      || (short && argument.starts_with(denied.as_str()))
+
+    match argument.strip_prefix(denied.as_str()) {
+      Some(rest) => rest.is_empty() || rest.starts_with('=') || short,
+      None => false,
+    }
   })
 }
 

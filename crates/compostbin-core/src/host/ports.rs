@@ -239,45 +239,35 @@ trait Stream: Sync {
   fn configure(&self) -> io::Result<()>;
 }
 
-impl Stream for UnixStream {
-  fn read_some(&self, buffer: &mut [u8]) -> io::Result<usize> {
-    (&mut &*self).read(buffer)
-  }
+/// Both ends answer the same inherent methods, so both impls are the same
+/// lines; a blanket one cannot reach `shutdown` or the timeout setters, which
+/// no trait declares.
+macro_rules! impl_stream {
+  ($socket:ty) => {
+    impl Stream for $socket {
+      fn read_some(&self, buffer: &mut [u8]) -> io::Result<usize> {
+        (&mut &*self).read(buffer)
+      }
 
-  fn write_some(&self, data: &[u8]) -> io::Result<usize> {
-    (&mut &*self).write(data)
-  }
+      fn write_some(&self, data: &[u8]) -> io::Result<usize> {
+        (&mut &*self).write(data)
+      }
 
-  fn shutdown_write(&self) -> io::Result<()> {
-    self.shutdown(Shutdown::Write)
-  }
+      fn shutdown_write(&self) -> io::Result<()> {
+        self.shutdown(Shutdown::Write)
+      }
 
-  fn configure(&self) -> io::Result<()> {
-    self.set_nonblocking(false)?;
-    self.set_read_timeout(Some(POLL_INTERVAL))?;
-    self.set_write_timeout(Some(POLL_INTERVAL))
-  }
+      fn configure(&self) -> io::Result<()> {
+        self.set_nonblocking(false)?;
+        self.set_read_timeout(Some(POLL_INTERVAL))?;
+        self.set_write_timeout(Some(POLL_INTERVAL))
+      }
+    }
+  };
 }
 
-impl Stream for TcpStream {
-  fn read_some(&self, buffer: &mut [u8]) -> io::Result<usize> {
-    (&mut &*self).read(buffer)
-  }
-
-  fn write_some(&self, data: &[u8]) -> io::Result<usize> {
-    (&mut &*self).write(data)
-  }
-
-  fn shutdown_write(&self) -> io::Result<()> {
-    self.shutdown(Shutdown::Write)
-  }
-
-  fn configure(&self) -> io::Result<()> {
-    self.set_nonblocking(false)?;
-    self.set_read_timeout(Some(POLL_INTERVAL))?;
-    self.set_write_timeout(Some(POLL_INTERVAL))
-  }
-}
+impl_stream!(UnixStream);
+impl_stream!(TcpStream);
 
 /// An EOF for the guest, then whatever it already sent is read and dropped:
 /// closing with unread data would reset the connection instead.
@@ -391,14 +381,15 @@ mod tests {
     }
   }
 
-  /// Reads everything the guest sends, then echoes it back — so a reply at all
-  /// means the guest's half-close reached upstream.
-  fn echo_once() -> (TcpListener, SocketAddr) {
+  /// An upstream listener and the address a forward reaches it at.
+  fn upstream_listener() -> (TcpListener, SocketAddr) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
     let address = listener.local_addr().expect("upstream address");
     (listener, address)
   }
 
+  /// Reads everything the guest sends, then echoes it back — so a reply at all
+  /// means the guest's half-close reached upstream.
   fn serve_echo(listener: &TcpListener) {
     let mut stream = accept_within(listener);
     let mut received = Vec::new();
@@ -510,7 +501,7 @@ mod tests {
   #[test]
   fn relays_after_half_close() {
     let directory = TempDir::new().expect("temp dir");
-    let (upstream, address) = echo_once();
+    let (upstream, address) = upstream_listener();
     let forward = forward(&directory, address);
     let stop = AtomicBool::new(false);
     let events = Mutex::new(Vec::new());
@@ -534,7 +525,7 @@ mod tests {
     const CONNECTIONS: u32 = 10;
 
     let directory = TempDir::new().expect("temp dir");
-    let (upstream, address) = echo_once();
+    let (upstream, address) = upstream_listener();
     let forward = forward(&directory, address);
     let stop = AtomicBool::new(false);
     let events = Mutex::new(Vec::new());
@@ -596,8 +587,8 @@ mod tests {
   #[test]
   fn stops_with_a_connection_open() {
     let directory = TempDir::new().expect("temp dir");
-    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
-    let forward = forward(&directory, upstream.local_addr().expect("upstream address"));
+    let (upstream, address) = upstream_listener();
+    let forward = forward(&directory, address);
     let stop = AtomicBool::new(false);
     let events = Mutex::new(Vec::new());
     let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");

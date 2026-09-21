@@ -10,6 +10,8 @@
 
 pub mod doctor;
 pub mod error;
+#[cfg(test)]
+mod fixtures;
 pub mod host;
 pub mod manifest;
 pub mod session;
