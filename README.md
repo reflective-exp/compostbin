@@ -4,7 +4,7 @@ Run Claude Code in a container.
 
 compostbin uses Apple's
 [Containerization](https://github.com/apple/containerization) framework to
-attempt to contain Claude, building the image as well as running it. The current
+run Claude in a container, building the image as well as running it. The current
 directory is bind-mounted into the guest, so edits land directly on the host with
 no syncing.
 
@@ -34,7 +34,7 @@ compostbin doctor       # check the store, the image, credentials, the mounts
 compostbin run          # start the session and attach Claude
 ```
 
-Everything a session can see lands under `/workspace` in the guest.
+Configured paths mount under `/workspace` in the guest.
 
 ### init
 
@@ -45,8 +45,7 @@ in; see [Configuration](#configuration). Uncommitted settings go in
 ### build
 
 `compostbin build` builds the base image: Debian, Claude Code, and the tools a
-session needs. One image serves every project (unless project-specific overrides
-are configured), so it is rarely rebuilt.
+session needs.
 
 The first build provisions the store at `~/.cache/compostbin/images`, downloading
 a kernel from
@@ -54,9 +53,8 @@ a kernel from
 and pulling the `vminit` image from ghcr.io.
 
 If the manifest has an `[image]` table, a project image is built on top of the
-base with those additions (language toolchains, private CAs, other tools).
-
-Each build runs every step: there is no build cache.
+base with those additions (language toolchains, private CAs, other tools). Without
+`[image]` configuration, sessions start from the same base image.
 
 ### doctor
 
@@ -86,10 +84,7 @@ The session's Claude home is per-project, outlives the container, and is the
 session's `CLAUDE_CONFIG_DIR`, so `--continue` resumes the last run's
 conversation.
 
-compostbin serves the session's host commands while Claude is attached; both
-stop when Claude exits.
-
-Claude gets a terminal whenever this side has one on both stdin and stdout.
+Claude gets a terminal whenever the host side has one on both stdin and stdout.
 Redirect or pipe either, and the session runs on plain streams instead, so
 `echo "..." | compostbin run -- -p` and `compostbin run -- -p > answer.txt`
 work as written.
@@ -140,8 +135,7 @@ conversation with the new mount.
 `--local` records the entry in `.config/compostbin.local.toml`.
 
 Without `--force`, `add` refuses obvious mistakes: `~`, `/`, `~/.ssh`, anything
-holding credentials. This is a guardrail, not a boundary; the container runs
-with your privileges either way.
+holding credentials.
 
 ### ls
 
@@ -319,9 +313,6 @@ A session is a virtual machine owned by the compostbin process, through
 [Containerization](https://github.com/apple/containerization). Builds use the
 same library; see [Building images](#building-images).
 
-`Engine` has no `build`: image building is `compostbin_engine::builder`,
-separate from sessions.
-
 ### Who owns the VM
 
 A `LinuxContainer` dies with the process that created it, so `compostbin run`
@@ -329,13 +320,9 @@ A `LinuxContainer` dies with the process that created it, so `compostbin run`
 leaving the session ends the VM, and `compostbin clean` removes what it left
 behind.
 
-`run` and `shell` talk over a unix socket in the session's state directory. What
-crosses is the client's **terminal**, not its bytes: the request carries the
-client's tty descriptor via `SCM_RIGHTS`, and `run` hands it to the guest
-process as stdio. The guest talks to the real terminal, nothing relays
-keystrokes, and attaching works the same whether the terminal is `run`'s own or
-came over the socket. The socket carries only the request, a nudge on each
-window resize, and the exit code.
+`run` and `shell` talk over a unix socket in the session's state directory. Client
+streams cross it — its terminal, or its stdin, stdout and stderr —
+and the guest process gets them directly.
 
 When `run` exits, the VM ends, and so does any attached `shell`.
 
@@ -388,7 +375,7 @@ before applying the session's arguments and environment.
 The Swift side lives in `crates/containerization-framework/swift`, bridged to
 the crate around it with
 [swift-bridge](https://github.com/chinedufn/swift-bridge). It needs Xcode 26
-and macOS 26; `cargo build` stages the package into `OUT_DIR` and runs
+and macOS 26; `cargo build` stages the package into `<target>/<profile>` and runs
 `swift build` there from that crate's `build.rs`.
 
 `containerization-framework` is a general binding, published on its own and
