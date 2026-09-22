@@ -60,6 +60,7 @@ func czbridge_boot(
     image_reference: RustStr,
     cpus: Int32,
     memory_in_bytes: UInt64,
+    rootfs_capacity_in_bytes: UInt64,
     mounts: RustStr,
     sockets: RustStr,
     environment: RustStr,
@@ -77,6 +78,7 @@ func czbridge_boot(
             imageReference: image_reference.toString(),
             cpus: Int(cpus),
             memoryInBytes: memory_in_bytes,
+            rootfsCapacityInBytes: rootfs_capacity_in_bytes,
             mounts: lines(mounts),
             sockets: lines(sockets),
             environment: lines(environment),
@@ -122,7 +124,8 @@ func czbridge_provision(spec: RustStr) -> Int32 {
 ///
 /// `terminal` is a descriptor in this process: its own, or one a joining caller
 /// passed over the control socket. `-1` runs without a terminal. An empty
-/// `user` means the image's default.
+/// `user` means the image's default, and an empty `term` leaves `TERM` to the
+/// image.
 func czbridge_exec(
     name: RustStr,
     id: RustStr,
@@ -130,6 +133,7 @@ func czbridge_exec(
     environment: RustStr,
     user: RustStr,
     working_directory: RustStr,
+    term: RustStr,
     terminal: Int32,
     stdin: Int32,
     stdout: Int32,
@@ -137,6 +141,7 @@ func czbridge_exec(
 ) -> Int32 {
     reporting {
         let user = user.toString()
+        let term = term.toString()
         let request = ExecRequest(
             name: name.toString(),
             id: id.toString(),
@@ -144,6 +149,7 @@ func czbridge_exec(
             environment: lines(environment),
             user: user.isEmpty ? nil : user,
             workingDirectory: working_directory.toString(),
+            term: term.isEmpty ? nil : term,
             terminal: terminal,
             stdin: stdin,
             stdout: stdout,

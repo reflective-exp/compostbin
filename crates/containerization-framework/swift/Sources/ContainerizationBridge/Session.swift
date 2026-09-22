@@ -24,9 +24,12 @@ struct BootSpec {
     var imageReference: String
     var cpus: Int
     var memoryInBytes: UInt64
+    /// Ceiling for the image's unpacked rootfs, which is sparse.
+    var rootfsCapacityInBytes: UInt64
     /// `source\tdestination\tro?`, one per line.
     var mounts: [String]
-    /// `source\tdestination`, one per line. Host sockets relayed in, not mounted.
+    /// `source\tdestination\tmode\tdirection`, one per line. Sockets are
+    /// relayed, not mounted.
     var sockets: [String]
     var environment: [String]
     var arguments: [String]
@@ -45,6 +48,9 @@ struct ExecRequest {
     /// The guest user, as the image names it. The image's default when absent.
     var user: String?
     var workingDirectory: String
+    /// What a process on a terminal reports as `TERM`. Nil leaves it to the
+    /// image, and is ignored by a process without one.
+    var term: String?
     /// The terminal the process reads and is sized against, or `-1` for a
     /// caller that has none and attaches `stdin` instead.
     var terminal: Int32
@@ -119,7 +125,8 @@ enum Session {
         let image = try await manager.imageStore.get(reference: spec.imageReference)
         let paths = container(spec.name, in: root)
         try FileManager.default.createDirectory(at: paths.directory, withIntermediateDirectories: true)
-        let rootfs = try await Unpacked(store: root).rootfs(for: image, at: paths.rootfs)
+        let rootfs = try await Unpacked(store: root, capacityInBytes: spec.rootfsCapacityInBytes)
+            .rootfs(for: image, at: paths.rootfs)
 
         let mounts = try spec.mounts.map(share)
         let sockets = try spec.sockets.map(relay)
@@ -155,21 +162,33 @@ enum Session {
         )
     }
 
-    /// `source\tdestination`, as `spec::sockets` writes it.
+    /// `source\tdestination\tmode\tdirection`, as `wire::sockets` writes it,
+    /// the mode in octal.
     ///
-    /// Always `.into`: the guest reaches host services, never the reverse.
-    ///
-    /// Mode 0666 lets an unprivileged guest user open a socket the guest owns
-    /// as root. It could narrow once that user is known here. Confinement comes
-    /// from the session directory, not the mode.
+    /// The mode is the caller's: 0666 lets an unprivileged guest user open a
+    /// socket the guest owns as root, and a caller that knows its guest user
+    /// can narrow it. Confinement comes from the directory, not the mode.
     private static func relay(_ socket: String) throws -> UnixSocketConfiguration {
-        let parts = try fields(socket, count: 2, kind: "socket")
+        let parts = try fields(socket, count: 4, kind: "socket")
+
+        // `CModeT` is 16-bit, so a mode that doesn't fit is malformed rather
+        // than silently truncated to a wider one the caller meant.
+        guard let mode = CModeT(parts[2], radix: 8) else {
+            throw BridgeError.malformed("socket mode", String(parts[2]))
+        }
+
+        let direction: UnixSocketConfiguration.Direction =
+            switch parts[3] {
+            case "into": .into
+            case "outof": .outOf
+            default: throw BridgeError.malformed("socket direction", String(parts[3]))
+            }
 
         return UnixSocketConfiguration(
             source: URL(filePath: String(parts[0])),
             destination: URL(filePath: String(parts[1])),
-            permissions: FilePermissions(rawValue: 0o666),
-            direction: .into
+            permissions: FilePermissions(rawValue: mode),
+            direction: direction
         )
     }
 
@@ -257,7 +276,11 @@ enum Session {
             // refuses a separate stderr beside `terminal`.
             if let terminal {
                 config.terminal = true
-                config.environmentVariables.append("TERM=xterm")
+
+                if let term = request.term {
+                    config.environmentVariables.append("TERM=\(term)")
+                }
+
                 config.stdin = terminal
                 config.stdout = out
             } else {

@@ -1,23 +1,35 @@
-//! `Engine`, backed by Containerization.framework.
+//! [`Engine`] and [`Builder`], backed by the `containerization-framework` crate.
 //!
-//! A container lives *in* this process, not a daemon. So:
+//! That crate boots a container and runs processes in it; everything around
+//! that is here, because it is compostbin's rather than the framework's:
 //!
-//! - The VM lives exactly as long as this process; whichever command creates it
-//!   also starts the control socket through which later ones join.
-//! - Nothing lists containers. A container is up iff something answers on its
-//!   control socket (one per container, under the runtime directory).
+//! - a container lives *in* the process that booted it, so whichever command
+//!   creates one also serves the control socket through which later ones join
+//!   ([`control`], [`terminal`]);
+//! - nothing lists containers, so a container is up iff something answers on
+//!   its control socket;
+//! - where a guest sits on the NAT network ([`nat`]), what a builder container
+//!   is called, and what invalidates a build ([`crate::cache`]) are all
+//!   compostbin's to decide ([`spec`]).
 
-use crate::control::Stdio;
-use crate::store::{INITFS_REFERENCE, Store};
-use crate::{checked, control, ffi, spec, terminal};
-use compostbin_engine::engine::Engine;
-use compostbin_engine::error::EngineError;
-use compostbin_engine::model::{ExecSpec, RunSpec};
+mod control;
+mod nat;
+mod spec;
+mod terminal;
+
+use crate::builder::Builder;
+use crate::cache;
+use crate::engine::Engine;
+use crate::error::EngineError;
+use crate::model::{BuildPlan, ExecSpec, RunSpec};
+use containerization_framework::{self as framework, Session, Stdio};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+pub use containerization_framework::{Store, StoreError};
 
 /// Set by the SIGWINCH handler. One per process: a process attaches at most
 /// one terminal.
@@ -26,13 +38,21 @@ static RESIZED: AtomicBool = AtomicBool::new(false);
 /// The owner's exec id; can't collide with a joiner's `attach-<n>`.
 const OWNER_ATTACH: &str = "attach-owner";
 
+/// What an attach that never ran reports. Outside the guest exit code range.
+const FAILED: i32 = -1;
+
+/// Whatever the framework said, as the error compostbin reports.
+fn failed(action: impl Into<String>, error: framework::Error) -> EngineError {
+  EngineError::failed(action, error)
+}
+
 pub struct FrameworkEngine {
   /// Told about a joined client whose attach broke, since that leaves the rest
   /// of the session running and has no call to return to. Ignored by default.
   attach_failed: Arc<dyn Fn(io::Error) + Send + Sync>,
   /// One directory per container, holding its control socket.
   runtime_dir: PathBuf,
-  store: Store,
+  session: Session,
 }
 
 impl FrameworkEngine {
@@ -40,7 +60,7 @@ impl FrameworkEngine {
     Self {
       attach_failed: Arc::new(|_| {}),
       runtime_dir: runtime_dir.into(),
-      store,
+      session: Session::new(store),
     }
   }
 
@@ -56,43 +76,46 @@ impl FrameworkEngine {
     control::socket_path(&self.runtime_dir.join(name))
   }
 
-  /// Whether the VM belongs to this process, which only this process can say:
-  /// `Engine::is_running` asks the control socket, and that answers for any
-  /// process holding it.
-  fn owns(&self, name: &str) -> bool {
-    ffi::czbridge_is_running(name)
-  }
-
   /// Runs a guest process against the caller's stdio, as the owner of the VM.
-  fn attach(name: &str, id: &str, request: &control::Request, stdio: &Stdio) -> i32 {
-    ffi::czbridge_exec(
-      name,
-      id,
-      &spec::lines(&request.arguments),
-      &spec::lines(&request.environment),
-      request.user.as_deref().unwrap_or(""),
-      &request.working_directory,
-      stdio.terminal,
-      stdio.stdin,
-      stdio.stdout,
-      stdio.stderr,
-    )
+  fn attach(
+    session: &Session,
+    name: &str,
+    id: &str,
+    request: &control::Request,
+    stdio: Stdio,
+  ) -> Result<i32, framework::Error> {
+    session.exec(&framework::ExecRequest {
+      environment: request.environment.clone(),
+      user: request.user.clone(),
+      workdir: Some(PathBuf::from(&request.working_directory)),
+      ..framework::ExecRequest::new(name, id, request.arguments.clone(), stdio)
+    })
   }
 
   /// Serves attaches from other callers on a detached thread, never joined:
   /// it ends with the process, as does the VM.
+  ///
+  /// A joiner's attach has no call to return an error to, so a failure comes
+  /// back as the code reserved for one and is reported beside it.
   fn serve_control_socket(&self, name: String) -> Result<(), EngineError> {
     let path = self.socket(&name);
     let listener = control::bind(&path).map_err(|error| EngineError::failed("bind the control socket", error))?;
     let attach_failed = Arc::clone(&self.attach_failed);
+    let session = Session::new(self.session.store().clone());
 
     std::thread::spawn(move || {
       control::serve(
         &listener,
         // The request arrives resolved against the client's environment.
-        |request, stdio, id| Self::attach(&name, id, request, stdio),
+        |request, stdio, id| match Self::attach(&session, &name, id, request, *stdio) {
+          Ok(code) => code,
+          Err(error) => {
+            attach_failed(io::Error::other(error.to_string()));
+            FAILED
+          }
+        },
         |id, terminal| {
-          let _ = ffi::czbridge_resize(id, terminal);
+          let _ = session.resize(id, terminal);
         },
         |error| attach_failed(error),
       );
@@ -109,7 +132,7 @@ impl Engine for FrameworkEngine {
     // streams it interacts through are terminals. A piped prompt or a
     // redirected `run > log` leaves the guest without one, rather than writing
     // a terminal's escapes into whatever the caller redirected to.
-    let attached = spec.tty && terminal::is_tty(descriptor) && terminal::is_tty(libc::STDOUT_FILENO);
+    let attached = spec.tty && framework::is_tty(descriptor) && framework::is_tty(libc::STDOUT_FILENO);
 
     // Raw while attached, restored on drop. See `terminal` for why.
     let _raw = if attached {
@@ -134,13 +157,13 @@ impl Engine for FrameworkEngine {
     };
 
     // The owner attaches directly; anyone else asks the owner to.
-    if self.owns(&spec.name) {
-      // Duplicates, since the Swift side closes what it is given.
+    if self.session.is_running(&spec.name) {
+      // Duplicates, since the framework closes what it is given.
       let duplicated = stdio
         .try_clone()
         .map_err(|error| EngineError::failed("duplicate the caller's stdio", error))?;
 
-      let attach = || Self::attach(&spec.name, OWNER_ATTACH, &request, &duplicated);
+      let attach = || Self::attach(&self.session, &spec.name, OWNER_ATTACH, &request, duplicated);
 
       // This process holds the terminal and the VM, so it resizes the guest
       // directly; a joiner has to ask over the control socket.
@@ -148,7 +171,7 @@ impl Engine for FrameworkEngine {
         terminal::while_resizing(
           &resized,
           || {
-            let _ = ffi::czbridge_resize(OWNER_ATTACH, descriptor);
+            let _ = self.session.resize(OWNER_ATTACH, descriptor);
           },
           attach,
         )
@@ -156,7 +179,7 @@ impl Engine for FrameworkEngine {
         attach()
       };
 
-      return checked(code).map_err(|error| EngineError::failed("exec", error));
+      return code.map_err(|error| failed("exec", error));
     }
 
     // Not duplicated: `SCM_RIGHTS` already copies each one, and the owner dups
@@ -168,58 +191,67 @@ impl Engine for FrameworkEngine {
   /// Read from the store's index; there is no daemon to ask.
   fn images(&self) -> Result<Vec<String>, EngineError> {
     self
-      .store
+      .session
       .images()
       .map_err(|error| EngineError::unavailable("read the image index", error))
   }
 
   fn run(&self, spec: &RunSpec) -> Result<(), EngineError> {
-    // The VM dies with its process, so nothing cleans up the previous run's
-    // container directory. Start from a fresh rootfs clone, matching
-    // `Session::start`'s delete-stopped-container semantics.
-    let _ = std::fs::remove_dir_all(self.store.container_dir(&spec.name));
+    self
+      .session
+      .boot(&spec::boot(spec))
+      .map_err(|error| failed("boot", error))?;
 
-    let code = ffi::czbridge_boot(
-      &spec.name,
-      &self.store.root().display().to_string(),
-      &self.store.kernel().display().to_string(),
-      INITFS_REFERENCE,
-      &spec.image,
-      spec.resources.cpus as i32,
-      spec.resources.memory_in_bytes,
-      &spec::lines(&spec::mounts(&spec.mounts)),
-      &spec::lines(&spec::sockets(&spec.sockets)),
-      &spec::lines(&spec::environment(&spec.env)),
-      &spec::lines(&spec.arguments),
-      &spec::working_directory(spec.workdir.as_deref()),
-      &spec::nat_address(&spec.name),
-      spec::NAT_GATEWAY,
-    );
-
-    checked(code).map_err(|error| EngineError::failed("boot", error))?;
     self.serve_control_socket(spec.name.clone())
   }
 
   fn is_running(&self, name: &str) -> Result<bool, EngineError> {
     // A socket file with nothing answering is a container that died with its
-    // owner.
+    // owner. Not `Session::is_running`, which answers for this process alone.
     Ok(control::served(&self.socket(name)))
   }
 
   fn is_unpacked(&self, image: &str) -> Result<bool, EngineError> {
-    let code = ffi::czbridge_is_unpacked(&self.store.root().display().to_string(), image);
-
-    Ok(checked(code).map_err(|error| EngineError::failed("find the image", error))? == 1)
+    self
+      .session
+      .is_unpacked(image)
+      .map_err(|error| failed("find the image", error))
   }
 
-  /// Names both boot artefacts: pinned separately, and a mismatch fails only
-  /// at runtime.
   fn version(&self) -> Result<Option<String>, EngineError> {
-    Ok(Some(format!(
-      "Containerization {}, kernel {}",
-      crate::INITFS_VERSION,
-      crate::KERNEL_VERSION
-    )))
+    Ok(Some(Session::version()))
+  }
+}
+
+pub struct FrameworkBuilder {
+  builder: framework::Builder,
+}
+
+impl FrameworkBuilder {
+  pub fn new(store: Store) -> Self {
+    Self {
+      builder: framework::Builder::new(store),
+    }
+  }
+}
+
+impl Builder for FrameworkBuilder {
+  fn build(&self, plan: &BuildPlan) -> Result<(), EngineError> {
+    let action = format!("build {}", plan.tag);
+    let keys = cache::keys(plan)?;
+    let name = spec::builder_name().map_err(|error| EngineError::failed(&action, error))?;
+
+    self
+      .builder
+      .build(&spec::build(plan, &keys, name))
+      .map_err(|error| failed(action, error))
+  }
+
+  fn provision(&self) -> Result<(), EngineError> {
+    self
+      .builder
+      .provision()
+      .map_err(|error| failed("provision the image store", error))
   }
 }
 

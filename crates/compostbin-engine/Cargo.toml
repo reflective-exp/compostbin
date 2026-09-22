@@ -7,6 +7,9 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+containerization-framework.workspace = true
+getrandom.workspace = true
+libc.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]

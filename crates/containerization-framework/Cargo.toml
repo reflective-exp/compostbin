@@ -1,0 +1,44 @@
+[package]
+build = "build.rs"
+categories = ["api-bindings", "virtualization"]
+description = "Rust bindings for Apple's Containerization framework: Linux containers in lightweight VMs, in-process and without a daemon."
+edition.workspace = true
+keywords = ["containerization", "container", "macos", "virtualization", "oci"]
+license.workspace = true
+name = "containerization-framework"
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+# The Swift package is an input to the build script, not a cargo target, so it
+# ships whole. `.build` and the generated glue are gitignored and so excluded
+# already; naming the sources keeps the tarball the same whatever is lying
+# around a working tree.
+include = [
+  "/README.md",
+  "/build.rs",
+  "/containerization.entitlements",
+  "/src/**/*.rs",
+  "/swift/Package.resolved",
+  "/swift/Package.swift",
+  "/swift/Sources/**/*.h",
+  "/swift/Sources/**/*.swift",
+]
+
+[dependencies]
+libc.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+serde.workspace = true
+swift-bridge.workspace = true
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+swift-bridge-build.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+strict = []

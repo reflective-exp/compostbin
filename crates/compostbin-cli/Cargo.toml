@@ -15,10 +15,9 @@ name = "compostbin"
 path = "src/main.rs"
 
 [dependencies]
-compostbin-engine.workspace = true
 clap.workspace = true
 compostbin-core.workspace = true
-containerization-framework-bridge.workspace = true
+compostbin-engine.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

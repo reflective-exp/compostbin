@@ -126,7 +126,6 @@ dependencies = [
  "clap",
  "compostbin-core",
  "compostbin-engine",
- "containerization-framework-bridge",
  "tempfile",
 ]
 
@@ -145,6 +144,9 @@ dependencies = [
 name = "compostbin-engine"
 version = "0.9.0"
 dependencies = [
+ "containerization-framework",
+ "getrandom",
+ "libc",
  "sha2",
  "tempfile",
 ]
@@ -165,11 +167,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
-name = "containerization-framework-bridge"
+name = "containerization-framework"
 version = "0.9.0"
 dependencies = [
- "compostbin-engine",
- "getrandom",
  "libc",
  "serde",
  "serde_json",

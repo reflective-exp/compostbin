@@ -11,7 +11,7 @@ use compostbin_core::session::{AddOutcome, Notice, Process, Session};
 use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
-use containerization_framework_bridge::{FrameworkBuilder, FrameworkEngine, Store, StoreError};
+use compostbin_engine::containerization::{FrameworkBuilder, FrameworkEngine, Store, StoreError};
 use std::error::Error;
 use std::io::IsTerminal;
 use std::path::Path;

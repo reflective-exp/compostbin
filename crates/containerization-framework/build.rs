@@ -1,30 +1,68 @@
 //! Generates the FFI glue, builds the Swift package, and tells cargo how to
 //! link it.
 //!
-//! macOS only. Elsewhere the engine and builder are stand-ins
-//! (`unsupported.rs`) and this does nothing, so the workspace still checks on
-//! Linux.
+//! The package is staged into `OUT_DIR`, at
+//! `target/<profile>/containerization-framework-swift`.
+//!
+//! SwiftPM's build directory stays out of `OUT_DIR`, which is keyed by this
+//! script's fingerprint — editing this file, or the rustflags cargo was invoked
+//! with, yields a new one. That directory holds the compiled dependency graph, so
+//! a copy per fingerprint costs ~2 GiB and a full rebuild of Containerization.
+//!
+//! macOS only. On other platforms the session and builder are stand-ins
+//! (`unsupported.rs`) that compile, but return errors on every invocation.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// swift-bridge's generated header directory; `bridging-header.h` imports it.
 const BRIDGE: &str = "containerization-bridge";
 const PACKAGE: &str = "ContainerizationBridge";
 
+/// Never copied into the staged package: SwiftPM's build directory, and glue
+/// this script regenerates.
+const NOT_INPUTS: [&str; 2] = [".build", "generated"];
+
 fn manifest_dir() -> PathBuf {
   PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
 }
 
-fn swift_package_dir() -> PathBuf {
+fn out_dir() -> PathBuf {
+  PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"))
+}
+
+fn source_package_dir() -> PathBuf {
   manifest_dir()
     .join("swift")
     .canonicalize()
     .expect("the swift package is committed inside this crate")
 }
 
-fn swift_source_dir() -> PathBuf {
-  swift_package_dir().join("Sources").join(PACKAGE)
+fn source_sources_dir() -> PathBuf {
+  source_package_dir().join("Sources").join(PACKAGE)
+}
+
+fn staged_package_dir() -> PathBuf {
+  out_dir().join("swift")
+}
+
+/// SwiftPM's build directory, one per profile.
+///
+/// `OUT_DIR` is `<target>/<profile>/build/<crate>-<fingerprint>/out`, so the
+/// profile directory is its fourth ancestor. Cargo documents no part of that
+/// layout, so a path that doesn't match it falls back to `OUT_DIR`.
+fn scratch_dir() -> PathBuf {
+  let out = out_dir();
+  let profile = out.ancestors().nth(3).filter(|_| {
+    out
+      .ancestors()
+      .nth(2)
+      .is_some_and(|dir| dir.ends_with("build"))
+  });
+
+  profile
+    .unwrap_or(&out)
+    .join("containerization-framework-swift")
 }
 
 fn is_release() -> bool {
@@ -37,7 +75,7 @@ fn is_release() -> bool {
 /// caller inside the module (the callers are across the C ABI), and strips
 /// them, leaving two undefined `__swift_bridge__$…` symbols at link time.
 /// Debug builds don't optimise, so `cargo test` never shows it.
-fn publish_bridge_shims(generated: &std::path::Path) {
+fn publish_bridge_shims(generated: &Path) {
   let path = generated.join(BRIDGE).join(format!("{BRIDGE}.swift"));
   let source = std::fs::read_to_string(&path).expect("swift-bridge should have just written the glue");
   let published = source.replace("\nfunc __swift_bridge__", "\npublic func __swift_bridge__");
@@ -53,20 +91,15 @@ fn publish_bridge_shims(generated: &std::path::Path) {
   std::fs::write(&path, published).expect("the generated glue should be writable");
 }
 
-/// Copies generated glue into the package, skipping unchanged files and
-/// removing files this run didn't write.
-///
-/// SwiftPM and cargo's `rerun-if-changed` both key off mtimes, so rewriting
-/// identical bytes would recompile the module and rerun this script. SwiftPM
-/// compiles every file in the directory, so glue from an earlier run has to
-/// go: it calls a bridge that no longer exists.
-fn sync_generated(staged: &std::path::Path, generated: &std::path::Path) {
-  std::fs::create_dir_all(generated).expect("the generated directory should be creatable");
+/// Mirrors `from` onto `to`, skipping unchanged files and removing anything
+/// this run didn't write. SwiftPM keys off mtimes.
+fn mirror(from: &Path, to: &Path, skip: &[&str]) {
+  std::fs::create_dir_all(to).expect("the destination should be creatable");
 
-  for entry in std::fs::read_dir(generated).expect("the generated directory was just created") {
+  for entry in std::fs::read_dir(to).expect("the destination was just created") {
     let entry = entry.expect("a readable directory entry");
 
-    if staged.join(entry.file_name()).exists() {
+    if from.join(entry.file_name()).exists() {
       continue;
     }
 
@@ -77,36 +110,51 @@ fn sync_generated(staged: &std::path::Path, generated: &std::path::Path) {
       std::fs::remove_file(&stale)
     };
 
-    removed.expect("stale generated glue should be removable");
+    removed.expect("a stale staged file should be removable");
   }
 
-  for entry in std::fs::read_dir(staged).expect("swift-bridge should have just written the glue") {
+  for entry in std::fs::read_dir(from).expect("the source directory should be readable") {
     let entry = entry.expect("a readable directory entry");
-    let destination = generated.join(entry.file_name());
+    let name = entry.file_name();
 
-    if entry.file_type().expect("a stat-able entry").is_dir() {
-      sync_generated(&entry.path(), &destination);
+    if skip.iter().any(|skipped| name == *skipped) {
       continue;
     }
 
-    let fresh = std::fs::read(entry.path()).expect("a readable generated file");
+    let destination = to.join(&name);
+
+    if entry.file_type().expect("a stat-able entry").is_dir() {
+      mirror(&entry.path(), &destination, skip);
+      continue;
+    }
+
+    let fresh = std::fs::read(entry.path()).expect("a readable source file");
 
     if std::fs::read(&destination).is_ok_and(|current| current == fresh) {
       continue;
     }
 
-    std::fs::write(&destination, fresh).expect("the generated glue should be writable");
+    std::fs::write(&destination, fresh).expect("the staged file should be writable");
   }
 }
 
-/// Compiles the Swift package to a static library.
+/// Compiles the staged package to a static library.
 ///
 /// The bridging header is set in the package's `swiftSettings`, not via
-/// `-Xswiftc`, which SwiftPM would apply to every target in the graph.
+/// `-Xswiftc`, which SwiftPM would apply to every target in the graph. It
+/// resolves against `#filePath`, so it follows the package to `OUT_DIR`.
+///
+/// The scratch path holds every dependency's checkout as well as the compiled
+/// output, hydrated from SwiftPM's cache.
 fn compile_swift() {
   let mut command = Command::new("swift");
 
-  command.current_dir(swift_package_dir()).arg("build");
+  command
+    .arg("build")
+    .arg("--package-path")
+    .arg(staged_package_dir())
+    .arg("--scratch-path")
+    .arg(scratch_dir());
 
   if is_release() {
     command.args(["-c", "release"]);
@@ -125,9 +173,7 @@ fn compile_swift() {
 
 /// Where `swift build` leaves the static library.
 fn swift_build_dir() -> PathBuf {
-  swift_package_dir()
-    .join(".build")
-    .join(if is_release() { "release" } else { "debug" })
+  scratch_dir().join(if is_release() { "release" } else { "debug" })
 }
 
 /// System libraries Containerization's `CArchive` target links against.
@@ -135,6 +181,9 @@ fn swift_build_dir() -> PathBuf {
 /// Its `linkerSettings` only apply when SwiftPM links; without repeating them
 /// here every `archive_*` symbol is undefined in the Rust binary.
 const SYSTEM_LIBRARIES: [&str; 5] = ["archive", "z", "bz2", "lzma", "iconv"];
+
+/// Where the dynamic Swift runtime lives.
+const SWIFT_RUNTIME_DIR: &str = "/usr/lib/swift";
 
 /// The Swift runtime the static library depends on but does not carry.
 fn link_swift_runtime() {
@@ -147,12 +196,8 @@ fn link_swift_runtime() {
     .unwrap_or_else(|| "/Applications/Xcode.app/Contents/Developer".to_string());
 
   println!("cargo:rustc-link-search={developer}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx/");
-  println!("cargo:rustc-link-search=/usr/lib/swift");
+  println!("cargo:rustc-link-search={SWIFT_RUNTIME_DIR}");
 
-  // The Swift runtime (notably libswift_Concurrency) is dynamic and referenced
-  // as `@rpath/...`. Without an rpath the binary links but fails in dyld at
-  // launch.
-  println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
   println!("cargo:rustc-link-lib=framework=Virtualization");
   // `SecTaskCopyValueForEntitlement`: the Swift side checks the build is
   // signed before starting a VM.
@@ -171,20 +216,24 @@ fn main() {
     return;
   }
 
-  println!("cargo:rerun-if-changed={}", swift_source_dir().display());
+  println!("cargo:rerun-if-changed={}", source_sources_dir().display());
   println!(
     "cargo:rerun-if-changed={}",
-    swift_package_dir().join("Package.swift").display()
+    source_package_dir().join("Package.swift").display()
   );
 
-  let staged = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR")).join("swift-bridge");
+  let staged = staged_package_dir();
 
-  // `OUT_DIR` survives between builds; clearing it leaves only this run's glue.
-  let _ = std::fs::remove_dir_all(&staged);
+  mirror(&source_package_dir(), &staged, &NOT_INPUTS);
 
-  swift_bridge_build::parse_bridges(vec![manifest_dir().join("src/bridge.rs")]).write_all_concatenated(&staged, BRIDGE);
-  publish_bridge_shims(&staged);
-  sync_generated(&staged, &swift_source_dir().join("generated"));
+  let glue = out_dir().join("swift-bridge");
+
+  // `OUT_DIR` survives between builds.
+  let _ = std::fs::remove_dir_all(&glue);
+
+  swift_bridge_build::parse_bridges(vec![manifest_dir().join("src/bridge.rs")]).write_all_concatenated(&glue, BRIDGE);
+  publish_bridge_shims(&glue);
+  mirror(&glue, &staged.join("Sources").join(PACKAGE).join("generated"), &[]);
 
   compile_swift();
 

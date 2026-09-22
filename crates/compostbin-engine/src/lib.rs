@@ -1,13 +1,15 @@
 #![cfg_attr(feature = "strict", deny(warnings))]
 
-//! The engine and builder traits, their models, and the build cache keys.
+//! How compostbin runs containers: the engine and builder traits, their models,
+//! the build cache keys, and the one implementation of them.
 //!
-//! Platform-free, so code generic over them (most of `compostbin-core`)
-//! compiles anywhere and tests against the fakes here. The implementation is
-//! in `containerization-framework-bridge`, macOS only.
+//! [`containerization`] is that implementation, over the `containerization-framework`
+//! crate. The traits stay because `compostbin-core` is written against them and
+//! tests against the [`fake`] ones, not because a second engine is coming.
 
 pub mod builder;
 pub mod cache;
+pub mod containerization;
 pub mod engine;
 pub mod error;
 #[cfg(any(feature = "fake", test))]

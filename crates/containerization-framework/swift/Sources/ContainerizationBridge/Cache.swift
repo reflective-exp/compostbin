@@ -47,12 +47,12 @@ struct Keys {
 }
 
 struct Cache {
-    /// Snapshots kept, most recently used first.
-    static let keep = 24
-    /// Anything unused this long goes regardless.
-    static let keepFor: TimeInterval = 14 * 24 * 60 * 60
-
     let root: URL
+    /// Snapshots kept, most recently used first. The caller's: how much disk a
+    /// build cache is worth is not this crate's to decide.
+    let keep: Int
+    /// Anything unused this long goes regardless.
+    let keepFor: TimeInterval
 
     private var rootfsDirectory: URL { root.appending(path: "rootfs") }
     private var imagesDirectory: URL { root.appending(path: "images") }
@@ -151,10 +151,10 @@ struct Cache {
 
     /// By last use: restoring or re-saving touches an entry.
     func evict() {
-        let cutoff = Date.now.addingTimeInterval(-Self.keepFor)
+        let cutoff = Date.now.addingTimeInterval(-keepFor)
         let snapshots = Self.entries(of: rootfsDirectory)
 
-        for (index, entry) in snapshots.enumerated() where index >= Self.keep || entry.used < cutoff {
+        for (index, entry) in snapshots.enumerated() where index >= keep || entry.used < cutoff {
             try? FileManager.default.removeItem(at: entry.path)
         }
 

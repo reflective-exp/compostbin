@@ -2,8 +2,3 @@
 /.local
 /target
 /tmp
-
-# SwiftPM's build directory, and the FFI glue build.rs regenerates from the
-# bridge module beside it.
-/crates/*/swift/.build
-/crates/*/swift/Sources/*/generated

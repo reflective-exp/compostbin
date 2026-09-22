@@ -385,11 +385,18 @@ in an image whose config names `claude`.
 So the image config is kept from boot, and every attach seeds itself from it
 before applying the session's arguments and environment.
 
-The Swift side lives in `crates/containerization-framework-bridge/swift`,
-bridged to the crate around it with
+The Swift side lives in `crates/containerization-framework/swift`, bridged to
+the crate around it with
 [swift-bridge](https://github.com/chinedufn/swift-bridge). It needs Xcode 26
-and macOS 26; `cargo build` runs `swift build` from the bridge crate's
-`build.rs`.
+and macOS 26; `cargo build` stages the package into `OUT_DIR` and runs
+`swift build` there from that crate's `build.rs`.
+
+`containerization-framework` is a general binding, published on its own and
+holding nothing of compostbin's: it takes a container to boot and an image to
+build, and everything it would otherwise have to decide — where a guest sits on
+the NAT network, what a builder is called, what shell runs a build step, what
+invalidates a cached step — arrives from the caller.
+`compostbin-engine::containerization` is where compostbin decides those.
 
 Two non-obvious requirements:
 
@@ -413,9 +420,9 @@ Two non-obvious requirements:
   kept and `clean` never touches it.
 
 The `vminit` reference pinned in
-`crates/containerization-framework-bridge/src/store.rs` and the package version
-pinned in the bridge's `swift/Package.swift` are two ends of one
-protocol (guest agent and library) and must move together.
+`crates/containerization-framework/src/store.rs` and the package version pinned
+in that crate's `swift/Package.swift` are two ends of one protocol (guest agent
+and library) and must move together.
 
 ## Development
 

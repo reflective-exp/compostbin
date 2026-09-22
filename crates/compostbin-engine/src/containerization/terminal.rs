@@ -1,14 +1,13 @@
-//! The host end of what a guest process is attached to: a terminal, and the
-//! descriptors of any stream.
+//! The host end of the terminal a guest process is attached to.
 //!
 //! The guest has its own pty in the VM, so the host end must be raw: no line
 //! buffering, echo, or signal characters. Doing it twice shows up as doubled
 //! characters and a shell that only reacts on return.
 //!
 //! Raw mode belongs to the process that owns the terminal (the owner its own,
-//! a joiner the one it passes over the control socket). Swift takes the
-//! descriptor with `setInitState: false` so it never touches attributes it
-//! doesn't own.
+//! a joiner the one it passes over the control socket). The framework takes the
+//! descriptor without touching attributes it doesn't own, so this is the only
+//! place they change.
 
 use std::io;
 use std::os::fd::RawFd;
@@ -64,33 +63,6 @@ impl<F: Fn()> Drop for Ending<F> {
   fn drop(&mut self) {
     self.0();
   }
-}
-
-/// Whether a descriptor is a terminal. When stdin or stdout isn't (e.g.
-/// `run > log`), the guest runs on plain streams rather than failing.
-pub fn is_tty(descriptor: RawFd) -> bool {
-  // SAFETY: isatty only reads, and tolerates any integer.
-  unsafe { libc::isatty(descriptor) == 1 }
-}
-
-/// Duplicates a descriptor for the Swift side to own.
-///
-/// Swift closes it when the attach ends, and this side must not: the close is
-/// what stops reading, and must happen exactly once.
-///
-/// `LinuxProcess` pumps stdin with a task reading the descriptor; cancelling it
-/// doesn't interrupt a pending read, so until the descriptor closes the stale
-/// reader keeps stealing input. Duplicating makes that close safe, since the
-/// caller's own descriptor keeps its stream open.
-pub fn lend(descriptor: RawFd) -> io::Result<RawFd> {
-  // SAFETY: dup only reads the descriptor table, and returns < 0 on failure.
-  let lent = unsafe { libc::dup(descriptor) };
-
-  if lent < 0 {
-    return Err(io::Error::last_os_error());
-  }
-
-  Ok(lent)
 }
 
 /// Puts a terminal in raw mode for as long as it is held.

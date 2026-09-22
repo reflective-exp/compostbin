@@ -35,6 +35,17 @@ struct BuildStep: Decodable {
     var cacheKey: String
 }
 
+/// How this build treats its rootfs snapshots. Snapshots are written whether
+/// or not they are read.
+struct CachePolicy: Decodable {
+    /// Resume from the deepest matching snapshot.
+    var restore: Bool
+    /// Snapshots kept, most recently used first.
+    var keep: Int
+    /// Anything unused this long goes regardless.
+    var keepForSeconds: Double
+}
+
 /// A host directory shared into the builder, and where it lands in the guest.
 struct BuildMount: Decodable {
     var source: String
@@ -71,8 +82,16 @@ struct BuildPlan: Decodable {
     var ipv4Address: String
     var ipv4Gateway: String
     var baseKey: String
-    /// False for `--no-cache`. Snapshots are written either way.
-    var useCache: Bool
+    var cache: CachePolicy
+    /// What runs each step's script, with the script appended. Defaults to
+    /// `bash -euo pipefail -c` on the Rust side: the generated scripts chain
+    /// with `&&`, and a silent mid-step failure would be baked into the image.
+    var shell: [String]
+    /// The builder's first process. Steps are `exec`s and need the container
+    /// to outlive them; the base's `Cmd` would exit.
+    var keepalive: [String]
+    /// Delete unreferenced blobs and unpacked rootfs once the image is stored.
+    var reclaim: Bool
 }
 
 enum Build {
@@ -97,11 +116,15 @@ enum Build {
         let baseConfig = try? await base.config(for: platform).config
         let environment = merge(baseConfig?.env ?? [], plan.environment)
 
-        let cache = Cache(root: root.appending(path: cacheDirectory))
+        let cache = Cache(
+            root: root.appending(path: cacheDirectory),
+            keep: plan.cache.keep,
+            keepFor: plan.cache.keepForSeconds
+        )
         let keys = Keys(plan: plan, baseDigest: base.digest)
 
         // Nothing changed: re-tag, skipping the export.
-        if plan.useCache, let descriptor = cache.image(keys.image),
+        if plan.cache.restore, let descriptor = cache.image(keys.image),
             await Cache.holds(descriptor, in: contentStore)
         {
             note("\(plan.tag) is already built")
@@ -156,7 +179,10 @@ enum Build {
         // extra work is releasing a network interface, which there isn't.
         try? FileManager.default.removeItem(at: containerDirectory)
 
-        await reclaim(imageStore, root: root)
+        if plan.reclaim {
+            await reclaim(imageStore, root: root)
+        }
+
         cache.evict()
     }
 
@@ -171,7 +197,7 @@ enum Build {
         base: Containerization.Image,
         platform: Platform
     ) async throws -> Int {
-        if plan.useCache {
+        if plan.cache.restore {
             for index in plan.steps.indices.reversed() where cache.holdsRootfs(keys.steps[index]) {
                 note("cached through \(plan.steps[index].name)")
                 try cache.restore(keys.steps[index], to: rootfs)
@@ -233,7 +259,7 @@ enum Build {
                 config.memoryInBytes = plan.memoryInBytes
                 // A keepalive, as in a session: steps are execs and need the
                 // container to outlive them. The base's `Cmd` would exit.
-                config.process.arguments = ["/bin/sh", "-c", "while :; do sleep 86400; done"]
+                config.process.arguments = plan.keepalive
                 config.process.user = .init()
                 config.process.workingDirectory = "/"
                 config.process.environmentVariables = environment
@@ -247,7 +273,13 @@ enum Build {
             try await container.start()
 
             do {
-                try await step(plan.steps[index], index: index, in: container, environment: environment)
+                try await step(
+                    plan.steps[index],
+                    index: index,
+                    in: container,
+                    shell: plan.shell,
+                    environment: environment
+                )
             } catch {
                 // Left for inspection, not cached; the next build sweeps it.
                 try? await container.stop()
@@ -330,13 +362,13 @@ enum Build {
 
     /// Runs one step to completion, throwing when it fails.
     ///
-    /// `bash -euo pipefail` rather than Docker's `sh -c`: the generated scripts
-    /// already chain with `&&`, and a silent mid-step failure would be baked
-    /// into the image.
+    /// `shell` is the caller's, with the script appended: whether a step that
+    /// fails halfway through fails the build is its policy, not this one's.
     private static func step(
         _ step: BuildStep,
         index: Int,
         in container: LinuxContainer,
+        shell: [String],
         environment: [String]
     ) async throws {
         let log = FileWriter(FileHandle.standardError)
@@ -344,7 +376,7 @@ enum Build {
         log.line("--> \(step.name)")
 
         let process = try await container.exec("build-\(index)") { config in
-            config.arguments = ["/bin/bash", "-euo", "pipefail", "-c", step.script]
+            config.arguments = shell + [step.script]
             config.environmentVariables = environment
             config.workingDirectory = "/"
             config.user = step.user.map { User(username: $0) } ?? User()

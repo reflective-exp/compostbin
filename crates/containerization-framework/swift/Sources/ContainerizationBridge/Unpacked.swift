@@ -21,13 +21,19 @@ extension Containerization.Mount {
 }
 
 struct Unpacked {
-    /// `ContainerManager`'s own default. Sparse, so a ceiling, not a cost.
-    static let capacityInBytes = 8.gib()
     /// An unpack takes minutes at most; an older partial was abandoned.
     static let abandonedAfter: TimeInterval = 60 * 60
 
     /// The image store's root.
     let store: URL
+    /// Ceiling for an unpack. Sparse, so a ceiling, not a cost — but nothing
+    /// in the container may outgrow it. The caller's, since only it knows the
+    /// workload; `ContainerManager`'s own default is 8 GiB.
+    ///
+    /// Not part of the entry's key: an image unpacked once is reused whatever
+    /// ceiling the next container asks for, so raising it only takes effect
+    /// for images not yet unpacked. `evict` is how to force a re-unpack.
+    var capacityInBytes: UInt64 = 8.gib()
 
     private var root: URL { store.appending(path: "unpacked") }
 
@@ -70,7 +76,7 @@ struct Unpacked {
         let partial = root.appending(path: "\(UUID().uuidString).partial")
         defer { try? FileManager.default.removeItem(at: partial) }
 
-        let unpacker = EXT4Unpacker(capacityInBytes: Self.capacityInBytes)
+        let unpacker = EXT4Unpacker(capacityInBytes: capacityInBytes)
         _ = try await unpacker.unpack(image, for: .current, at: partial)
 
         do {
