@@ -156,6 +156,7 @@ name = "compostbin-test"
 version = "0.9.0"
 dependencies = [
  "compostbin-core",
+ "libc",
  "tempfile",
  "toml",
 ]

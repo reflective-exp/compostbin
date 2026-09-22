@@ -26,6 +26,12 @@ struct Service {
 
 impl Service {
   fn start() -> Self {
+    Self::answering("the host")
+  }
+
+  /// The same, naming itself in its answers: two services on two ports are
+  /// otherwise indistinguishable.
+  fn answering(who: &'static str) -> Self {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind a host port");
     let port = listener.local_addr().expect("the bound address").port();
     let stop = Arc::new(AtomicBool::new(false));
@@ -43,7 +49,7 @@ impl Service {
           .read_line(&mut asked)
           .is_ok()
         {
-          let _ = write!(stream, "the host says: {}", asked.trim());
+          let _ = write!(stream, "{who} says: {}", asked.trim());
         }
         let _ = stream.shutdown(Shutdown::Both);
       }
@@ -55,6 +61,16 @@ impl Service {
       thread: Some(thread),
     }
   }
+}
+
+/// A port number nothing is listening on: bound to learn a free one, then
+/// released.
+fn unused_port() -> u16 {
+  TcpListener::bind("127.0.0.1:0")
+    .expect("bind a host port")
+    .local_addr()
+    .expect("the bound address")
+    .port()
 }
 
 impl Drop for Service {
@@ -71,12 +87,13 @@ impl Drop for Service {
 /// What the guest sends and reads back, over its own loopback. `bash` because
 /// `/dev/tcp` is a bash feature and the guest's `sh` is not bash.
 fn ask(project: &Project, port: u16, question: &str) -> std::process::Output {
-  project.compostbin(&[
-    "exec",
-    "bash",
-    "-c",
-    &format!("exec 3<>/dev/tcp/127.0.0.1/{port} && printf '{question}\\n' >&3 && head -c 64 <&3",),
-  ])
+  project.compostbin(&["exec", "bash", "-c", &exchange(port, question)])
+}
+
+/// One question and its answer, as a shell line, so a test can put more than
+/// one of them in a single container.
+fn exchange(port: u16, question: &str) -> String {
+  format!("exec 3<>/dev/tcp/127.0.0.1/{port} && printf '{question}\\n' >&3 && head -c 64 <&3")
 }
 
 #[test]
@@ -145,6 +162,76 @@ ports = [{}]
   );
 
   drop(running);
+}
+
+/// Each declared port is a socket and a relay of its own: two services do not
+/// share one, and neither answers for the other.
+#[test]
+fn each_declared_port_reaches_its_own_service() {
+  let first = Service::answering("the first");
+  let second = Service::answering("the second");
+  let project = Project::new("cbt-ports-two");
+  project.manifest(&format!(
+    r#"
+[host]
+ports = [{}, {}]
+"#,
+    first.port, second.port
+  ));
+
+  // Both in one container: each `exec` would otherwise be a session of its own.
+  let output = project.compostbin(&[
+    "exec",
+    "bash",
+    "-c",
+    &format!(
+      "{}; echo; {}",
+      exchange(first.port, "hello"),
+      exchange(second.port, "hello")
+    ),
+  ]);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  assert_eq!(
+    String::from_utf8_lossy(&output.stdout),
+    "the first says: hello\nthe second says: hello",
+    "each port carried its own service's answer"
+  );
+}
+
+/// A declared port with nothing behind it is ordinary — `[host.commands]` may
+/// well be what starts the service — so the relay records it and the session
+/// carries on.
+#[test]
+fn a_port_with_nothing_behind_it_is_recorded_not_fatal() {
+  let port = unused_port();
+  let project = Project::new("cbt-ports-dead");
+  project.manifest(&format!(
+    r#"
+[host]
+ports = [{port}]
+"#
+  ));
+
+  let unanswered = ask(&project, port, "anyone there");
+
+  assert_eq!(
+    String::from_utf8_lossy(&unanswered.stdout),
+    "",
+    "the relay has nothing to answer with"
+  );
+  assert_eq!(
+    project.guest_output("echo the session is still up"),
+    "the session is still up",
+    "and a service that is not running does not take the session with it"
+  );
+
+  let log = std::fs::read_to_string(project.state_dir().join("ports.log")).unwrap_or_default();
+
+  assert!(
+    log.contains(&format!("nothing answers at 127.0.0.1:{port}")),
+    "the relay writes what it could not reach where the terminal is Claude's: {log}"
+  );
 }
 
 #[test]

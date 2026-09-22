@@ -201,6 +201,72 @@ argv = ["sh", "-c", "sleep 0.5; echo served $1", "--"]
   assert_eq!(served, ["served a", "served b", "served c", "served d"]);
 }
 
+/// `concurrency` is a bound on what runs at once, not a promise to run that
+/// many. `concurrent_requests_are_all_served` fires exactly as many as the cap
+/// admits, so it never reaches it; a cap of one is the case where reaching it
+/// is visible.
+#[test]
+fn the_cap_bounds_what_runs_at_once() {
+  let project = Project::new("cbt-host-capped");
+  project.manifest(
+    r#"
+[host]
+concurrency = 1
+
+[host.commands.step]
+arguments = true
+argv = ["sh", "-c", "echo in $1 >> log; sleep 0.4; echo out $1 >> log", "--"]
+"#,
+  );
+
+  let output = project.guest("for name in a b c; do compostbin-host step $name & done; wait");
+
+  assert!(output.status.success(), "{}", stderr(&output));
+
+  let log = project.read("log");
+  let steps: Vec<&str> = log.lines().collect();
+
+  assert_eq!(steps.len(), 6, "each request runs, and runs once: {log}");
+  for pair in steps.chunks(2) {
+    assert_eq!(
+      pair[0].strip_prefix("in "),
+      pair.get(1).and_then(|line| line.strip_prefix("out ")),
+      "a cap of one means one at a time, and these overlapped: {log}"
+    );
+  }
+}
+
+/// And a cap is a queue, not a limit on how much may be asked for: what does
+/// not fit waits rather than being refused or dropped.
+#[test]
+fn requests_past_the_cap_wait_their_turn() {
+  let project = Project::new("cbt-host-queued");
+  project.manifest(
+    r#"
+[host]
+concurrency = 2
+
+[host.commands.step]
+arguments = true
+argv = ["sh", "-c", "echo $1 >> log", "--"]
+"#,
+  );
+
+  let output = project.guest("for name in a b c d e f g h; do compostbin-host step $name & done; wait");
+
+  assert!(output.status.success(), "{}", stderr(&output));
+
+  let log = project.read("log");
+  let mut served: Vec<&str> = log.lines().collect();
+  served.sort_unstable();
+
+  assert_eq!(
+    served,
+    ["a", "b", "c", "d", "e", "f", "g", "h"],
+    "eight requests under a cap of two are all served: {log}"
+  );
+}
+
 /// No `[host.commands]`, no channel: the spool is never created, and the
 /// client says so rather than hanging on a directory nothing serves.
 #[test]

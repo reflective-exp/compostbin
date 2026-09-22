@@ -83,7 +83,10 @@ argv = ["echo", "still served"]
      && read step \
      && compostbin-host greet > after < /dev/null",
   );
-  wait_for(&project, "before");
+  // Its contents, not its existence: the guest's `>` creates the file before
+  // the command it redirects has run, so cleaning on sight would empty the
+  // spool out from under a request still in flight.
+  project.wait_for("before");
 
   let cleaned = project.compostbin(&["clean"]);
   assert!(cleaned.status.success(), "clean failed: {}", stderr(&cleaned));
@@ -146,26 +149,6 @@ fn wait_until_up(project: &Project) {
       std::time::Instant::now() < deadline,
       "the session never came up: no socket at {}",
       socket.display()
-    );
-    std::thread::sleep(std::time::Duration::from_millis(50));
-  }
-}
-
-/// Waits for a host command's output to land in the project.
-///
-/// Its contents, not its existence: the guest's `>` creates the file before the
-/// command it redirects has run, so waiting to see it would clean the spool out
-/// from under a request still in flight — leaving the guest client polling for a
-/// status that will never be written.
-fn wait_for(project: &Project, relative: &str) {
-  let path = project.dir().join(relative);
-  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-
-  while !std::fs::read(&path).is_ok_and(|body| !body.is_empty()) {
-    assert!(
-      std::time::Instant::now() < deadline,
-      "the guest never wrote {}",
-      path.display()
     );
     std::thread::sleep(std::time::Duration::from_millis(50));
   }

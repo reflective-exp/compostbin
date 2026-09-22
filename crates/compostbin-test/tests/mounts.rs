@@ -92,6 +92,87 @@ source = "{}"
   );
 }
 
+/// `target` is for the rare thing that has to appear at a fixed location.
+/// Everything else lands under `/workspace/<basename>`, which is what keeps the
+/// host's layout out of the container.
+#[test]
+fn a_declared_target_is_where_the_path_lands() {
+  let project = Project::new("cbt-target");
+  let vendor = project.home().join("vendor");
+  std::fs::create_dir(&vendor).expect("create vendor");
+  std::fs::write(vendor.join("marker"), "at a fixed path\n").expect("write marker");
+
+  project.manifest(&format!(
+    r#"
+[[paths]]
+source = "{}"
+target = "/opt/vendor"
+"#,
+    vendor.display()
+  ));
+
+  assert_eq!(
+    project.guest_output("cat /opt/vendor/marker"),
+    "at a fixed path",
+    "a declared target is an absolute guest path, not a name under /workspace"
+  );
+  assert_eq!(
+    project.guest_output("ls /workspace"),
+    "cbt-target",
+    "and a path that named one is not also mounted under its basename"
+  );
+}
+
+/// The uncommitted overlay is part of the mount table like any other entry:
+/// `add --local` writes it, and a session that loads the manifest mounts what
+/// it names, with the flags it named.
+#[test]
+fn the_local_manifest_mounts_too() {
+  let project = Project::new("cbt-local");
+  let shared = project.home().join("shared");
+  let scratch = project.home().join("scratch");
+  std::fs::create_dir(&shared).expect("create shared");
+  std::fs::create_dir(&scratch).expect("create scratch");
+  std::fs::write(scratch.join("marker"), "mine alone\n").expect("write marker");
+
+  project.manifest(&format!(
+    r#"
+[[paths]]
+source = "{}"
+"#,
+    shared.display()
+  ));
+  project.write(
+    ".config/compostbin.local.toml",
+    &format!(
+      r#"
+[[paths]]
+readonly = true
+source = "{}"
+"#,
+      scratch.display()
+    ),
+  );
+
+  assert_eq!(
+    project.guest_output("cat /workspace/scratch/marker"),
+    "mine alone",
+    "a path only the overlay names is mounted all the same"
+  );
+  assert!(
+    !project
+      .guest("echo scribble > /workspace/scratch/marker")
+      .status
+      .success(),
+    "with the flags the overlay gave it"
+  );
+  assert_eq!(
+    project.guest_output("ls /workspace | tr '\\n' ' '"),
+    "cbt-local scratch shared",
+    "the overlay adds to the committed manifest rather than replacing it"
+  );
+}
+
 /// A project inside a `[workspace] roots` tree is not mounted twice: it is
 /// reached through the root, which is what `add` says when it records nothing.
 #[test]

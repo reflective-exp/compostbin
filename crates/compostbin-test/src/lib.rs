@@ -21,6 +21,10 @@
 
 #[cfg(feature = "integration")]
 mod project;
+#[cfg(feature = "integration")]
+mod terminal;
 
 #[cfg(feature = "integration")]
 pub use crate::project::{Lock, Project, Running, code, exclusive, signed_binary, stderr, stdout};
+#[cfg(feature = "integration")]
+pub use crate::terminal::Terminal;

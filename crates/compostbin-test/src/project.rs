@@ -1,5 +1,6 @@
 //! A throwaway project, and the session it starts.
 
+use crate::terminal::Terminal;
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, Memory};
 use compostbin_core::session::NAME_PREFIX;
 use compostbin_core::session::image::IMAGE_STORE;
@@ -25,6 +26,10 @@ const SIGNING_LOCK: &str = "compostbin-signed.lock";
 /// killed test does not stop the next run.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 const LOCK_POLL: Duration = Duration::from_millis(50);
+/// How long [`Project::wait_for`] gives the guest. Generous, because the first
+/// command in a project is waiting on a container to be created.
+const GUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const GUEST_POLL: Duration = Duration::from_millis(50);
 /// What a session gets unless the test asks for something else: enough to run
 /// a shell, little enough that the whole suite can run at once.
 const TEST_CPUS: u32 = 1;
@@ -153,6 +158,27 @@ impl Project {
     std::fs::read_to_string(self.dir.join(relative)).expect("read file")
   }
 
+  /// Waits for a file in the project directory to have something in it, which
+  /// is how a test watching a running session learns where the guest has got
+  /// to.
+  ///
+  /// Its contents, not its existence: the guest's `>` creates the file before
+  /// the command it redirects has run, so waiting to see it would let the test
+  /// act on a command still in flight.
+  pub fn wait_for(&self, relative: &str) {
+    let path = self.dir.join(relative);
+    let deadline = std::time::Instant::now() + GUEST_TIMEOUT;
+
+    while !std::fs::read(&path).is_ok_and(|body| !body.is_empty()) {
+      assert!(
+        std::time::Instant::now() < deadline,
+        "the guest never wrote {}",
+        path.display()
+      );
+      std::thread::sleep(GUEST_POLL);
+    }
+  }
+
   /// Runs `compostbin` in the project directory, on this project's home.
   pub fn compostbin(&self, arguments: &[&str]) -> Output {
     self.invoke(arguments, None, &[])
@@ -214,6 +240,13 @@ impl Project {
         .spawn()
         .expect("compostbin should start"),
     ))
+  }
+
+  /// Runs `compostbin` on a terminal of its own, which is the only way to reach
+  /// what it does when the caller has one: `exec -t`, `shell`, and a
+  /// `tty = true` host command.
+  pub fn on_a_terminal(&self, arguments: &[&str]) -> Terminal {
+    Terminal::attach(self.command(arguments, &[]))
   }
 
   fn invoke(&self, arguments: &[&str], input: Option<&str>, env: &[(&str, &str)]) -> Output {
