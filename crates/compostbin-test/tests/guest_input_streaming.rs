@@ -9,15 +9,12 @@
 //! Guest input relies on the asymmetry: the guest appends and `pump_stdin`
 //! reads as it arrives. This measures that rather than assuming it.
 //!
-//! Run from inside a session via `bin/test/guest-input-streaming`, which starts
-//! the guest half and asks the host to run this. Alone, it fails waiting for
-//! the guest — half a measurement is worse than none.
-//!
-//! The halves rendezvous in `target/guest-input-streaming` over the repo mount.
-//! The host publishes `ready` before looking, so its first look at `stream`
-//! lands mid-write; a later look would only measure whole-file propagation,
-//! which already works.
+//! Both halves are this test's: it starts the appender in a session of its own
+//! and reads the file through the mount. The host publishes `ready` before
+//! looking, so its first look at `stream` lands mid-write; a later look would
+//! only measure whole-file propagation, which already works.
 
+use compostbin_test::{Project, stderr, stdout};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -25,10 +22,45 @@ use std::time::{Duration, Instant};
 
 /// Finer than the guest's write interval, to catch the file mid-write.
 const POLL: Duration = Duration::from_millis(25);
-/// The guest half is started by hand.
-const START_TIMEOUT: Duration = Duration::from_secs(30);
+/// The guest half waits for a container of its own first.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// A hung guest must fail rather than hang the suite.
 const RUN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The guest half: appends fixed-width lines on a schedule, then says how many
+/// bytes it wrote. Long enough to span many host polls, short enough to wait
+/// through.
+///
+/// It waits for a line on its stdin so that the host's first read lands
+/// mid-write, and publishes the byte count by rename so the marker never
+/// appears half-written. Stdin rather than a file the host writes: the guest's
+/// view of the mount is the stale direction, which is what this measures.
+const APPENDER: &str = r#"#!/bin/sh
+set -eu
+
+shared="$(cd "$(dirname "$0")" && pwd)"
+stream="$shared/stream"
+lines=24
+interval=0.1
+
+read ready
+
+: > "$stream"
+written=0
+sequence=1
+while [ "$sequence" -le "$lines" ]; do
+  # Fixed width, so the byte count is exact without stat-ing the file under
+  # test.
+  line=$(printf 'line %04d of %04d' "$sequence" "$lines")
+  printf '%s\n' "$line" >> "$stream"
+  written=$((written + ${#line} + 1))
+  sequence=$((sequence + 1))
+  sleep "$interval"
+done
+
+printf '%s\n' "$written" > "$shared/eof.partial"
+mv "$shared/eof.partial" "$stream.eof"
+"#;
 
 /// One non-empty read.
 struct Batch {
@@ -78,17 +110,6 @@ fn format_elapsed(elapsed: Duration) -> String {
   format!("{}ms", elapsed.as_millis())
 }
 
-fn shared_directory() -> PathBuf {
-  Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/guest-input-streaming")
-}
-
-/// Published by rename, so the guest never sees a half-written one.
-fn publish(path: &Path, contents: &str) {
-  let partial = path.with_extension("partial");
-  std::fs::write(&partial, contents).expect("write partial");
-  std::fs::rename(&partial, path).expect("publish by rename");
-}
-
 fn wait_for(path: &Path, timeout: Duration, what: &str) {
   let deadline = Instant::now() + timeout;
   while !path.exists() {
@@ -102,20 +123,20 @@ fn wait_for(path: &Path, timeout: Duration, what: &str) {
 }
 
 #[test]
-fn host_sees_guest_appends_as_they_happen() {
-  let directory = shared_directory();
+fn appends_reach_the_host_as_they_happen() {
+  let project = Project::new("cbt-streaming");
+  project.write("appender.sh", APPENDER);
+
+  let directory: PathBuf = project.dir().to_path_buf();
   let stream = directory.join("stream");
   let eof = directory.join("stream.eof");
-  let ready = directory.join("ready");
 
-  std::fs::create_dir_all(&directory).expect("create shared directory");
-  // Leftovers would let this pass without a guest.
-  for stale in [&stream, &eof, &ready] {
-    let _ = std::fs::remove_file(stale);
-  }
+  // The guest waits to be told to start, so this side is watching from the
+  // first byte it writes.
+  let mut appender = project.guest_in_background("sh appender.sh");
 
   println!("shared directory (host): {}", directory.display());
-  publish(&ready, "");
+  appender.send("go");
   wait_for(&stream, START_TIMEOUT, "the guest to start appending");
 
   let started = Instant::now();
@@ -169,13 +190,17 @@ fn host_sees_guest_appends_as_they_happen() {
     .parse()
     .expect("eof marker holds a byte count");
 
+  let finished = appender.finish();
+  assert!(
+    finished.status.success(),
+    "the guest half failed: {}{}",
+    stdout(&finished),
+    stderr(&finished)
+  );
+
   println!("guest wrote {expected} bytes; the host saw:");
   reopen.report();
   held.report();
-
-  for stale in [&stream, &eof, &ready] {
-    let _ = std::fs::remove_file(stale);
-  }
 
   // The fatal case: opened mid-write and stayed short forever, as the guest's
   // view of host writes does.

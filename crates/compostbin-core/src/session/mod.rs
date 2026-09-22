@@ -593,7 +593,15 @@ impl Session {
 
   /// Seeds Claude's token and shares the host's settings into Claude's home: a
   /// mount source, so reachable whether or not the container is up.
+  ///
+  /// Created first, because the mount needs it whether or not there was
+  /// anything to put in it: a host with no `~/.claude` and no Keychain entry
+  /// would otherwise leave the container with a mount source that does not
+  /// exist, which it cannot create for itself.
   fn prepare(&self, credentials: &impl CredentialSource, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
+    let home = self.claude_home();
+    std::fs::create_dir_all(&home).at(&home)?;
+
     let seeded = credentials::seed(
       &self.claude_home(),
       self.manifest.claude.seed_from_keychain,

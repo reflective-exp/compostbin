@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Create the session's Claude home before the container mounts it. A host with
+  no `~/.claude` and `seed_from_keychain = false` had nothing to create it, and
+  the session failed to boot on a mount source that did not exist.
+
 ## v0.9.0
 
 - Add `compostbin exec <command>`, which runs something other than Claude in the

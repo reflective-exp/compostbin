@@ -31,7 +31,11 @@ tty = true
 [host.commands.test-one]
 arguments = true
 argv = ["cargo", "nextest", "run"]
-deny = ["--config", "--manifest-path", "-Z"]
+deny = ["--config", "--manifest-path", "-Z", "-p"]
+tty = true
+
+[host.commands.test-integration]
+argv = ["cargo", "nextest", "run", "--features", "integration", "-E", "package(compostbin-test)"]
 tty = true
 
 [image]

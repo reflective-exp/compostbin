@@ -1,0 +1,13 @@
+# Every `compostbin-test` test boots a VM of its own, under a name and a home
+# of its own: they share no container, so this is not about isolation. It is
+# the machine — a dozen VMs at once leaves the host swapping, and a test whose
+# session is starved looks like a test that hangs.
+[test-groups]
+sessions = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = 'package(compostbin-test)'
+test-group = 'sessions'
+# A session that takes this long is stuck, not slow: a container starts in
+# about a second.
+slow-timeout = { period = "60s", terminate-after = 3 }

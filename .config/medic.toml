@@ -36,6 +36,7 @@ steps = [
   {audit = {}},
   {update = {}},
   {test = {}},
+  {name = "rust: integration!", shell = "cargo nextest run --color always --features integration -E package(compostbin-test)", verbose = true},
   {name = "build release", shell = "bin/dev/release", verbose = true},
   {step = "git", command = "push"},
 ]

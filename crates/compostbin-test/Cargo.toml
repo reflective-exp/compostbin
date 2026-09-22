@@ -7,12 +7,13 @@ repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
-[dev-dependencies]
+[dependencies]
 compostbin-core.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 
 [features]
-# Tests needing a live session on both sides of the mount.
+# Tests in this crate are integration. Enable `--features integration`
+# to run them.
 integration = []
 strict = []
