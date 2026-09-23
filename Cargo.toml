@@ -4,7 +4,6 @@ members = [
   "crates/compostbin-cli",
   "crates/compostbin-core",
   "crates/compostbin-test",
-  "crates/containerization-framework",
 ]
 resolver = "3"
 
@@ -18,9 +17,8 @@ version = "0.9.0"
 [workspace.dependencies]
 compostbin-engine = { path = "crates/compostbin-engine" }
 clap = { version = "4", features = ["derive"] }
-compostbin-containerization = { path = "crates/compostbin-containerization" }
 compostbin-core = { path = "crates/compostbin-core" }
-containerization-framework = { path = "crates/containerization-framework" }
+containerization-framework = "0.1"
 getrandom = "0.4"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

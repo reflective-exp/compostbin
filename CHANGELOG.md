@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Extract `containerization-framework` to external repo; compostbin uses the
+  published crate.
 - Create the session's Claude home before the container mounts it. A host with
   no `~/.claude` and `seed_from_keychain = false` had nothing to create it, and
   the session failed to boot on a mount source that did not exist.
