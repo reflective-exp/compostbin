@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.9.1
+
 - Extract `containerization-framework` to external repo; compostbin uses the
   published crate.
 - Create the session's Claude home before the container mounts it. A host with

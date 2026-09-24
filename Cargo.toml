@@ -12,7 +12,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/reflective-dev/compostbin"
 rust-version = "1.98"
-version = "0.9.0"
+version = "0.9.1"
 
 [workspace.dependencies]
 compostbin-engine = { path = "crates/compostbin-engine" }
