@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.10.0
+
 - Add `compostbin install`, which installs or updates compostbin's Claude skills
   in `~/.claude/skills`.
   - `compostbin-manifest`
