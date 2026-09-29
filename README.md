@@ -18,6 +18,7 @@ macOS only.
 
 ``` sh
 brew install reflective-exp/tap/compostbin
+compostbin install
 compostbin init
 compostbin doctor
 ```
@@ -36,11 +37,18 @@ compostbin run          # start the session and attach Claude
 
 Configured paths mount under `/workspace` in the guest.
 
+### install
+
+`compostbin install` puts compostbin's Claude skills in `~/.claude/skills`.
+
+- `compostbin-manifest` teaches Claude the manifest schema. Also installs
+  [`docs/manifest`](docs/manifest) into a reference directory.
+
 ### init
 
 `compostbin init` writes a default `.config/compostbin.toml`, meant to be checked
 in; see [Configuration](#configuration). Uncommitted settings go in
-`.config/compostbin.local.toml`; see [Local configuration](#local-configuration).
+`.config/compostbin.local.toml`; see [Mounts](docs/manifest/mounts.md#local-configuration).
 
 ### build
 
@@ -150,81 +158,11 @@ Claude home (discarding old conversations) and the session's credentials.
 ## Configuration
 
 `.config/compostbin.toml` declares what the project needs. Every table is
-optional.
+optional, and changes take effect when the container is next created.
 
 ``` toml
-[project]
-image = "compostbin/base:latest"
-name  = "compostbin"
-
 [container]
-cpus   = 4
-memory = "8G"
-env    = ["GITHUB_TOKEN"]
-# Run in the project directory when the container is created, before Claude.
-# A failing line stops the session.
-setup  = ["direnv allow"]
-
-# Trees whose contents may be mounted. Empty by default, so mounting a whole
-# workspace read-write is opt-in. The current directory is always mounted.
-[workspace]
-roots = ["~/workspace"]
-
-# One more path, this one read-only.
-[[paths]]
-readonly = true
-source   = "~/.cargo/registry"
-
-# This project's image only, on top of the shared base. Order: `packages`
-# (as root), `run_as_root` lines, then `run` lines as the `claude` user.
-[image]
-packages    = ["ca-certificates", "direnv"]
-run         = ["""echo 'eval "$(direnv hook bash)"' >> ~/.bashrc"""]
-run_as_root = ["update-ca-certificates"]
-```
-
-### Local configuration
-
-`.config/compostbin.local.toml` holds uncommitted configuration; add it to
-`.gitignore`.
-
-``` toml
-[[paths]]
-source = "~/code/vendor/libfoo"
-
-[[paths]]
-readonly = true
-source   = "~/notes"
-```
-
-Local configuration currently only supports `[[paths]]`.
-
-### Signing in
-
-Your Claude Code token is read from the login Keychain and seeded into the
-session, so the container is logged in as your host is. Otherwise, set
-`ANTHROPIC_API_KEY` or log in interactively once; the login persists with the
-Claude home.
-
-``` toml
-[claude]
-seed_from_keychain = true
-# Beyond CLAUDE.md, settings.json and skills, which every session gets.
-shared             = ["agents"]
-```
-
-Your `~/.claude/CLAUDE.md`, `settings.json` and `skills` are copied in on every
-run. The host copies are authoritative; edit them there.
-
-### Host commands
-
-The container carries no toolchain; the guest asks the host to run declared
-commands instead:
-
-``` toml
-[host]
-# How many may run at once: subagents call `compostbin-host` independently.
-concurrency = 8
+setup = ["direnv allow"]
 
 [host.commands.test]
 argv = ["cargo", "nextest", "run", "--workspace"]
@@ -235,62 +173,22 @@ arguments = true
 argv      = ["cargo", "nextest", "run"]
 deny      = ["--config", "--manifest-path", "-Z"]
 tty       = true
+
+[[paths]]
+readonly = true
+source   = "~/.cargo/registry"
 ```
 
-Inside the session, `compostbin-host test` runs it on the host as if run
-locally: stdin goes in, stdout and stderr come back, and its exit status is
-returned. The guest sends only the name, never a command line.
+Inside the session, `compostbin-host test` runs `cargo nextest run --workspace`
+on the host. Every key is described in `docs/manifest`:
 
-- `arguments` lets the guest append arguments. Off by default, so a command is
-  exact unless deliberately widened.
-- `deny` refuses guest arguments that would point a widened command at other
-  code or configuration. Empty by default, since the relevant flags depend on
-  the toolchain. `--config` also refuses `--config=x`; a single-letter `-Z` also
-  refuses the joined `-Zx`.
-- `tty` runs the command under a pty, so colour and progress work. This merges
-  stdout and stderr.
-- The spool is only created and mounted when `[host.commands]` is present.
-
-### Host ports
-
-Host services on fixed ports, such as MCP servers, reach the guest at its own
-`localhost`:
-
-``` toml
-[host]
-ports = [7001, 7002]
-```
-
-Each port is relayed through a unix socket in the session directory, carried
-into this container only: nothing listens on a network address, and **no other
-container on this Mac can reach a forwarded port**. Changing ports takes a
-restart, since relays are set up when the VM starts.
-
-`run` holds the sockets for the session's lifetime, on a thread beside the
-host-command agent. Both end when Claude exits, as does the VM.
-
-A port whose host service hasn't started yet (e.g. one started later via
-`compostbin-host`) is normal, so once Claude is attached the relay logs to
-`ports.log` in the session directory instead of Claude's terminal. `doctor`
-reports ports with nothing behind them.
-
-### Clipboard
-
-Copying inside the session can reach the macOS clipboard:
-
-``` toml
-[host]
-clipboard = true
-```
-
-The image's `pbcopy`, `xclip`, `xsel` and `wl-copy` forward their input to the
-host's `pbcopy` over the host-command channel, so Claude's `/copy` (or copying a
-response) and `some-command | pbcopy` in `compostbin shell` reach your Mac's
-clipboard. The session sets `WAYLAND_DISPLAY`, which is what makes Claude look
-for `wl-copy`.
-
-Write-only: the host clipboard never reaches the guest. Off by default; changes
-take a restart.
+- [Host access](docs/manifest/host.md): host commands, the clipboard, ports
+- [The container and its image](docs/manifest/container.md): `[project]`,
+  `[container]`, `[image]`
+- [Mounts](docs/manifest/mounts.md): `[[paths]]`, `[workspace]`, and the
+  uncommitted `.config/compostbin.local.toml`
+- [Claude](docs/manifest/claude.md): signing in, and what is copied from
+  `~/.claude`
 
 ### What the session is told
 

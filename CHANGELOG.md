@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add `compostbin install`, which installs or updates compostbin's Claude skills
+  in `~/.claude/skills`.
+  - `compostbin-manifest`
+- Move manifest documentation from the README to `docs/manifest`.
+
 ## v0.9.1
 
 - Extract `containerization-framework` to external repo; compostbin uses the

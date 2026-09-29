@@ -279,3 +279,47 @@ fn ls_without_a_manifest_names_the_missing_file() {
     "error should name the manifest: {stderr}"
   );
 }
+
+/// `install` under a throwaway `HOME`, with stdin closed.
+fn install(home: &Path, arguments: &[&str]) -> Output {
+  Command::new(BINARY)
+    .arg("install")
+    .args(arguments)
+    .current_dir(home)
+    .env("HOME", home)
+    .stdin(std::process::Stdio::null())
+    .output()
+    .expect("compostbin should run")
+}
+
+#[test]
+fn install_without_a_terminal_lists_changes_and_asks_for_yes() {
+  let temp = TempDir::new().expect("temp dir");
+
+  let output = install(temp.path(), &[]);
+
+  assert_eq!(output.status.code(), Some(1));
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert!(
+    stdout.contains("create ") && stdout.contains(".claude/skills/compostbin-manifest/SKILL.md"),
+    "{stdout}"
+  );
+  assert!(String::from_utf8_lossy(&output.stderr).contains("--yes"));
+  assert!(!temp.path().join(".claude").exists(), "nothing is written unasked");
+}
+
+#[test]
+fn install_yes_writes_the_skill_and_then_is_up_to_date() {
+  let temp = TempDir::new().expect("temp dir");
+
+  let output = install(temp.path(), &["--yes"]);
+
+  assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+  let skill = temp.path().join(".claude/skills/compostbin-manifest");
+  assert!(skill.join("SKILL.md").is_file());
+  assert!(skill.join("references/host.md").is_file());
+
+  let again = install(temp.path(), &[]);
+  assert!(again.status.success());
+  assert!(String::from_utf8_lossy(&again.stdout).contains("up to date"));
+}

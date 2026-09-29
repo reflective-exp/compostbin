@@ -41,6 +41,12 @@ pub enum Command {
   Doctor,
   /// Write a manifest with defaults
   Init,
+  /// Install or update compostbin's Claude skills in ~/.claude/skills
+  Install {
+    /// Apply the changes without asking
+    #[arg(short, long)]
+    yes: bool,
+  },
   /// List the session's mounts
   Ls,
   /// Start or join the session and run a command in it

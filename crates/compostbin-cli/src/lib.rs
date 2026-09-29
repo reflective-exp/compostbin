@@ -7,13 +7,15 @@ use compostbin_core::doctor::{self, Status};
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, SESSIONS_DIR};
 use compostbin_core::session::credentials::{KEYCHAIN_SERVICE, Keychain};
 use compostbin_core::session::image;
+use compostbin_core::session::settings::HOST_CLAUDE_HOME;
 use compostbin_core::session::{AddOutcome, Notice, Process, Session};
+use compostbin_core::skills::{self, Action};
 use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
 use compostbin_engine::containerization::{FrameworkBuilder, FrameworkEngine, Store, StoreError};
 use std::error::Error;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 
 fn notify(notice: Notice) {
@@ -96,6 +98,8 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       Ok(0)
     }
 
+    Command::Install { yes } => install(&resolver.resolve(HOST_CLAUDE_HOME).join("skills"), yes),
+
     Command::Ls => {
       let session = load_session(&manifest_path, resolver, &project_dir)?;
 
@@ -158,6 +162,48 @@ fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn Error
   }
 
   image::build(session, &FrameworkBuilder::new(Store::at(image::store(session))), cache)?;
+
+  Ok(0)
+}
+
+/// Installs or updates skills into Claude's global skills directory.
+/// Prompts for confirmation unless `-y`
+fn install(skills_dir: &Path, yes: bool) -> Result<i32, Box<dyn Error>> {
+  let changes = skills::plan(skills_dir)?;
+
+  if changes.is_empty() {
+    println!("skills in {} are up to date", skills_dir.display());
+    return Ok(0);
+  }
+
+  for change in &changes {
+    let verb = match change.action {
+      Action::Create => "create",
+      Action::Update => "update",
+      Action::Remove => "remove",
+    };
+    println!("{verb} {}", change.path.display());
+  }
+
+  if !yes {
+    if !std::io::stdin().is_terminal() {
+      eprintln!("compostbin: pass --yes to install without a terminal to ask on");
+      return Ok(1);
+    }
+
+    print!("apply? [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+
+    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+      println!("nothing changed");
+      return Ok(1);
+    }
+  }
+
+  skills::apply(&changes)?;
+  println!("installed");
 
   Ok(0)
 }

@@ -15,4 +15,5 @@ mod fixtures;
 pub mod host;
 pub mod manifest;
 pub mod session;
+pub mod skills;
 pub mod workspace;

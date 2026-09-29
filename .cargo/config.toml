@@ -6,3 +6,8 @@
 # draw `ld: duplicate -rpath ignored`.
 [target.'cfg(target_os = "macos")']
 rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
+
+# Resolved against the workspace root, so a crate can `include_str!` from
+# `docs/` without climbing out of its own directory.
+[env]
+COMPOSTBIN_DOCS_DIR = { value = "docs", relative = true }
