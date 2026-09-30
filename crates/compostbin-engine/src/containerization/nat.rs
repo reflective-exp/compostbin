@@ -4,7 +4,7 @@
 //! agent sets its address directly — so something has to allocate, and that is
 //! compostbin's choice rather than the framework's.
 
-use containerization_framework::Network;
+use containerization_framework::model::{Dns, NatInterface};
 
 /// Gateway of Virtualization.framework's built-in NAT (macOS shared networking).
 ///
@@ -16,16 +16,21 @@ const PREFIX: u32 = 24;
 const FIRST_HOST: u32 = 2;
 const LAST_HOST: u32 = 250;
 
-/// The network a session's guest joins.
+/// The interface a session's guest joins the network through.
 ///
 /// Static because the interface requires an address up front. Hashed from the
 /// session name: stable per session, distinct between concurrent sessions.
 ///
 /// Collisions with other hosts on the shared network go undetected.
-pub fn network(name: &str) -> Network {
-  Network {
-    ipv4_address: address(name),
-    ipv4_gateway: GATEWAY.to_string(),
+pub fn interface(name: &str) -> NatInterface {
+  NatInterface::new(address(name), GATEWAY)
+}
+
+/// Names resolve through the gateway, which forwards to the host's resolver.
+pub fn dns() -> Dns {
+  Dns {
+    nameservers: vec![GATEWAY.to_string()],
+    ..Dns::default()
   }
 }
 
@@ -52,17 +57,17 @@ mod tests {
 
   #[test]
   fn gives_a_session_a_stable_address_on_the_nat_network() {
-    let first = network("session-one");
+    let first = interface("session-one");
 
-    assert_eq!(network("session-one"), first);
-    assert_ne!(network("session-two"), first);
-    assert_eq!(first.ipv4_gateway, GATEWAY);
+    assert_eq!(interface("session-one"), first);
+    assert_ne!(interface("session-two"), first);
+    assert_eq!(first.ipv4_gateway.as_deref(), Some(GATEWAY));
   }
 
   #[test]
   fn keeps_every_address_inside_the_gateways_subnet() {
     for name in ["a", "session-one", "session-two", "", "-"] {
-      let address = network(name).ipv4_address;
+      let address = interface(name).ipv4_address;
       let host: u32 = address
         .strip_prefix("192.168.64.")
         .and_then(|rest| rest.strip_suffix("/24"))

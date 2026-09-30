@@ -14,7 +14,7 @@ use compostbin_core::skills::{self, Action};
 use compostbin_core::workspace::Origin;
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
-use compostbin_engine::containerization::{FrameworkBuilder, FrameworkEngine, Store, StoreError};
+use compostbin_engine::containerization::{self, FrameworkBuilder, FrameworkEngine, StoreError};
 use std::error::Error;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
@@ -176,7 +176,11 @@ fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn Error
     println!("then {}", session.image());
   }
 
-  image::build(session, &FrameworkBuilder::new(Store::at(image::store(session))), cache)?;
+  image::build(
+    session,
+    &FrameworkBuilder::new(containerization::store(image::store(session))),
+    cache,
+  )?;
 
   Ok(0)
 }
@@ -274,7 +278,7 @@ fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
 /// The engine a session runs on: Containerization.framework, in-process.
 /// Nothing else provides images, so the store must be ready first.
 fn select(session: &Session) -> Result<FrameworkEngine, Box<dyn Error>> {
-  let store = Store::at(image::store(session));
+  let store = containerization::store(image::store(session));
 
   store.ready().map_err(|error| match error {
     StoreError::Unreadable { .. } => error.to_string(),

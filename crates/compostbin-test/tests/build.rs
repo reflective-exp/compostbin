@@ -37,7 +37,7 @@ fn names_the_store_it_provisions() {
     "stdout: {}",
     stdout(&output)
   );
-  for provisioned in ["state.json", "kernels", "content"] {
+  for provisioned in ["state.json", "kernels", "initfs", "content"] {
     assert!(
       store.join(provisioned).exists(),
       "a provisioned store holds {provisioned}"

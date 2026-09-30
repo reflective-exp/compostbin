@@ -31,6 +31,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use containerization_framework::{Store, StoreError};
 
+/// The store at `root`, booting the kernel and init image the framework pins.
+///
+/// Each is named for its version, so a framework upgrade that moves a pin finds
+/// nothing at the new path and provisioning fetches it, rather than booting
+/// what an older release left behind.
+pub fn store(root: impl Into<PathBuf>) -> Store {
+  let root = root.into();
+  let kernel = root.join(format!("kernels/vmlinux-{}", framework::KERNEL_VERSION));
+  let initfs = root.join(format!("initfs/vminit-{}.ext4", framework::INITFS_VERSION));
+
+  Store::at(root, kernel, framework::INITFS_REFERENCE, initfs)
+}
+
 /// Set by the SIGWINCH handler. One per process: a process attaches at most
 /// one terminal.
 static RESIZED: AtomicBool = AtomicBool::new(false);
@@ -84,12 +97,14 @@ impl FrameworkEngine {
     request: &control::Request,
     stdio: Stdio,
   ) -> Result<i32, framework::Error> {
-    session.exec(&framework::ExecRequest {
-      environment: request.environment.clone(),
-      user: request.user.clone(),
-      workdir: Some(PathBuf::from(&request.working_directory)),
-      ..framework::ExecRequest::new(name, id, request.arguments.clone(), stdio)
-    })
+    let process = framework::model::LinuxProcessConfiguration {
+      arguments: Some(request.arguments.clone()),
+      environment_variables: request.environment.clone(),
+      working_directory: Some(request.working_directory.clone()),
+      user: request.user.clone().map(framework::model::User::named),
+    };
+
+    session.exec(name, id, &process, stdio)
   }
 
   /// Serves attaches from other callers on a detached thread, never joined:
@@ -276,4 +291,25 @@ extern "C" fn note_resize(_signal: libc::c_int) {
 /// poller can stop when its attach ends.
 fn resized() -> bool {
   RESIZED.swap(false, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::path::Path;
+
+  #[test]
+  fn names_the_kernel_and_init_image_for_the_versions_the_framework_pins() {
+    let store = store("/images");
+
+    assert_eq!(
+      store.kernel(),
+      Path::new(&format!("/images/kernels/vmlinux-{}", framework::KERNEL_VERSION))
+    );
+    assert_eq!(
+      store.initfs(),
+      Path::new(&format!("/images/initfs/vminit-{}.ext4", framework::INITFS_VERSION))
+    );
+    assert_eq!(store.initfs_reference(), framework::INITFS_REFERENCE);
+  }
 }

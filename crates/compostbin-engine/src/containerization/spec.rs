@@ -7,8 +7,8 @@
 
 use super::nat;
 use crate::cache::Keys;
-use crate::model::{BuildPlan, EnvVar, Mount, RunSpec, SocketRelay};
-use containerization_framework as framework;
+use crate::model::{BuildPlan, EnvVar, Resources, RunSpec, SocketRelay};
+use containerization_framework::{self as framework, model};
 use std::path::Path;
 
 /// `NAME=VALUE`.
@@ -33,46 +33,55 @@ pub fn working_directory(workdir: Option<&Path>) -> String {
   workdir.map_or_else(|| "/".to_string(), |path| path.display().to_string())
 }
 
-fn mounts(mounts: &[Mount]) -> Vec<framework::Mount> {
-  mounts
-    .iter()
-    .map(|mount| framework::Mount {
-      readonly: mount.readonly,
-      source: mount.source.clone(),
-      target: mount.target.clone(),
-    })
-    .collect()
+/// A virtiofs share, read-only if declared so.
+fn share(source: &Path, destination: impl Into<String>, readonly: bool) -> model::Mount {
+  let options: &[&str] = if readonly { &["ro"] } else { &[] };
+
+  model::Mount::share(source.display().to_string(), destination, options)
 }
 
-fn sockets(sockets: &[SocketRelay]) -> Vec<framework::SocketRelay> {
-  sockets
-    .iter()
-    .map(|socket| framework::SocketRelay::into_guest(socket.source.clone(), socket.target.clone()))
-    .collect()
+/// Mode `0o666`, so an unprivileged guest user can connect.
+fn socket(socket: &SocketRelay) -> model::UnixSocketConfiguration {
+  model::UnixSocketConfiguration {
+    permissions: Some(0o666),
+    ..model::UnixSocketConfiguration::new(socket.source.clone(), socket.target.clone())
+  }
 }
 
-fn resources(resources: crate::model::Resources) -> framework::Resources {
-  framework::Resources {
-    cpus: resources.cpus,
-    memory_in_bytes: resources.memory_in_bytes,
+/// The container's limits plus a core and the guest kernel's memory, so the
+/// container gets all it was given.
+fn vm(resources: Resources) -> model::VmResources {
+  model::VmResources {
+    cpus: resources.cpus + 1,
+    memory_in_bytes: resources.memory_in_bytes + model::VmResources::GUEST_MEMORY_OVERHEAD,
   }
 }
 
 /// A session's container, on its own address.
 pub fn boot(spec: &RunSpec) -> framework::BootSpec {
-  framework::BootSpec {
-    arguments: spec.arguments.clone(),
-    environment: environment(&spec.env),
-    mounts: mounts(&spec.mounts),
-    sockets: sockets(&spec.sockets),
-    workdir: spec.workdir.clone(),
-    ..framework::BootSpec::new(
-      spec.name.clone(),
-      spec.image.clone(),
-      resources(spec.resources),
-      nat::network(&spec.name),
-    )
-  }
+  let mut boot = framework::BootSpec::new(spec.name.clone(), spec.image.clone());
+  boot.vm = vm(spec.resources);
+
+  let configuration = &mut boot.configuration;
+  configuration.cpus = spec.resources.cpus;
+  configuration.memory_in_bytes = spec.resources.memory_in_bytes;
+  configuration.process = model::LinuxProcessConfiguration {
+    arguments: Some(spec.arguments.clone()),
+    environment_variables: environment(&spec.env),
+    working_directory: Some(working_directory(spec.workdir.as_deref())),
+    user: None,
+  };
+  configuration.interfaces = vec![nat::interface(&spec.name)];
+  configuration.dns = Some(nat::dns());
+  configuration.mounts.extend(
+    spec
+      .mounts
+      .iter()
+      .map(|mount| share(&mount.source, mount.target.display().to_string(), mount.readonly)),
+  );
+  configuration.sockets = spec.sockets.iter().map(socket).collect();
+
+  boot
 }
 
 /// A build, with the caller's keys and a builder container of its own.
@@ -81,14 +90,13 @@ pub fn boot(spec: &RunSpec) -> framework::BootSpec {
 /// default `bash -euo pipefail -c` holds and nothing overrides the shell.
 pub fn build(plan: &BuildPlan, keys: &Keys, name: String) -> framework::BuildPlan {
   framework::BuildPlan {
+    cpus: plan.resources.cpus,
+    memory_in_bytes: plan.resources.memory_in_bytes,
+    vm: vm(plan.resources),
     mounts: plan
       .mounts
       .iter()
-      .map(|mount| framework::BuildMount {
-        destination: mount.destination.clone(),
-        readonly: mount.readonly,
-        source: mount.source.clone(),
-      })
+      .map(|mount| share(&mount.source, mount.destination.clone(), mount.readonly))
       .collect(),
     steps: plan
       .steps
@@ -113,8 +121,7 @@ pub fn build(plan: &BuildPlan, keys: &Keys, name: String) -> framework::BuildPla
       name.clone(),
       plan.base.clone(),
       plan.tag.clone(),
-      resources(plan.resources),
-      nat::network(&name),
+      nat::interface(&name),
       keys.base.clone(),
     )
   }
@@ -132,7 +139,7 @@ pub fn builder_name() -> Result<String, getrandom::Error> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::Resources;
+  use crate::model::Mount;
   use std::path::PathBuf;
 
   #[test]
@@ -193,11 +200,35 @@ mod tests {
   fn boots_a_session_onto_its_own_nat_address() {
     let spec = boot(&run_spec());
 
-    assert_eq!(spec.name, "session-one");
-    assert_eq!(spec.network, nat::network("session-one"));
-    assert_eq!(spec.environment, ["IS_SANDBOX=1"]);
-    assert_eq!(spec.mounts.len(), 1);
-    assert!(spec.mounts[0].readonly);
+    assert_eq!(spec.id, "session-one");
+    assert_eq!(spec.configuration.interfaces, [nat::interface("session-one")]);
+    assert_eq!(spec.configuration.dns, Some(nat::dns()));
+    assert_eq!(spec.configuration.process.environment_variables, ["IS_SANDBOX=1"]);
+  }
+
+  #[test]
+  fn adds_declared_mounts_after_the_standard_ones() {
+    let spec = boot(&run_spec());
+    let standard = model::LinuxContainerConfiguration::default_mounts();
+    let (defaults, declared) = spec.configuration.mounts.split_at(standard.len());
+
+    assert_eq!(defaults, standard);
+    assert_eq!(
+      declared,
+      [model::Mount::share("/Users/user/workspace", "/workspace", &["ro"])]
+    );
+  }
+
+  #[test]
+  fn sizes_the_vm_to_hold_the_whole_container() {
+    let spec = boot(&run_spec());
+
+    assert_eq!(spec.configuration.cpus, 4);
+    assert_eq!(spec.vm.cpus, 5);
+    assert_eq!(
+      spec.vm.memory_in_bytes,
+      (8 << 30) + model::VmResources::GUEST_MEMORY_OVERHEAD
+    );
   }
 
   /// Only the guest reaches host services, never the reverse.
@@ -205,8 +236,8 @@ mod tests {
   fn relays_every_socket_into_the_guest() {
     let spec = boot(&run_spec());
 
-    assert_eq!(spec.sockets[0].direction, framework::Direction::IntoGuest);
-    assert_eq!(spec.sockets[0].mode, 0o666);
+    assert_eq!(spec.configuration.sockets[0].direction, model::Direction::Into);
+    assert_eq!(spec.configuration.sockets[0].permissions, Some(0o666));
   }
 
   #[test]
