@@ -5,6 +5,8 @@
 - Add `--profile <name>` to session commands, reading
   `~/.config/compostbin/profiles/<name>.toml` instead of the project's
   manifest. `compostbin install` creates that directory.
+- Version the kernel and initfs in the compostbin cache; automatically
+  detect updates.
 
 ## v0.10.0
 
