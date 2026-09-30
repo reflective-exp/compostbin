@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Update containerization framework to v0.2.2.
+
 ## v0.11.0
 
 - Add `--profile <name>` to session commands, reading

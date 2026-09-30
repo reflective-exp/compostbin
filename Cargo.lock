@@ -170,9 +170,9 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "containerization-framework"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0c3e51c7428405265090f57d22ef7147f123f0f9f55179b84c615ef6d549a55"
+checksum = "e0efbd04cdf234480fe87f78dcc4b9a9abb13962584e535d8cdfae5ad1f373dd"
 dependencies = [
  "libc",
  "serde",
