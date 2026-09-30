@@ -25,19 +25,21 @@ pub struct RecordedMount {
   pub target: String,
 }
 
-impl RecordedMount {
-  fn of(mount: &Mount) -> Self {
+impl From<&Mount> for RecordedMount {
+  fn from(mount: &Mount) -> Self {
     Self {
       readonly: mount.readonly,
       source: mount.source.display().to_string(),
       target: mount.target.display().to_string(),
     }
   }
+}
 
-  /// Recorded beside the mounts, in the same shape: a relayed socket is not a
-  /// mount, but it is fixed at creation just as one is, and `doctor` has to say
-  /// so when a port is declared after the container started.
-  fn of_socket(socket: &SocketRelay) -> Self {
+/// Recorded beside the mounts, in the same shape: a relayed socket is not a
+/// mount, but it is fixed at creation in the same way; `doctor` warns when a
+/// port is declared after the container started.
+impl From<&SocketRelay> for RecordedMount {
+  fn from(socket: &SocketRelay) -> Self {
     Self {
       readonly: false,
       source: socket.source.display().to_string(),
@@ -75,8 +77,8 @@ impl Record {
     Self {
       mounts: mounts
         .iter()
-        .map(RecordedMount::of)
-        .chain(sockets.iter().map(RecordedMount::of_socket))
+        .map(RecordedMount::from)
+        .chain(sockets.iter().map(RecordedMount::from))
         .collect(),
     }
   }
