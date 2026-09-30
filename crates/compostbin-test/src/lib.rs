@@ -20,11 +20,23 @@
 //! then `cargo nextest run --features compostbin-test/integration`.
 
 #[cfg(feature = "integration")]
+mod lock;
+#[cfg(feature = "integration")]
+mod output;
+#[cfg(feature = "integration")]
 mod project;
+#[cfg(feature = "integration")]
+mod signing;
 #[cfg(feature = "integration")]
 mod terminal;
 
 #[cfg(feature = "integration")]
-pub use crate::project::{Lock, Project, Running, code, exclusive, signed_binary, stderr, stdout};
+pub use crate::lock::{Lock, exclusive};
+#[cfg(feature = "integration")]
+pub use crate::output::{code, stderr, stdout};
+#[cfg(feature = "integration")]
+pub use crate::project::{Project, Running};
+#[cfg(feature = "integration")]
+pub use crate::signing::signed_binary;
 #[cfg(feature = "integration")]
 pub use crate::terminal::Terminal;

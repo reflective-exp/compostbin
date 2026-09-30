@@ -1,5 +1,7 @@
 //! A throwaway project, and the session it starts.
 
+use crate::output::{stderr, stdout};
+use crate::signing::signed_binary;
 use crate::terminal::Terminal;
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, Memory, TomlFile};
 use compostbin_core::session::NAME_PREFIX;
@@ -7,25 +9,13 @@ use compostbin_core::session::image::IMAGE_STORE;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 /// Where a project's temporary home goes. Not the system temp directory, whose
 /// path on macOS is long enough that a port socket under it — `<home>/.local/
 /// state/compostbin/sessions/<name>/ports/<port>.sock` — exceeds the 104 bytes
 /// a unix socket path may have.
 const HOME_PARENT: &str = "/tmp";
-/// The entitled copy of the binary under test, beside the one cargo builds.
-const SIGNED_NAME: &str = "compostbin-signed";
-/// Records which build `SIGNED_NAME` was copied from, so a rebuilt binary is
-/// signed again and an unchanged one is not.
-const SIGNED_SOURCE: &str = "compostbin-signed.source";
-/// Held while one process signs. Taken by creating it, so the loser waits
-/// rather than signing over a copy another test is about to run.
-const SIGNING_LOCK: &str = "compostbin-signed.lock";
-/// Long enough for a copy and a `codesign`, short enough that a lock left by a
-/// killed test does not stop the next run.
-const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
-const LOCK_POLL: Duration = Duration::from_millis(50);
 /// How long [`Project::wait_for`] gives the guest. Generous, because the first
 /// command in a project is waiting on a container to be created.
 const GUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -338,20 +328,6 @@ impl Drop for Project {
   }
 }
 
-pub fn stdout(output: &Output) -> String {
-  String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-pub fn stderr(output: &Output) -> String {
-  String::from_utf8_lossy(&output.stderr).into_owned()
-}
-
-/// The exit code, or the signal a killed process died of, as a shell reports
-/// it.
-pub fn code(output: &Output) -> i32 {
-  output.status.code().unwrap_or(-1)
-}
-
 /// A script, checked for the newline that would quietly cut it short.
 ///
 /// Arguments cross to the guest as newline-separated lines (see the
@@ -389,140 +365,4 @@ fn real_cache() -> PathBuf {
       .parent()
       .expect("the store is inside the cache"),
   )
-}
-
-/// The binary under test, copied aside and signed.
-///
-/// Virtualization.framework refuses every call from a binary without
-/// `com.apple.security.virtualization`, and the build cargo just did dropped
-/// whatever signature the last one had. Signing the copy rather than the
-/// original leaves the developer's `target/debug/compostbin` alone and, more to
-/// the point, never rewrites a file another test is in the middle of running.
-pub fn signed_binary() -> PathBuf {
-  let target = target_dir();
-  let unsigned = target.join("compostbin");
-  let signed = target.join(SIGNED_NAME);
-  let marker = target.join(SIGNED_SOURCE);
-
-  assert!(
-    unsigned.exists(),
-    "{} has not been built; run the whole suite (`cargo nextest run --features compostbin-test/integration`) so cargo builds it",
-    unsigned.display()
-  );
-
-  let stamp = stamp(&unsigned);
-  if std::fs::read_to_string(&marker).is_ok_and(|recorded| recorded == stamp) {
-    return signed;
-  }
-
-  let _lock = Lock::take(target.join(SIGNING_LOCK));
-
-  // The process that held the lock may have just done this.
-  if std::fs::read_to_string(&marker).is_ok_and(|recorded| recorded == stamp) {
-    return signed;
-  }
-
-  // Signed under another name and renamed into place, so a test starting the
-  // binary either gets the last complete one or this one, never a half-written
-  // copy — and a process already running the old one keeps its own inode.
-  let partial = target.join(format!("{SIGNED_NAME}.partial"));
-  std::fs::copy(&unsigned, &partial).expect("copy the binary aside");
-  sign(&partial);
-  std::fs::rename(&partial, &signed).expect("publish the signed binary");
-  std::fs::write(&marker, &stamp).expect("record what was signed");
-
-  signed
-}
-
-/// What a build of the binary is: its size and when it was written. Cheaper
-/// than hashing it, and a rebuild changes both.
-fn stamp(binary: &Path) -> String {
-  let metadata = std::fs::metadata(binary).expect("the binary should be readable");
-  let modified = metadata
-    .modified()
-    .expect("modification time")
-    .duration_since(SystemTime::UNIX_EPOCH)
-    .expect("the binary is not older than the epoch");
-
-  format!("{} {}", metadata.len(), modified.as_nanos())
-}
-
-fn sign(binary: &Path) {
-  let script = repository_root().join("bin/dev/sign");
-  let signed = Command::new(&script)
-    .arg(binary)
-    .output()
-    .unwrap_or_else(|error| panic!("{} should run: {error}", script.display()));
-
-  assert!(
-    signed.status.success(),
-    "signing {} failed: {}",
-    binary.display(),
-    stderr(&signed)
-  );
-}
-
-/// The directory cargo built into: `…/target/<profile>`, two above this test
-/// binary in `…/target/<profile>/deps`.
-fn target_dir() -> PathBuf {
-  std::env::current_exe()
-    .expect("the test binary has a path")
-    .parent()
-    .and_then(Path::parent)
-    .expect("the test binary is under target/<profile>/deps")
-    .to_path_buf()
-}
-
-fn repository_root() -> PathBuf {
-  Path::new(env!("CARGO_MANIFEST_DIR"))
-    .join("../..")
-    .canonicalize()
-    .expect("canonical repository root")
-}
-
-/// Serializes the tests that touch one thing the whole machine shares — the
-/// pasteboard, above all. A `Mutex` would not: nextest runs each test in a
-/// process of its own, so the lock has to be one too.
-pub fn exclusive(what: &str) -> Lock {
-  Lock::take(target_dir().join(format!("compostbin-test-{what}.lock")))
-}
-
-/// A lock held by the existence of a file, released by dropping it. One left by
-/// a test that died is taken over once it is older than `LOCK_TIMEOUT`, so a
-/// crash costs one slow run rather than every run after it.
-pub struct Lock(PathBuf);
-
-impl Lock {
-  fn take(path: PathBuf) -> Self {
-    loop {
-      match std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&path)
-      {
-        Ok(_) => return Self(path),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-          if held_too_long(&path) {
-            let _ = std::fs::remove_file(&path);
-          }
-          std::thread::sleep(LOCK_POLL);
-        }
-        Err(error) => panic!("could not take {}: {error}", path.display()),
-      }
-    }
-  }
-}
-
-/// Whether a lock file is old enough that whoever made it is gone. A missing
-/// one has just been released, which is not a timeout.
-fn held_too_long(path: &Path) -> bool {
-  std::fs::metadata(path)
-    .and_then(|metadata| metadata.modified())
-    .is_ok_and(|taken| taken.elapsed().is_ok_and(|held| held > LOCK_TIMEOUT))
-}
-
-impl Drop for Lock {
-  fn drop(&mut self) {
-    let _ = std::fs::remove_file(&self.0);
-  }
 }

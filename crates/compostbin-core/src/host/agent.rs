@@ -7,39 +7,23 @@
 use crate::error::{At, PathError};
 use crate::host::pty::Pty;
 use crate::host::request::{Request, Resolved, resolve};
-use crate::host::spool::{Spool, publish};
+use crate::host::spool::Spool;
 use crate::host::{
-  CHUNK_SIZE, ERROR_STREAM, INPUT_EOF_SUFFIX, INPUT_SUFFIX, OUTPUT_STREAM, REJECTED_EXIT_CODE, REQUEST_SUFFIX,
-  SEQUENCE_WIDTH, SIGNAL_EXIT_BASE, STATUS_SUFFIX, TTY_SUFFIX,
+  CHUNK_SIZE, ERROR_STREAM, INPUT_EOF_SUFFIX, INPUT_SUFFIX, OUTPUT_STREAM, REJECTED_EXIT_CODE, SIGNAL_EXIT_BASE,
+  TTY_SUFFIX,
 };
 use crate::manifest::HostCommand;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Immediate enough for a command, rare enough to be invisible on the host.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-/// The rename *is* the claim: it is atomic, so racing agents cannot both win.
-fn claim_next(spool: &Spool) -> Result<Option<(String, PathBuf)>, PathError> {
-  let Some(id) = spool.next_request_id()? else {
-    return Ok(None);
-  };
-
-  let submitted = spool.requests().join(format!("{id}{REQUEST_SUFFIX}"));
-  let claimed = spool.running().join(&id);
-
-  if std::fs::rename(&submitted, &claimed).is_err() {
-    return Ok(None);
-  }
-
-  Ok(Some((id, claimed)))
-}
 
 /// Runs a claimed request through to its status file and clears the claim.
 fn complete(
@@ -50,7 +34,7 @@ fn complete(
   claimed: &Path,
 ) -> Result<(), PathError> {
   let status = run_claimed(spool, commands, project_dir, id, claimed)?;
-  write_status(spool, id, status)?;
+  spool.write_status(id, status)?;
   std::fs::remove_file(claimed).at(claimed)
 }
 
@@ -58,7 +42,7 @@ fn complete(
 /// was anything to do. Sessions use `serve` instead.
 #[cfg(test)]
 fn serve_once(spool: &Spool, commands: &BTreeMap<String, HostCommand>, project_dir: &Path) -> Result<bool, PathError> {
-  let Some((id, claimed)) = claim_next(spool)? else {
+  let Some((id, claimed)) = spool.claim_next()? else {
     return Ok(false);
   };
 
@@ -83,7 +67,7 @@ fn run_claimed(
   {
     Ok(resolved) => resolved,
     Err(refusal) => {
-      write_refusal(spool, id, &refusal.to_string())?;
+      spool.write_refusal(id, &refusal.to_string())?;
       return Ok(REJECTED_EXIT_CODE);
     }
   };
@@ -104,7 +88,7 @@ fn run_claimed(
   let (mut child, stdin, sources) = match started {
     Ok(started) => started,
     Err(source) => {
-      write_refusal(spool, id, &format!("{}: {source}", argv[0]))?;
+      spool.write_refusal(id, &format!("{}: {source}", argv[0]))?;
       return Ok(REJECTED_EXIT_CODE);
     }
   };
@@ -200,17 +184,10 @@ fn publish_stream(spool: &Spool, id: &str, stream: &str, mut source: impl Read) 
       Ok(read) => {
         sequence += 1;
         // Nothing to be done: the channel back to the guest is what just failed.
-        let _ = publish_chunk(spool, id, stream, sequence, &buffer[..read]);
+        let _ = spool.publish_chunk(id, stream, sequence, &buffer[..read]);
       }
     }
   }
-}
-
-/// Written `.partial` then renamed, so the guest's first look at the inode finds
-/// it complete.
-fn publish_chunk(spool: &Spool, id: &str, stream: &str, sequence: usize, data: &[u8]) -> Result<(), PathError> {
-  let name = format!("{id}.{stream}.{sequence:0width$}", width = SEQUENCE_WIDTH);
-  publish(&spool.responses(), &name, data)
 }
 
 /// Feeds the guest's input to the command as it arrives, ending at the guest's
@@ -244,26 +221,6 @@ fn pump_stdin(spool: &Spool, id: &str, mut sink: Box<dyn Write + Send>, finished
   }
 }
 
-fn write_refusal(spool: &Spool, id: &str, message: &str) -> Result<(), PathError> {
-  publish_chunk(
-    spool,
-    id,
-    ERROR_STREAM,
-    1,
-    format!("compostbin: {message}\n").as_bytes(),
-  )
-}
-
-/// Written last and by rename, so its appearance means "finished, output
-/// complete".
-fn write_status(spool: &Spool, id: &str, status: i32) -> Result<(), PathError> {
-  publish(
-    &spool.responses(),
-    &format!("{id}{STATUS_SUFFIX}"),
-    format!("{status}\n"),
-  )
-}
-
 /// Serves requests until `stop` is set, each on its own thread, since subagents
 /// call `compostbin-host` independently and one long run must not block the
 /// rest. Claims are in arrival order; `limit` bounds what is in flight, so a
@@ -284,7 +241,7 @@ pub fn serve(
         continue;
       }
 
-      match claim_next(spool)? {
+      match spool.claim_next()? {
         None => std::thread::sleep(POLL_INTERVAL),
         Some((id, claimed)) => {
           in_flight.fetch_add(1, Ordering::Relaxed);
@@ -309,8 +266,9 @@ pub fn serve(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::host::PARTIAL_SUFFIX;
   use crate::host::fixtures::{allowlist, commands, spool, terminal_command};
+  use crate::host::{PARTIAL_SUFFIX, STATUS_SUFFIX};
+  use std::path::PathBuf;
   use tempfile::TempDir;
 
   /// What a caller of `compostbin-host` sees. A missing stream reads as empty,

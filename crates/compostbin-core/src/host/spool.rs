@@ -2,7 +2,9 @@
 
 use crate::error::{At, HostError, PathError};
 use crate::host::request::Request;
-use crate::host::{PARTIAL_SUFFIX, REQUEST_SUFFIX, REQUESTS_DIR, RESPONSES_DIR, RUNNING_DIR};
+use crate::host::{
+  ERROR_STREAM, PARTIAL_SUFFIX, REQUEST_SUFFIX, REQUESTS_DIR, RESPONSES_DIR, RUNNING_DIR, SEQUENCE_WIDTH, STATUS_SUFFIX,
+};
 use std::path::{Path, PathBuf};
 
 pub struct Spool {
@@ -104,9 +106,48 @@ impl Spool {
     Ok(publish(&self.requests(), &format!("{id}{REQUEST_SUFFIX}"), rendered)?)
   }
 
+  /// Takes the oldest unclaimed request, returning its id and where it now is.
+  ///
+  /// The rename *is* the claim: it is atomic, so racing agents cannot both win.
+  pub(super) fn claim_next(&self) -> Result<Option<(String, PathBuf)>, PathError> {
+    let Some(id) = self.next_request_id()? else {
+      return Ok(None);
+    };
+
+    let submitted = self.requests().join(format!("{id}{REQUEST_SUFFIX}"));
+    let claimed = self.running().join(&id);
+
+    if std::fs::rename(&submitted, &claimed).is_err() {
+      return Ok(None);
+    }
+
+    Ok(Some((id, claimed)))
+  }
+
+  /// Written `.partial` then renamed, so the guest's first look at the inode finds
+  /// it complete.
+  pub(super) fn publish_chunk(&self, id: &str, stream: &str, sequence: usize, data: &[u8]) -> Result<(), PathError> {
+    let name = format!("{id}.{stream}.{sequence:0width$}", width = SEQUENCE_WIDTH);
+    publish(&self.responses(), &name, data)
+  }
+
+  pub(super) fn write_refusal(&self, id: &str, message: &str) -> Result<(), PathError> {
+    self.publish_chunk(id, ERROR_STREAM, 1, format!("compostbin: {message}\n").as_bytes())
+  }
+
+  /// Written last and by rename, so its appearance means "finished, output
+  /// complete".
+  pub(super) fn write_status(&self, id: &str, status: i32) -> Result<(), PathError> {
+    publish(
+      &self.responses(),
+      &format!("{id}{STATUS_SUFFIX}"),
+      format!("{status}\n"),
+    )
+  }
+
   /// The oldest unclaimed id. Ids are timestamp-prefixed, so name order is
   /// arrival order.
-  pub(super) fn next_request_id(&self) -> Result<Option<String>, PathError> {
+  fn next_request_id(&self) -> Result<Option<String>, PathError> {
     let directory = self.requests();
 
     let mut ids: Vec<String> = Vec::new();
@@ -125,7 +166,7 @@ impl Spool {
 
 /// Writes `<name>.partial`, then renames it to `name`, so a reader across the
 /// mount never finds the file incomplete.
-pub(super) fn publish(directory: &Path, name: &str, contents: impl AsRef<[u8]>) -> Result<(), PathError> {
+fn publish(directory: &Path, name: &str, contents: impl AsRef<[u8]>) -> Result<(), PathError> {
   let partial = directory.join(format!("{name}{PARTIAL_SUFFIX}"));
 
   std::fs::write(&partial, contents).at(&partial)?;
@@ -135,8 +176,8 @@ pub(super) fn publish(directory: &Path, name: &str, contents: impl AsRef<[u8]>) 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::host::OUTPUT_STREAM;
   use crate::host::fixtures::spool;
-  use crate::host::{OUTPUT_STREAM, STATUS_SUFFIX};
   use tempfile::TempDir;
 
   /// Creating a container is the moment a killed client's leftovers are provably
