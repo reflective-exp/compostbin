@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.11.0
+
 - Add `--profile <name>` to session commands, reading
   `~/.config/compostbin/profiles/<name>.toml` instead of the project's
   manifest. `compostbin install` creates that directory.
