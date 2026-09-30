@@ -6,7 +6,7 @@
 //! from, as a hook the guest runs, and read-only — a guest that can rewrite its
 //! own briefing has none.
 
-use compostbin_core::manifest::Manifest;
+use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest};
 use compostbin_core::session::briefing::{
   BRIEFING_FILE, MANAGED_SETTINGS_FILE, MANAGED_SETTINGS_TARGET, briefing, managed_settings,
 };
@@ -15,7 +15,10 @@ use compostbin_test::{Project, stderr};
 /// The briefing as the host would render it from the manifest the project has
 /// on disk, which is what the guest must be holding.
 fn rendered(project: &Project) -> String {
-  briefing(&Manifest::load(&project.manifest_path()).expect("the manifest should load"))
+  briefing(
+    &Manifest::load(&project.manifest_path()).expect("the manifest should load"),
+    MANIFEST_RELATIVE_PATH,
+  )
 }
 
 #[test]

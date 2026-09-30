@@ -13,6 +13,8 @@ pub const DEFAULT_HOST_CONCURRENCY: usize = 8;
 pub const DEFAULT_IMAGE: &str = "compostbin/base:latest";
 /// Checked in beside the project it configures.
 pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
+/// Hand-written manifests, each replacing a project's own under `--profile`.
+pub const PROFILES_DIR: &str = "~/.config/compostbin/profiles";
 /// The host command `[host] clipboard` serves, and what the guest's `pbcopy`,
 /// `xclip`, `xsel` and `wl-copy` send.
 pub const CLIPBOARD_COMMAND: &str = "clipboard";
@@ -62,7 +64,8 @@ impl Manifest {
     Ok(manifest)
   }
 
-  fn parse(path: &Path) -> Result<Self, ManifestError> {
+  /// The file alone, without its local overlay.
+  pub fn parse(path: &Path) -> Result<Self, ManifestError> {
     let text = std::fs::read_to_string(path).at(path)?;
 
     toml::from_str(&text).map_err(|source| ManifestError::Parse {
@@ -123,6 +126,11 @@ impl Manifest {
       self.save(manifest_path)
     }
   }
+}
+
+/// Unresolved, `~` kept, as the user writes it.
+pub fn profile_path(name: &str) -> String {
+  format!("{PROFILES_DIR}/{name}.toml")
 }
 
 /// `None` when the file is missing; a file that exists and does not parse is

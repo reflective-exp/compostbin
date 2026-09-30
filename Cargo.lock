@@ -136,6 +136,7 @@ dependencies = [
  "compostbin-engine",
  "libc",
  "serde",
+ "sha2",
  "tempfile",
  "toml",
 ]

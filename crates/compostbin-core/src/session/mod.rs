@@ -10,9 +10,10 @@ pub mod image;
 pub mod record;
 pub mod settings;
 
+use crate::error::ManifestError;
 use crate::error::{At, PathError, SessionError};
 use crate::host::{self, Forward, GUEST_PORTS_TARGET, GUEST_SPOOL_TARGET, PortEvent, Spool};
-use crate::manifest::{Manifest, PathEntry, SESSIONS_DIR};
+use crate::manifest::{MANIFEST_RELATIVE_PATH, Manifest, PathEntry, SESSIONS_DIR, profile_path};
 use crate::session::briefing::{MANAGED_SETTINGS_DIR, MANAGED_SETTINGS_TARGET};
 use crate::session::credentials::{CredentialSource, SeedOutcome};
 use crate::session::image::GUEST_PORTS_NAME;
@@ -128,6 +129,18 @@ fn append_to_log(log: &Path, event: &PortEvent) {
   }
 }
 
+/// The first eight hex digits of the path's SHA-256: stable across Rust
+/// releases, unlike `DefaultHasher`, so a profiled session keeps its name.
+fn directory_hash(dir: &Path) -> String {
+  use sha2::{Digest, Sha256};
+  use std::os::unix::ffi::OsStrExt;
+
+  Sha256::digest(dir.as_os_str().as_bytes())[..4]
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect()
+}
+
 /// What a session has to say as it starts, runs, and ends, left to the caller to
 /// print: core does not own the terminal.
 ///
@@ -165,6 +178,8 @@ pub enum AddOutcome {
 
 pub struct Session {
   pub manifest: Manifest,
+  /// Set when a profile replaces the project's manifest.
+  profile: Option<String>,
   project_dir: PathBuf,
   resolver: PathResolver,
 }
@@ -173,8 +188,27 @@ impl Session {
   pub fn new(manifest: Manifest, resolver: PathResolver, project_dir: impl Into<PathBuf>) -> Self {
     Self {
       manifest,
+      profile: None,
       project_dir: project_dir.into(),
       resolver,
+    }
+  }
+
+  /// Configured by profile `name` alone; neither project manifest is read.
+  pub fn profiled(name: &str, resolver: PathResolver, project_dir: impl Into<PathBuf>) -> Result<Self, ManifestError> {
+    Ok(Self {
+      manifest: Manifest::parse(&resolver.resolve(&profile_path(name)))?,
+      profile: Some(name.to_string()),
+      project_dir: project_dir.into(),
+      resolver,
+    })
+  }
+
+  /// Where this session's configuration lives, as the user would write it.
+  pub fn config_path(&self) -> String {
+    match &self.profile {
+      Some(name) => profile_path(name),
+      None => MANIFEST_RELATIVE_PATH.to_string(),
     }
   }
 
@@ -296,19 +330,22 @@ impl Session {
     Ok(vec![spool])
   }
 
+  /// A profile serves many directories, so its sessions are named after the
+  /// directory plus a hash of its path: two checkouts named `api` must not
+  /// share a container or conversation.
   pub fn container_name(&self) -> String {
-    let project = self
-      .manifest
-      .project
-      .name
-      .clone()
-      .or_else(|| {
-        self
-          .project_dir
-          .file_name()
-          .map(|basename| basename.to_string_lossy().into_owned())
-      })
-      .unwrap_or_default();
+    let basename = || {
+      self
+        .project_dir
+        .file_name()
+        .map(|basename| basename.to_string_lossy().into_owned())
+        .unwrap_or_default()
+    };
+
+    let project = match &self.profile {
+      Some(_) => format!("{}-{}", basename(), directory_hash(&self.project_dir)),
+      None => self.manifest.project.name.clone().unwrap_or_else(basename),
+    };
 
     format!("{NAME_PREFIX}{project}")
   }
@@ -448,12 +485,16 @@ impl Session {
   }
 
   /// A derived image when the manifest adds packages or build steps, otherwise
-  /// the shared base itself.
+  /// the shared base itself. A profile's is named after the profile: it is the
+  /// same image in every directory.
   pub fn image(&self) -> String {
     if self.manifest.image.is_empty() {
-      self.manifest.project.image.clone()
-    } else {
-      format!("compostbin/{}:latest", self.container_name())
+      return self.manifest.project.image.clone();
+    }
+
+    match &self.profile {
+      Some(name) => format!("compostbin/profile-{name}:latest"),
+      None => format!("compostbin/{}:latest", self.container_name()),
     }
   }
 
@@ -540,7 +581,7 @@ impl Session {
     }
 
     // Every create mounts a briefing rendered from the manifest as it reads now.
-    briefing::write(&self.managed_settings(), &self.manifest)?;
+    briefing::write(&self.managed_settings(), &self.manifest, &self.config_path())?;
 
     // Every guest client that could still be waiting on a response died with the
     // container this one replaces, so their leftovers are now provably nobody's.
@@ -801,6 +842,7 @@ mod tests {
   use crate::session::credentials::FakeSource;
   use compostbin_engine::fake::{Call, RecordingEngine};
   use std::os::unix::fs::{FileTypeExt, MetadataExt};
+  use tempfile::TempDir;
 
   const MANIFEST: &str = r#"
 [project]
@@ -1175,7 +1217,7 @@ source   = "~/.cargo/registry"
     assert_eq!(
       std::fs::read_to_string(session.managed_settings().join(briefing::BRIEFING_FILE))
         .expect("the briefing should exist"),
-      briefing::briefing(&session.manifest)
+      briefing::briefing(&session.manifest, MANIFEST_RELATIVE_PATH)
     );
     assert!(
       session
@@ -1700,5 +1742,70 @@ source   = "~/.cargo/registry"
       session.clean(true).expect("clean should succeed"),
       Vec::<PathBuf>::new()
     );
+  }
+
+  /// A home holding `profile` as `rust`, and a project whose own manifest
+  /// disagrees.
+  fn profiled(profile: &str, project: &str) -> (TempDir, Session) {
+    let temp = TempDir::new().expect("temp dir");
+    let home = temp.path().canonicalize().expect("canonical temp");
+    let profiles = home.join(".config/compostbin/profiles");
+    std::fs::create_dir_all(&profiles).expect("profiles dir");
+    std::fs::write(profiles.join("rust.toml"), profile).expect("profile should write");
+    let project_dir = home.join(project);
+    std::fs::create_dir_all(project_dir.join(".config")).expect("project dir");
+    std::fs::write(project_dir.join(MANIFEST_RELATIVE_PATH), "[container]\ncpus = 1\n").expect("manifest");
+
+    let session =
+      Session::profiled("rust", PathResolver::new(&project_dir, &home), &project_dir).expect("the profile should load");
+
+    (temp, session)
+  }
+
+  #[test]
+  fn a_profile_replaces_the_projects_manifest() {
+    let (_temp, session) = profiled("[container]\ncpus = 6\n", "code/api");
+
+    assert_eq!(session.manifest.container.cpus, 6);
+    assert_eq!(session.config_path(), "~/.config/compostbin/profiles/rust.toml");
+  }
+
+  #[test]
+  fn a_missing_profile_names_its_file() {
+    let temp = TempDir::new().expect("temp dir");
+
+    let Err(error) = Session::profiled("absent", PathResolver::new(temp.path(), temp.path()), temp.path()) else {
+      panic!("a profile that is not there should not load");
+    };
+
+    assert!(error.to_string().contains("profiles/absent.toml"), "{error}");
+  }
+
+  /// Neither the profile's `[project] name` nor the basename alone tells
+  /// directories apart.
+  #[test]
+  fn a_profiled_session_is_named_after_its_directory() {
+    let profile = "[project]\nname = \"shared\"\n";
+    let (_one, first) = profiled(profile, "one/api");
+    let (_two, second) = profiled(profile, "two/api");
+
+    let name = first.container_name();
+
+    assert!(name.starts_with("compostbin-api-"), "{name}");
+    assert_eq!(name.len(), "compostbin-api-".len() + 8, "{name}");
+    assert_ne!(name, second.container_name());
+  }
+
+  /// Pinned: a changed name strands the conversation kept under the old one.
+  #[test]
+  fn directory_hash_is_stable() {
+    assert_eq!(directory_hash(Path::new("/Users/user/code/api")), "a2415cbb");
+  }
+
+  #[test]
+  fn a_profile_shares_one_image() {
+    let (_temp, session) = profiled("[image]\npackages = [\"jq\"]\n", "code/api");
+
+    assert_eq!(session.image(), "compostbin/profile-rust:latest");
   }
 }

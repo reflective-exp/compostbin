@@ -44,6 +44,9 @@ Configured paths mount under `/workspace` in the guest.
 - `compostbin-manifest` teaches Claude the manifest schema. Also installs
   [`docs/manifest`](docs/manifest) into a reference directory.
 
+It also creates an empty `~/.config/compostbin/profiles` for
+[profiles](#profiles).
+
 ### init
 
 `compostbin init` writes a default `.config/compostbin.toml`, meant to be checked
@@ -189,6 +192,23 @@ on the host. Every key is described in `docs/manifest`:
   uncommitted `.config/compostbin.local.toml`
 - [Claude](docs/manifest/claude.md): signing in, and what is copied from
   `~/.claude`
+
+### Profiles
+
+A profile is a manifest kept outside any project, at
+`~/.config/compostbin/profiles/<name>.toml`. `--profile <name>` on `run`,
+`exec`, `shell`, `build`, `doctor`, `ls` and `clean` reads it instead of the
+project's manifest:
+
+``` sh
+compostbin run --profile rust -- --continue
+```
+
+It replaces the manifest and its local overlay; nothing is merged.
+`[project] name` is ignored: the session is named after the directory plus a
+hash of its path, so each directory keeps its own container and conversation.
+A profile's `[image]` builds one shared image, `compostbin/profile-<name>`.
+Profiles are written by hand; `add` and `init` ignore them.
 
 ### What the session is told
 

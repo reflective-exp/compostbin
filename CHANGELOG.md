@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add `--profile <name>` to session commands, reading
+  `~/.config/compostbin/profiles/<name>.toml` instead of the project's
+  manifest. `compostbin install` creates that directory.
+
 ## v0.10.0
 
 - Add `compostbin install`, which installs or updates compostbin's Claude skills

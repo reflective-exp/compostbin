@@ -304,8 +304,10 @@ fn install_without_a_terminal_lists_changes_and_asks_for_yes() {
     stdout.contains("create ") && stdout.contains(".claude/skills/compostbin-manifest/SKILL.md"),
     "{stdout}"
   );
+  assert!(stdout.contains(".config/compostbin/profiles/"), "{stdout}");
   assert!(String::from_utf8_lossy(&output.stderr).contains("--yes"));
   assert!(!temp.path().join(".claude").exists(), "nothing is written unasked");
+  assert!(!temp.path().join(".config").exists(), "nothing is written unasked");
 }
 
 #[test]
@@ -318,6 +320,7 @@ fn install_yes_writes_the_skill_and_then_is_up_to_date() {
   let skill = temp.path().join(".claude/skills/compostbin-manifest");
   assert!(skill.join("SKILL.md").is_file());
   assert!(skill.join("references/host.md").is_file());
+  assert!(temp.path().join(".config/compostbin/profiles").is_dir());
 
   let again = install(temp.path(), &[]);
   assert!(again.status.success());

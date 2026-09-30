@@ -2,9 +2,10 @@ pub mod cli;
 mod report;
 
 use clap::Parser;
-use cli::{Arguments, Command};
+use cli::{Arguments, Command, Config};
 use compostbin_core::doctor::{self, Status};
-use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, SESSIONS_DIR};
+use compostbin_core::error::At;
+use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, PROFILES_DIR, SESSIONS_DIR};
 use compostbin_core::session::credentials::{KEYCHAIN_SERVICE, Keychain};
 use compostbin_core::session::image;
 use compostbin_core::session::settings::HOST_CLAUDE_HOME;
@@ -58,7 +59,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
         return Ok(1);
       }
 
-      let mut session = load_session(&manifest_path, resolver, &project_dir)?;
+      let mut session = Session::new(Manifest::load(&manifest_path)?, resolver, &project_dir);
 
       match session.add(&canonical, readonly, local) {
         AddOutcome::AlreadyMounted { root } => {
@@ -76,10 +77,13 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       }
     }
 
-    Command::Build { no_cache } => build_base_image(&load_session(&manifest_path, resolver, &project_dir)?, !no_cache),
+    Command::Build { no_cache, config } => build_base_image(
+      &load_session(&manifest_path, resolver, &project_dir, &config)?,
+      !no_cache,
+    ),
 
-    Command::Clean { all } => {
-      let session = load_session(&manifest_path, resolver, &project_dir)?;
+    Command::Clean { all, config } => {
+      let session = load_session(&manifest_path, resolver, &project_dir, &config)?;
       let cleaned = session.clean(all)?;
       let verb = if all { "removed" } else { "cleared" };
 
@@ -90,7 +94,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       Ok(0)
     }
 
-    Command::Doctor => report_diagnosis(&load_session(&manifest_path, resolver, &project_dir)?),
+    Command::Doctor { config } => report_diagnosis(&load_session(&manifest_path, resolver, &project_dir, &config)?),
 
     Command::Init => {
       Manifest::named_after(&project_dir).save(&manifest_path)?;
@@ -98,10 +102,14 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       Ok(0)
     }
 
-    Command::Install { yes } => install(&resolver.resolve(HOST_CLAUDE_HOME).join("skills"), yes),
+    Command::Install { yes } => install(
+      &resolver.resolve(HOST_CLAUDE_HOME).join("skills"),
+      &resolver.resolve(PROFILES_DIR),
+      yes,
+    ),
 
-    Command::Ls => {
-      let session = load_session(&manifest_path, resolver, &project_dir)?;
+    Command::Ls { config } => {
+      let session = load_session(&manifest_path, resolver, &project_dir, &config)?;
 
       for entry in session.workspace().entries() {
         let origin = match entry.origin {
@@ -127,24 +135,31 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       Ok(0)
     }
 
-    Command::Run { arguments } => {
-      let session = load_session(&manifest_path, resolver, &project_dir)?;
+    Command::Run { arguments, config } => {
+      let session = load_session(&manifest_path, resolver, &project_dir, &config)?;
 
       Ok(session.run(&select(&session)?, &Keychain, &Process::claude(&arguments), &notify)?)
     }
 
-    Command::Exec { argv, tty, user } => exec(
+    Command::Exec {
+      argv,
+      config,
+      tty,
+      user,
+    } => exec(
       &Process::command(&argv, tty, &user),
       &manifest_path,
       resolver,
       &project_dir,
+      &config,
     ),
 
-    Command::Shell { user } => exec(
+    Command::Shell { config, user } => exec(
       &Process::command(&["bash".to_string()], true, &user),
       &manifest_path,
       resolver,
       &project_dir,
+      &config,
     ),
   }
 }
@@ -166,14 +181,23 @@ fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn Error
   Ok(0)
 }
 
-/// Installs or updates skills into Claude's global skills directory.
-/// Prompts for confirmation unless `-y`
-fn install(skills_dir: &Path, yes: bool) -> Result<i32, Box<dyn Error>> {
+/// Installs or updates skills into Claude's global skills directory, and
+/// creates the empty profiles directory. Prompts for confirmation unless `-y`
+fn install(skills_dir: &Path, profiles_dir: &Path, yes: bool) -> Result<i32, Box<dyn Error>> {
   let changes = skills::plan(skills_dir)?;
+  let create_profiles = !profiles_dir.is_dir();
 
-  if changes.is_empty() {
-    println!("skills in {} are up to date", skills_dir.display());
+  if changes.is_empty() && !create_profiles {
+    println!(
+      "skills in {} and {} are up to date",
+      skills_dir.display(),
+      profiles_dir.display()
+    );
     return Ok(0);
+  }
+
+  if create_profiles {
+    println!("create {}/", profiles_dir.display());
   }
 
   for change in &changes {
@@ -203,6 +227,9 @@ fn install(skills_dir: &Path, yes: bool) -> Result<i32, Box<dyn Error>> {
   }
 
   skills::apply(&changes)?;
+  if create_profiles {
+    std::fs::create_dir_all(profiles_dir).at(profiles_dir)?;
+  }
   println!("installed");
 
   Ok(0)
@@ -218,13 +245,14 @@ fn exec(
   manifest_path: &Path,
   resolver: PathResolver,
   project_dir: &Path,
+  config: &Config,
 ) -> Result<i32, Box<dyn Error>> {
   if process.tty && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
     eprintln!("compostbin: -t needs a terminal on stdin and stdout");
     return Ok(1);
   }
 
-  let session = load_session(manifest_path, resolver, project_dir)?;
+  let session = load_session(manifest_path, resolver, project_dir, config)?;
 
   Ok(session.run(&select(&session)?, &Keychain, process, &notify)?)
 }
@@ -259,6 +287,15 @@ fn select(session: &Session) -> Result<FrameworkEngine, Box<dyn Error>> {
   )
 }
 
-fn load_session(manifest_path: &Path, resolver: PathResolver, project_dir: &Path) -> Result<Session, Box<dyn Error>> {
-  Ok(Session::new(Manifest::load(manifest_path)?, resolver, project_dir))
+/// From the profile when one is named, skipping the project's manifest.
+fn load_session(
+  manifest_path: &Path,
+  resolver: PathResolver,
+  project_dir: &Path,
+  config: &Config,
+) -> Result<Session, Box<dyn Error>> {
+  Ok(match &config.profile {
+    Some(name) => Session::profiled(name, resolver, project_dir)?,
+    None => Session::new(Manifest::load(manifest_path)?, resolver, project_dir),
+  })
 }

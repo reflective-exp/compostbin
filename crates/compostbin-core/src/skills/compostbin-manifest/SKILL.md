@@ -10,6 +10,10 @@ container is created: edits take effect only after the user exits and runs
 `compostbin run` again (`-- --continue` resumes). Every key is optional; an
 unknown key is an error at the next start. Paths are host paths; `~` allowed.
 
+With `--profile <name>`, the session reads
+`~/.config/compostbin/profiles/<name>.toml` instead (same schema); the briefing
+names the file in use.
+
 ## Host commands
 
 ``` toml

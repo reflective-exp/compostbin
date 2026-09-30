@@ -10,7 +10,7 @@
 //! `settings::share` overwrites from the host.
 
 use crate::error::{At, PathError};
-use crate::manifest::{CLIPBOARD_COMMAND, MANIFEST_RELATIVE_PATH, Manifest};
+use crate::manifest::{CLIPBOARD_COMMAND, Manifest};
 use std::path::Path;
 
 /// Claude's managed settings directory on Linux. Fixed by Claude Code, not by
@@ -45,8 +45,9 @@ pub fn managed_settings() -> String {
 }
 
 /// The briefing itself: where the session is, and every host command it may ask
-/// for, rendered from the manifest that serves them.
-pub fn briefing(manifest: &Manifest) -> String {
+/// for, rendered from the manifest that serves them. `config` is where that
+/// manifest lives: the project's, or a profile's.
+pub fn briefing(manifest: &Manifest, config: &str) -> String {
   let mut text = String::from(
     "This session is running inside a compostbin container. It is a Debian guest \
      with no project toolchain installed: only the host paths mounted under /workspace \
@@ -57,9 +58,9 @@ pub fn briefing(manifest: &Manifest) -> String {
     text.push_str(&format!(
       "This project declares no host commands, so there is no path out to the host \
        at all. Anything that has to run, runs in the guest — or gets a [host.commands] \
-       entry in {MANIFEST_RELATIVE_PATH}.\n"
+       entry in {config}.\n"
     ));
-    text.push_str(&ports(manifest));
+    text.push_str(&ports(manifest, config));
 
     return text;
   }
@@ -98,7 +99,7 @@ pub fn briefing(manifest: &Manifest) -> String {
 
   text.push_str(&format!(
     "\nA command not on that list has no host path. Run it in the guest, or add it to \
-     [host.commands] in {MANIFEST_RELATIVE_PATH} — which takes a restart to serve.\n"
+     [host.commands] in {config} — which takes a restart to serve.\n"
   ));
 
   if manifest.host.clipboard {
@@ -109,14 +110,14 @@ pub fn briefing(manifest: &Manifest) -> String {
     ));
   }
 
-  text.push_str(&ports(manifest));
+  text.push_str(&ports(manifest, config));
 
   text
 }
 
 /// The host services this session can reach, which the guest could not
 /// otherwise discover: nothing in it explains why `localhost:7001` answers.
-fn ports(manifest: &Manifest) -> String {
+fn ports(manifest: &Manifest, config: &str) -> String {
   if !manifest.host.has_ports() {
     return String::new();
   }
@@ -131,7 +132,7 @@ fn ports(manifest: &Manifest) -> String {
   format!(
     "\nSome of the host's own services answer here, at the same address they have on \
      the host: {}. They are the host's, not this container's, and they are fixed when \
-     the container is created — changing [host] ports in {MANIFEST_RELATIVE_PATH} takes \
+     the container is created — changing [host] ports in {config} takes \
      a restart.\n",
     listed.join(", ")
   )
@@ -140,12 +141,12 @@ fn ports(manifest: &Manifest) -> String {
 /// Writes both files into `dir`, creating it. Called before the container
 /// starts, since the mount source must exist by then and the guest cannot
 /// create it.
-pub fn write(dir: &Path, manifest: &Manifest) -> Result<(), PathError> {
+pub fn write(dir: &Path, manifest: &Manifest, config: &str) -> Result<(), PathError> {
   std::fs::create_dir_all(dir).at(dir)?;
 
   for (name, contents) in [
     (MANAGED_SETTINGS_FILE, managed_settings()),
-    (BRIEFING_FILE, briefing(manifest)),
+    (BRIEFING_FILE, briefing(manifest, config)),
   ] {
     let path = dir.join(name);
     std::fs::write(&path, contents).at(&path)?;
@@ -157,6 +158,7 @@ pub fn write(dir: &Path, manifest: &Manifest) -> Result<(), PathError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::manifest::{MANIFEST_RELATIVE_PATH, profile_path};
   use tempfile::TempDir;
 
   fn manifest_with_commands() -> Manifest {
@@ -180,7 +182,7 @@ mod tests {
 
   #[test]
   fn the_briefing_names_the_container() {
-    let briefing = briefing(&Manifest::default());
+    let briefing = briefing(&Manifest::default(), MANIFEST_RELATIVE_PATH);
 
     assert!(
       briefing.contains("compostbin container"),
@@ -190,7 +192,7 @@ mod tests {
 
   #[test]
   fn the_briefing_lists_every_declared_command() {
-    let briefing = briefing(&manifest_with_commands());
+    let briefing = briefing(&manifest_with_commands(), MANIFEST_RELATIVE_PATH);
 
     assert!(
       briefing.contains("compostbin-host test      cargo nextest run --workspace"),
@@ -204,7 +206,7 @@ mod tests {
 
   #[test]
   fn the_briefing_marks_a_widened_command() {
-    let briefing = briefing(&manifest_with_commands());
+    let briefing = briefing(&manifest_with_commands(), MANIFEST_RELATIVE_PATH);
 
     assert!(
       briefing.contains("takes further arguments"),
@@ -217,7 +219,7 @@ mod tests {
   /// channel it does not have is worse than saying nothing.
   #[test]
   fn the_briefing_says_so_when_there_is_no_channel() {
-    let briefing = briefing(&Manifest::default());
+    let briefing = briefing(&Manifest::default(), MANIFEST_RELATIVE_PATH);
 
     assert!(
       !briefing.contains("compostbin-host <name>"),
@@ -229,11 +231,23 @@ mod tests {
   #[test]
   fn the_briefing_says_where_copies_go() {
     let manifest: Manifest = toml::from_str("[host]\nclipboard = true\n").expect("manifest should parse");
-    let briefing = briefing(&manifest);
+    let briefing = briefing(&manifest, MANIFEST_RELATIVE_PATH);
 
     assert!(briefing.contains("compostbin-host clipboard  pbcopy"), "{briefing}");
     assert!(briefing.contains("macOS clipboard"), "{briefing}");
-    assert!(!super::briefing(&manifest_with_commands()).contains("clipboard"));
+    assert!(!super::briefing(&manifest_with_commands(), MANIFEST_RELATIVE_PATH).contains("clipboard"));
+  }
+
+  /// A guest told to edit the project's manifest would edit a file nothing reads.
+  #[test]
+  fn the_briefing_names_the_profile() {
+    let briefing = briefing(&manifest_with_commands(), &profile_path("rust"));
+
+    assert!(
+      briefing.contains("[host.commands] in ~/.config/compostbin/profiles/rust.toml"),
+      "{briefing}"
+    );
+    assert!(!briefing.contains(MANIFEST_RELATIVE_PATH), "{briefing}");
   }
 
   #[test]
@@ -241,7 +255,7 @@ mod tests {
     let dir = TempDir::new().expect("temp dir");
     let target = dir.path().join("managed");
 
-    write(&target, &manifest_with_commands()).expect("writing should succeed");
+    write(&target, &manifest_with_commands(), MANIFEST_RELATIVE_PATH).expect("writing should succeed");
 
     assert_eq!(
       std::fs::read_to_string(target.join(MANAGED_SETTINGS_FILE)).expect("settings should exist"),
@@ -249,7 +263,7 @@ mod tests {
     );
     assert_eq!(
       std::fs::read_to_string(target.join(BRIEFING_FILE)).expect("the briefing should exist"),
-      briefing(&manifest_with_commands())
+      briefing(&manifest_with_commands(), MANIFEST_RELATIVE_PATH)
     );
   }
 }
