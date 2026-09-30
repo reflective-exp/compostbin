@@ -91,15 +91,6 @@ pub enum ManifestError {
   Render { path: PathBuf, source: toml::ser::Error },
 }
 
-impl ManifestError {
-  pub fn path(&self) -> &Path {
-    match self {
-      Self::Io(error) => error.path(),
-      Self::Parse { path, .. } | Self::Render { path, .. } => path,
-    }
-  }
-}
-
 impl fmt::Display for ManifestError {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {

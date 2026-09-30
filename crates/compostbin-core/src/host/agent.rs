@@ -129,14 +129,13 @@ fn run_claimed(
     status
   });
 
-  match status {
-    Ok(status) => Ok(
+  status
+    .map(|status| {
       status
         .code()
-        .unwrap_or_else(|| SIGNAL_EXIT_BASE + status.signal().unwrap_or_default()),
-    ),
-    Err(source) => Err(PathError::new(&argv[0], source)),
-  }
+        .unwrap_or_else(|| SIGNAL_EXIT_BASE + status.signal().unwrap_or_default())
+    })
+    .at(&argv[0])
 }
 
 /// The child, a sink for its input, and the streams to publish.

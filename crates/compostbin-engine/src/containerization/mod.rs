@@ -54,11 +54,6 @@ const OWNER_ATTACH: &str = "attach-owner";
 /// What an attach that never ran reports. Outside the guest exit code range.
 const FAILED: i32 = -1;
 
-/// Whatever the framework said, as the error compostbin reports.
-fn failed(action: impl Into<String>, error: framework::Error) -> EngineError {
-  EngineError::failed(action, error)
-}
-
 pub struct FrameworkEngine {
   /// Told about a joined client whose attach broke, since that leaves the rest
   /// of the session running and has no call to return to. Ignored by default.
@@ -194,7 +189,7 @@ impl Engine for FrameworkEngine {
         attach()
       };
 
-      return code.map_err(|error| failed("exec", error));
+      return code.map_err(|error| EngineError::failed("exec", error));
     }
 
     // Not duplicated: `SCM_RIGHTS` already copies each one, and the owner dups
@@ -215,7 +210,7 @@ impl Engine for FrameworkEngine {
     self
       .session
       .boot(&spec::boot(spec))
-      .map_err(|error| failed("boot", error))?;
+      .map_err(|error| EngineError::failed("boot", error))?;
 
     self.serve_control_socket(spec.name.clone())
   }
@@ -230,7 +225,7 @@ impl Engine for FrameworkEngine {
     self
       .session
       .is_unpacked(image)
-      .map_err(|error| failed("find the image", error))
+      .map_err(|error| EngineError::failed("find the image", error))
   }
 
   fn version(&self) -> Result<Option<String>, EngineError> {
@@ -259,14 +254,14 @@ impl Builder for FrameworkBuilder {
     self
       .builder
       .build(&spec::build(plan, &keys, name))
-      .map_err(|error| failed(action, error))
+      .map_err(|error| EngineError::failed(action, error))
   }
 
   fn provision(&self) -> Result<(), EngineError> {
     self
       .builder
       .provision()
-      .map_err(|error| failed("provision the image store", error))
+      .map_err(|error| EngineError::failed("provision the image store", error))
   }
 }
 

@@ -1,7 +1,7 @@
 //! A throwaway project, and the session it starts.
 
 use crate::terminal::Terminal;
-use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, Memory};
+use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, Memory, TomlFile};
 use compostbin_core::session::NAME_PREFIX;
 use compostbin_core::session::image::IMAGE_STORE;
 use std::io::Write;

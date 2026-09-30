@@ -7,12 +7,10 @@
 //! Recorded by whoever creates the container rather than asked of the engine:
 //! not every engine can say what a running container was created with.
 
-use crate::error::ManifestError;
-use crate::manifest::{read_toml_if_present, write_toml};
+use crate::manifest::TomlFile;
 use compostbin_engine::model::{Mount, SocketRelay};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::Path;
 
 /// Beside Claude's home and the spool, under the session state directory.
 pub const RECORD_FILE: &str = "mounts.toml";
@@ -68,6 +66,10 @@ pub struct Record {
   pub mounts: Vec<RecordedMount>,
 }
 
+/// A missing record is not an error: a state directory cleaned mid-session
+/// leaves nothing to compare against.
+impl TomlFile for Record {}
+
 impl Record {
   pub fn of(mounts: &[Mount], sockets: &[SocketRelay]) -> Self {
     Self {
@@ -77,18 +79,6 @@ impl Record {
         .chain(sockets.iter().map(RecordedMount::of_socket))
         .collect(),
     }
-  }
-
-  /// `None` when there is no record, which is not an error: a state directory
-  /// cleaned mid-session leaves nothing to compare against.
-  pub fn load(path: &Path) -> Result<Option<Self>, ManifestError> {
-    read_toml_if_present(path)
-  }
-
-  /// Creates the state directory, since `run` may be creating this project's
-  /// first container.
-  pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
-    write_toml(path, self)
   }
 
   /// How the manifest's mounts differ from the ones the container really has.
@@ -289,7 +279,7 @@ mod tests {
       .expect("save should succeed");
 
     assert_eq!(
-      Record::load(&path).expect("load should succeed"),
+      Record::load_if_present(&path).expect("load should succeed"),
       Some(Record::of(&mounts, &[])),
       "the record must survive the process that wrote it"
     );
@@ -302,7 +292,7 @@ mod tests {
     let temp = TempDir::new().expect("temp dir");
 
     assert_eq!(
-      Record::load(&temp.path().join(RECORD_FILE)).expect("load should succeed"),
+      Record::load_if_present(&temp.path().join(RECORD_FILE)).expect("load should succeed"),
       None
     );
   }

@@ -23,18 +23,26 @@ pub enum Call {
 }
 
 /// The calls a fake has been given, in order.
-#[derive(Debug, Default)]
-pub struct Calls {
-  recorded: RefCell<Vec<Call>>,
+#[derive(Debug)]
+pub struct Calls<C> {
+  recorded: RefCell<Vec<C>>,
 }
 
-impl Calls {
+impl<C> Default for Calls<C> {
+  fn default() -> Self {
+    Self {
+      recorded: RefCell::default(),
+    }
+  }
+}
+
+impl<C: Clone> Calls<C> {
   /// Every recorded call, in order.
-  pub fn all(&self) -> Vec<Call> {
+  pub fn all(&self) -> Vec<C> {
     self.recorded.borrow().clone()
   }
 
-  fn record(&self, call: Call) {
+  fn record(&self, call: C) {
     self.recorded.borrow_mut().push(call);
   }
 }
@@ -42,7 +50,7 @@ impl Calls {
 /// An `Engine` that runs nothing and records what it was asked.
 #[derive(Debug, Default)]
 pub struct RecordingEngine {
-  calls: Calls,
+  calls: Calls<Call>,
   /// The containers posed as running, plus every one `run` has started.
   running: RefCell<Vec<String>>,
   /// The images posed as unpacked, plus every one `run` has unpacked.
@@ -154,7 +162,7 @@ pub enum BuildCall {
 /// A `Builder` that builds nothing and keeps the plans it was given.
 #[derive(Debug, Default)]
 pub struct RecordingBuilder {
-  calls: RefCell<Vec<BuildCall>>,
+  calls: Calls<BuildCall>,
 }
 
 impl RecordingBuilder {
@@ -164,17 +172,17 @@ impl RecordingBuilder {
 
   /// Everything asked of it, in order.
   pub fn calls(&self) -> Vec<BuildCall> {
-    self.calls.borrow().clone()
+    self.calls.all()
   }
 
   /// Every plan given, in call order.
   pub fn plans(&self) -> Vec<BuildPlan> {
     self
       .calls
-      .borrow()
-      .iter()
+      .all()
+      .into_iter()
       .filter_map(|call| match call {
-        BuildCall::Build(plan) => Some(plan.clone()),
+        BuildCall::Build(plan) => Some(plan),
         BuildCall::Provision => None,
       })
       .collect()
@@ -183,12 +191,12 @@ impl RecordingBuilder {
 
 impl Builder for RecordingBuilder {
   fn build(&self, plan: &BuildPlan) -> Result<(), EngineError> {
-    self.calls.borrow_mut().push(BuildCall::Build(plan.clone()));
+    self.calls.record(BuildCall::Build(plan.clone()));
     Ok(())
   }
 
   fn provision(&self) -> Result<(), EngineError> {
-    self.calls.borrow_mut().push(BuildCall::Provision);
+    self.calls.record(BuildCall::Provision);
     Ok(())
   }
 }

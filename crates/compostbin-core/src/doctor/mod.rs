@@ -76,6 +76,7 @@ fn listed(name: &str, status: Status, detail: impl Into<String>, items: Vec<Stri
 mod tests {
   use super::*;
   use crate::fixtures;
+  use crate::manifest::TomlFile;
   use crate::session::credentials::{CREDENTIALS_FILE_NAME, FakeSource};
   use crate::session::record::Record;
   use compostbin_engine::fake::RecordingEngine;

@@ -77,7 +77,7 @@ impl Manifest {
   /// Missing is the normal case — most checkouts have no local manifest — so
   /// only a file that exists and does not parse is an error.
   fn parse_local(path: &Path) -> Result<Vec<PathEntry>, ManifestError> {
-    let Some(local) = read_toml_if_present::<LocalManifest>(path)? else {
+    let Some(local) = LocalManifest::load_if_present(path)? else {
       return Ok(Vec::new());
     };
 
@@ -110,12 +110,7 @@ impl Manifest {
       };
     }
 
-    write_toml(&path, &local)
-  }
-
-  /// Creates the parent directory, so `init` works in a project with no `.config`.
-  pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
-    write_toml(path, self)
+    local.save(&path)
   }
 
   /// Writes back the file a new entry belongs to, and only that one.
@@ -133,36 +128,40 @@ pub fn profile_path(name: &str) -> String {
   format!("{PROFILES_DIR}/{name}.toml")
 }
 
-/// `None` when the file is missing; a file that exists and does not parse is
-/// an error.
-pub(crate) fn read_toml_if_present<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, ManifestError> {
-  let text = match std::fs::read_to_string(path).at(path) {
-    Ok(text) => text,
-    Err(error) if error.is_not_found() => return Ok(None),
-    Err(error) => return Err(error.into()),
-  };
+/// A compostbin TOML file.
+pub trait TomlFile: Serialize + DeserializeOwned {
+  /// `None` when the file is missing; one that does not parse is an error.
+  fn load_if_present(path: &Path) -> Result<Option<Self>, ManifestError> {
+    let text = match std::fs::read_to_string(path).at(path) {
+      Ok(text) => text,
+      Err(error) if error.is_not_found() => return Ok(None),
+      Err(error) => return Err(error.into()),
+    };
 
-  toml::from_str(&text)
-    .map(Some)
-    .map_err(|source| ManifestError::Parse {
-      path: path.to_path_buf(),
-      source,
-    })
-}
-
-/// Creates the parent directory first.
-pub(crate) fn write_toml<T: Serialize>(path: &Path, value: &T) -> Result<(), ManifestError> {
-  let rendered = toml::to_string(value).map_err(|source| ManifestError::Render {
-    path: path.to_path_buf(),
-    source,
-  })?;
-
-  if let Some(parent) = path.parent() {
-    std::fs::create_dir_all(parent).at(parent)?;
+    toml::from_str(&text)
+      .map(Some)
+      .map_err(|source| ManifestError::Parse {
+        path: path.to_path_buf(),
+        source,
+      })
   }
 
-  Ok(std::fs::write(path, rendered).at(path)?)
+  fn save(&self, path: &Path) -> Result<(), ManifestError> {
+    let rendered = toml::to_string(self).map_err(|source| ManifestError::Render {
+      path: path.to_path_buf(),
+      source,
+    })?;
+
+    if let Some(parent) = path.parent() {
+      std::fs::create_dir_all(parent).at(parent)?;
+    }
+
+    Ok(std::fs::write(path, rendered).at(path)?)
+  }
 }
+
+impl TomlFile for Manifest {}
+impl TomlFile for LocalManifest {}
 
 /// The uncommitted manifest beside a committed one: `[[paths]]` and nothing
 /// else, since everything else in a manifest describes the project rather than

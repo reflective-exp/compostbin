@@ -3,6 +3,7 @@
 //! container never got, and a mount that hands over too much.
 
 use super::{Check, Status, check, listed};
+use crate::manifest::TomlFile;
 use crate::session::Session;
 use crate::session::record::Record;
 use crate::workspace::danger::{Danger, danger};
@@ -19,7 +20,7 @@ pub fn mounted_paths(session: &Session) -> Check {
     .iter()
     .chain(session.manifest.paths.iter().map(|entry| &entry.source));
   let missing: Vec<String> = declared
-    .map(|raw| session.resolve(raw))
+    .map(|raw| session.resolver().resolve(raw))
     .filter(|path| !path.exists())
     .map(|path| path.display().to_string())
     .collect();
@@ -106,7 +107,7 @@ pub fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
     );
   }
 
-  let record = match Record::load(&session.mount_record()) {
+  let record = match Record::load_if_present(&session.mount_record()) {
     Ok(Some(record)) => record,
     Ok(None) => {
       return check(

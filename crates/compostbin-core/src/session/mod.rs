@@ -13,7 +13,7 @@ pub mod settings;
 use crate::error::ManifestError;
 use crate::error::{At, PathError, SessionError};
 use crate::host::{self, Forward, GUEST_PORTS_TARGET, GUEST_SPOOL_TARGET, PortEvent, Spool};
-use crate::manifest::{MANIFEST_RELATIVE_PATH, Manifest, PathEntry, SESSIONS_DIR, profile_path};
+use crate::manifest::{MANIFEST_RELATIVE_PATH, Manifest, PathEntry, SESSIONS_DIR, TomlFile, profile_path};
 use crate::session::briefing::{MANAGED_SETTINGS_DIR, MANAGED_SETTINGS_TARGET};
 use crate::session::credentials::{CredentialSource, SeedOutcome};
 use crate::session::image::GUEST_PORTS_NAME;
@@ -235,11 +235,6 @@ impl Session {
     AddOutcome::NeedsRestart
   }
 
-  /// Resolves a manifest path string against this session's cwd and home.
-  pub fn resolve(&self, raw: &str) -> PathBuf {
-    self.resolver.resolve(raw)
-  }
-
   pub fn resolver(&self) -> &PathResolver {
     &self.resolver
   }
@@ -354,7 +349,7 @@ impl Session {
   /// project directory when no root covers it, then explicit `[[paths]]`. Order
   /// matters — a name goes to the first entry that claims it.
   pub fn workspace(&self) -> Workspace {
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
 
     for root in &self.manifest.workspace.roots {
       workspace.push(self.resolver.resolve(root), None, Origin::Root, false);
@@ -654,7 +649,7 @@ impl Session {
     }
 
     let shared = settings::share(
-      &self.resolve(settings::HOST_CLAUDE_HOME),
+      &self.resolver.resolve(settings::HOST_CLAUDE_HOME),
       &self.claude_home(),
       &self.manifest.claude.shared,
     )?;
@@ -1238,7 +1233,7 @@ source   = "~/.cargo/registry"
 
     run(&session, &engine);
 
-    let recorded = Record::load(&session.mount_record())
+    let recorded = Record::load_if_present(&session.mount_record())
       .expect("load should succeed")
       .expect("run must have written a record");
     assert_eq!(recorded, Record::of(&session.mounts(), &session.sockets()));
@@ -1300,7 +1295,7 @@ source   = "~/.cargo/registry"
     // The first session has exited, taking its container with it.
     run(&session, &RecordingEngine::new());
 
-    let recorded = Record::load(&session.mount_record())
+    let recorded = Record::load_if_present(&session.mount_record())
       .expect("load should succeed")
       .expect("run must have rewritten the record");
 

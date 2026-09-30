@@ -77,10 +77,6 @@ pub struct Workspace {
 }
 
 impl Workspace {
-  pub fn new() -> Self {
-    Self::default()
-  }
-
   /// Adds `host` under a `/workspace` name derived from its basename, or at
   /// `target` when one was declared. A repeated basename is suffixed (`libfoo`,
   /// `libfoo-2`), so both can be mounted.
@@ -219,7 +215,7 @@ mod tests {
     std::fs::create_dir(root.join("elsewhere")).expect("create elsewhere");
     std::os::unix::fs::symlink(root.join("elsewhere"), root.join("project/src/vendor")).expect("create symlink");
 
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
     workspace.push(root.join("project"), None, Origin::Project, false);
 
     assert_eq!(
@@ -241,7 +237,7 @@ mod tests {
     std::fs::create_dir(root.join("libfoo")).expect("create libfoo");
     std::os::unix::fs::symlink(root.join("libfoo"), root.join("project/vendor")).expect("create symlink");
 
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
     workspace.push(root.join("project"), None, Origin::Project, false);
     workspace.push(root.join("libfoo"), None, Origin::Explicit, true);
 
@@ -258,7 +254,7 @@ mod tests {
     std::fs::create_dir(root.join("project")).expect("create project");
     std::os::unix::fs::symlink(root.join("gone"), root.join("project/dead")).expect("create symlink");
 
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
     workspace.push(root.join("project"), None, Origin::Project, false);
 
     assert_eq!(
@@ -274,7 +270,7 @@ mod tests {
     std::fs::create_dir(root.join("project")).expect("create project");
     std::os::unix::fs::symlink(root.join("project"), root.join("project/loop")).expect("create symlink");
 
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
     workspace.push(root.join("project"), None, Origin::Project, false);
 
     assert_eq!(
@@ -293,7 +289,7 @@ mod tests {
     std::fs::create_dir(root.join("elsewhere")).expect("create elsewhere");
     std::os::unix::fs::symlink(root.join("elsewhere"), root.join("workspace/project/vendor")).expect("create symlink");
 
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
     workspace.push(root.join("workspace/project"), None, Origin::Project, false);
     workspace.push(root.join("workspace"), None, Origin::Root, false);
     workspace.push(root.join("workspace/project"), None, Origin::Explicit, true);
@@ -315,7 +311,7 @@ mod tests {
       std::fs::write(root.join("project").join(format!("file-{index}")), "").expect("write file");
     }
 
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
     workspace.push(root.join("project"), None, Origin::Project, false);
 
     let found = workspace.escaping_symlinks(4);
@@ -327,7 +323,7 @@ mod tests {
 
   #[test]
   fn mounts_by_basename_under_workspace() {
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
 
     workspace.push("/Users/user/workspace/compostbin", None, Origin::Project, false);
 
@@ -344,7 +340,7 @@ mod tests {
 
   #[test]
   fn keeps_the_host_layout_out_of_the_guest_path() {
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
 
     workspace.push("/Users/user/code/libfoo", None, Origin::Explicit, true);
 
@@ -358,7 +354,7 @@ mod tests {
 
   #[test]
   fn disambiguates_a_repeated_basename() {
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
 
     workspace.push("/Users/user/work/libfoo", None, Origin::Root, false);
     workspace.push("/Users/user/vendor/libfoo", None, Origin::Explicit, true);
@@ -377,7 +373,7 @@ mod tests {
 
   #[test]
   fn honours_a_declared_target() {
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
 
     workspace.push(
       "/Users/user/code/libfoo",
@@ -391,7 +387,7 @@ mod tests {
 
   #[test]
   fn translates_a_path_under_an_entry() {
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
     workspace.push("/Users/user/workspace", None, Origin::Root, false);
 
     assert_eq!(
@@ -406,7 +402,7 @@ mod tests {
 
   #[test]
   fn translates_nothing_outside_every_entry() {
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::default();
     workspace.push("/Users/user/workspace", None, Origin::Root, false);
 
     assert_eq!(workspace.guest_path(Path::new("/Users/user/other")), None);

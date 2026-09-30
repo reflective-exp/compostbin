@@ -224,12 +224,12 @@ pub fn project_plan(session: &Session) -> Option<BuildPlan> {
 
 /// The base image's build context, resolved against the host.
 pub fn context(session: &Session) -> PathBuf {
-  session.resolve(BUILD_CONTEXT).join("base")
+  session.resolver().resolve(BUILD_CONTEXT).join("base")
 }
 
 /// Where the store lives, resolved against the host.
 pub fn store(session: &Session) -> PathBuf {
-  session.resolve(IMAGE_STORE)
+  session.resolver().resolve(IMAGE_STORE)
 }
 
 #[cfg(test)]

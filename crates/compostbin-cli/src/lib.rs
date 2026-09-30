@@ -5,7 +5,7 @@ use clap::Parser;
 use cli::{Arguments, Command, Config};
 use compostbin_core::doctor::{self, Status};
 use compostbin_core::error::At;
-use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, PROFILES_DIR, SESSIONS_DIR};
+use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, PROFILES_DIR, SESSIONS_DIR, TomlFile};
 use compostbin_core::session::credentials::{KEYCHAIN_SERVICE, Keychain};
 use compostbin_core::session::image;
 use compostbin_core::session::settings::HOST_CLAUDE_HOME;
@@ -286,7 +286,7 @@ fn select(session: &Session) -> Result<FrameworkEngine, Box<dyn Error>> {
   })?;
 
   Ok(
-    FrameworkEngine::new(session.resolve(SESSIONS_DIR), store)
+    FrameworkEngine::new(session.resolver().resolve(SESSIONS_DIR), store)
       .reporting(|error| eprintln!("compostbin: a session client went away: {error}")),
   )
 }
