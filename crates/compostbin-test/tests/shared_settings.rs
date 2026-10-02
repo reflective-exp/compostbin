@@ -7,7 +7,7 @@
 
 use compostbin_core::session::CLAUDE_HOME_TARGET;
 use compostbin_core::session::settings::HOST_CLAUDE_SETTINGS;
-use compostbin_test::{Project, stdout};
+use compostbin_test::{Project, stderr};
 
 /// The host's `~/.claude`, as a developer's would be: the settings every
 /// session gets, and a `widgets` directory only configuration can ask for.
@@ -108,12 +108,9 @@ fn says_what_it_shared() {
   let output = project.guest("true");
 
   assert!(
-    stdout(&output).contains(&format!(
-      "shared from your own ~/.claude: {}",
-      HOST_CLAUDE_SETTINGS.join(", ")
-    )),
-    "stdout: {}",
-    stdout(&output)
+    stderr(&output).contains(&format!("shared from ~/.claude: {}", HOST_CLAUDE_SETTINGS.join(", "))),
+    "stderr: {}",
+    stderr(&output)
   );
 }
 

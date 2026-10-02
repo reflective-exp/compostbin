@@ -24,9 +24,6 @@ const GUEST_POLL: Duration = Duration::from_millis(50);
 /// a shell, little enough that the whole suite can run at once.
 const TEST_CPUS: u32 = 1;
 const TEST_MEMORY: Memory = Memory::gibibytes(1);
-/// `Notice::Shared`, the one thing compostbin prints on the stdout an attached
-/// process is about to write to.
-const SHARED_NOTICE: &str = "shared from your own ~/.claude:";
 
 /// A project with a manifest, a home of its own, and a container named after
 /// it.
@@ -196,8 +193,7 @@ impl Project {
     self.compostbin_with_input(&["exec", "sh", "-c", one_line(script)], input)
   }
 
-  /// A guest line that must succeed, as its trimmed stdout — the guest's own,
-  /// without the notice compostbin prints before attaching it.
+  /// A guest line that must succeed, as its trimmed stdout.
   pub fn guest_output(&self, script: &str) -> String {
     let output = self.guest(script);
     assert!(
@@ -207,13 +203,7 @@ impl Project {
       stderr(&output)
     );
 
-    stdout(&output)
-      .lines()
-      .filter(|line| !line.starts_with(SHARED_NOTICE))
-      .collect::<Vec<_>>()
-      .join("\n")
-      .trim()
-      .to_string()
+    stdout(&output).trim().to_string()
   }
 
   /// Starts a guest process and leaves it running, for a test that has to

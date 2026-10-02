@@ -24,7 +24,7 @@ fn notify(notice: Notice) {
     Notice::NotInKeychain => eprintln!(
       "no \"{KEYCHAIN_SERVICE}\" entry in the login Keychain; the session will need ANTHROPIC_API_KEY or an interactive login"
     ),
-    Notice::Shared(names) => println!("shared from your own ~/.claude: {}", names.join(", ")),
+    Notice::Shared(names) => eprintln!("shared from ~/.claude: {}", names.join(", ")),
     Notice::Port(event) => eprintln!("compostbin: {event}"),
     Notice::Unpacking(image) => eprintln!("compostbin: unpacking {image}"),
     Notice::SetupFailed { line, code } => eprintln!("compostbin: setup `{line}` exited {code}"),
