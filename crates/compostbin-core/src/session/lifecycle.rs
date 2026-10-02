@@ -2,7 +2,7 @@
 
 use crate::error::{At, SessionError};
 use crate::host::{self, PortEvent};
-use crate::manifest::TomlFile;
+use crate::manifest::{TomlFile, USER_CONFIG_PATH, UserConfig};
 use crate::session::credentials::{self, CredentialSource, SeedOutcome};
 use crate::session::record::Record;
 use crate::session::{Notice, Session, briefing, image, settings};
@@ -127,7 +127,9 @@ impl Session {
   }
 
   /// Seeds Claude's token and shares the host's settings into Claude's home: a
-  /// mount source, so reachable whether or not the container is up.
+  /// mount source, so reachable whether or not the container is up. Beyond the
+  /// defaults, shares what the user's config and the manifest name; a profile
+  /// replaces only the manifest.
   ///
   /// Created first, because the mount needs it whether or not there was
   /// anything to put in it: a host with no `~/.claude` and no Keychain entry
@@ -147,10 +149,21 @@ impl Session {
       notify(Notice::NotInKeychain);
     }
 
+    let user_config = self.resolver.resolve(USER_CONFIG_PATH);
+    let user = UserConfig::load_if_present(&user_config)
+      .map_err(SessionError::Config)?
+      .unwrap_or_default();
+    let extra: Vec<String> = user
+      .claude
+      .shared
+      .into_iter()
+      .chain(self.manifest.claude.shared.iter().cloned())
+      .collect();
+
     let shared = settings::share(
       &self.resolver.resolve(settings::HOST_CLAUDE_HOME),
       &self.claude_home(),
-      &self.manifest.claude.shared,
+      &extra,
     )?;
 
     if !shared.is_empty() {

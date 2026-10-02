@@ -10,17 +10,19 @@ use compostbin_core::session::settings::HOST_CLAUDE_SETTINGS;
 use compostbin_test::{Project, stdout};
 
 /// The host's `~/.claude`, as a developer's would be: the settings every
-/// session gets, and an `agents` directory only a manifest can ask for.
+/// session gets, and a `widgets` directory only configuration can ask for.
 fn with_a_host_home(name: &str) -> Project {
   let project = Project::new(name);
   let home = project.home().join(".claude");
 
   std::fs::create_dir_all(home.join("skills/mine")).expect("create skills");
   std::fs::create_dir_all(home.join("agents")).expect("create agents");
+  std::fs::create_dir_all(home.join("widgets")).expect("create widgets");
   std::fs::write(home.join("CLAUDE.md"), "# house style\n").expect("write CLAUDE.md");
   std::fs::write(home.join("settings.json"), "{}\n").expect("write settings.json");
   std::fs::write(home.join("skills/mine/SKILL.md"), "a skill\n").expect("write a skill");
   std::fs::write(home.join("agents/reviewer.md"), "an agent\n").expect("write an agent");
+  std::fs::write(home.join("widgets/sprocket"), "a widget\n").expect("write a widget");
 
   project
 }
@@ -39,9 +41,13 @@ fn settings_are_copied_in() {
     "a skills directory is copied whole"
   );
   assert_eq!(
+    project.guest_output(&format!("cat {CLAUDE_HOME_TARGET}/agents/reviewer.md")),
+    "an agent"
+  );
+  assert_eq!(
     project.guest_output(&format!("ls {CLAUDE_HOME_TARGET}")),
     HOST_CLAUDE_SETTINGS.join("\n"),
-    "and nothing else is shared unless the manifest says so"
+    "and nothing else is shared unless configuration says so"
   );
 }
 
@@ -51,13 +57,28 @@ fn manifest_can_share_more() {
   project.manifest(
     r#"
 [claude]
-shared = ["agents"]
+shared = ["widgets"]
 "#,
   );
 
   assert_eq!(
-    project.guest_output(&format!("cat {CLAUDE_HOME_TARGET}/agents/reviewer.md")),
-    "an agent"
+    project.guest_output(&format!("cat {CLAUDE_HOME_TARGET}/widgets/sprocket")),
+    "a widget"
+  );
+}
+
+/// What the developer wants in every session, named once rather than in each
+/// project's manifest.
+#[test]
+fn user_config_can_share_more() {
+  let project = with_a_host_home("cbt-shared-user");
+  let config = project.home().join(".config/compostbin");
+  std::fs::create_dir_all(&config).expect("create config dir");
+  std::fs::write(config.join("config.toml"), "[claude]\nshared = [\"widgets\"]\n").expect("write config");
+
+  assert_eq!(
+    project.guest_output(&format!("cat {CLAUDE_HOME_TARGET}/widgets/sprocket")),
+    "a widget"
   );
 }
 

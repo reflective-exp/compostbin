@@ -3,6 +3,10 @@
 ## Unreleased
 
 - Update containerization framework to v0.2.2.
+- Copy `~/.claude/agents` into every session, alongside `CLAUDE.md`,
+  `settings.json` and `skills`.
+- Read `~/.config/compostbin/config.toml`, which can merge `[claude] shared`
+  entries to every session.
 
 ## v0.11.0
 

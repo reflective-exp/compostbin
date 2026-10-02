@@ -16,18 +16,19 @@ use std::path::Path;
 /// The host user's own Claude home, the source of everything copied in here.
 pub const HOST_CLAUDE_HOME: &str = "~/.claude";
 
-/// What every session gets: the user's house style, their settings, their
-/// skills. Not configurable and never named in a manifest, because this is the
-/// user's Claude rather than a per-project decision.
-pub const HOST_CLAUDE_SETTINGS: [&str; 3] = ["CLAUDE.md", "settings.json", "skills"];
+/// What every session gets: the user's house style, their agents, their
+/// settings, their skills. Not configurable and never named in a manifest,
+/// because this is the user's Claude rather than a per-project decision.
+pub const HOST_CLAUDE_SETTINGS: [&str; 4] = ["CLAUDE.md", "agents", "settings.json", "skills"];
 
 /// Deep enough for any skill tree, shallow enough that a symlink loop under
 /// `~/.claude` ends the copy instead of filling the disk.
 const MAX_DEPTH: usize = 32;
 
-/// Copies `HOST_CLAUDE_SETTINGS`, plus whatever `extra` the manifest adds, from
-/// the host's `~/.claude` into the session's home, overwriting what is there. An
-/// entry may be a file (`CLAUDE.md`) or a directory (`skills`), copied whole.
+/// Copies `HOST_CLAUDE_SETTINGS`, plus whatever `extra` the user's config and
+/// the manifest add, from the host's `~/.claude` into the session's home,
+/// overwriting what is there. An entry may be a file (`CLAUDE.md`) or a
+/// directory (`skills`), copied whole, following links.
 ///
 /// The host is authoritative, so a shared directory is replaced rather than
 /// merged: a skill deleted on the host disappears from the session too.
@@ -220,6 +221,7 @@ mod tests {
   /// case adds rather than on the baseline.
   fn host_home(temp: &TempDir) -> std::path::PathBuf {
     let host = temp.path().join("host-claude");
+    std::fs::create_dir_all(host.join("agents")).expect("create host agents");
     std::fs::create_dir_all(host.join("skills")).expect("create host skills");
     std::fs::write(host.join("CLAUDE.md"), "house style").expect("write CLAUDE.md");
     std::fs::write(host.join("settings.json"), "{}").expect("write settings");
@@ -248,12 +250,40 @@ mod tests {
     let temp = TempDir::new().expect("temp dir");
     let host = host_home(&temp);
     let session = temp.path().join("session-claude");
-    std::fs::write(host.join("agents.json"), "[]").expect("write agents");
+    std::fs::create_dir_all(host.join("widgets")).expect("create widgets");
 
     let copied =
-      share(&host, &session, &["agents.json".to_string(), "CLAUDE.md".to_string()]).expect("share should succeed");
+      share(&host, &session, &["widgets".to_string(), "CLAUDE.md".to_string()]).expect("share should succeed");
 
-    assert_eq!(copied, ["CLAUDE.md", "settings.json", "skills", "agents.json"]);
+    assert_eq!(copied, ["CLAUDE.md", "agents", "settings.json", "skills", "widgets"]);
+  }
+
+  /// A link is how many people keep `~/.claude` under version control; the
+  /// session gets the contents, since the link's target is not in the guest.
+  #[test]
+  fn copies_a_linked_agent_as_its_contents() {
+    let temp = TempDir::new().expect("temp dir");
+    let host = host_home(&temp);
+    let session = temp.path().join("session-claude");
+    let elsewhere = temp.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("create elsewhere");
+    std::fs::write(elsewhere.join("reviewer.md"), "an agent").expect("write agent");
+    std::os::unix::fs::symlink(elsewhere.join("reviewer.md"), host.join("agents").join("reviewer.md"))
+      .expect("link agent");
+
+    share(&host, &session, &[]).expect("share should succeed");
+
+    let copied = session.join("agents").join("reviewer.md");
+    assert!(
+      !std::fs::symlink_metadata(&copied)
+        .expect("agent should be copied")
+        .file_type()
+        .is_symlink()
+    );
+    assert_eq!(
+      std::fs::read_to_string(&copied).expect("agent should be readable"),
+      "an agent"
+    );
   }
 
   #[test]

@@ -191,7 +191,8 @@ on the host. Every key is described in `docs/manifest`:
 - [Mounts](docs/manifest/mounts.md): `[[paths]]`, `[workspace]`, and the
   uncommitted `.config/compostbin.local.toml`
 - [Claude](docs/manifest/claude.md): signing in, and what is copied from
-  `~/.claude`
+  `~/.claude`, per project or for every project in
+  `~/.config/compostbin/config.toml`
 
 ### Profiles
 

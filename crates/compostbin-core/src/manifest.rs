@@ -15,6 +15,9 @@ pub const DEFAULT_IMAGE: &str = "compostbin/base:latest";
 pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
 /// Hand-written manifests, each replacing a project's own under `--profile`.
 pub const PROFILES_DIR: &str = "~/.config/compostbin/profiles";
+/// The user's own configuration, applied to every session whatever configures
+/// the project.
+pub const USER_CONFIG_PATH: &str = "~/.config/compostbin/config.toml";
 /// The host command `[host] clipboard` serves, and what the guest's `pbcopy`,
 /// `xclip`, `xsel` and `wl-copy` send.
 pub const CLIPBOARD_COMMAND: &str = "clipboard";
@@ -162,6 +165,22 @@ pub trait TomlFile: Serialize + DeserializeOwned {
 
 impl TomlFile for Manifest {}
 impl TomlFile for LocalManifest {}
+impl TomlFile for UserConfig {}
+
+/// The `~/.claude` entries the developer wants in every session, whether or not
+/// the project's manifest names them.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UserConfig {
+  pub claude: UserClaudeConfig,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UserClaudeConfig {
+  /// Added to the manifest's own `[claude] shared`.
+  pub shared: Vec<String>,
+}
 
 /// The uncommitted manifest beside a committed one: `[[paths]]` and nothing
 /// else, since everything else in a manifest describes the project rather than
@@ -514,7 +533,7 @@ target = "~/code/vendor/libfoo"
 
 [claude]
 seed_from_keychain = true
-shared             = ["agents"]
+shared             = ["widgets"]
 
 [image]
 packages    = ["jq"]
@@ -524,7 +543,7 @@ run_as_root = ["install -d -o claude /opt/vendor"]
 
   const EXPECTED_RENDERING: &str = r#"[claude]
 seed_from_keychain = true
-shared = ["agents"]
+shared = ["widgets"]
 
 [container]
 cpus = 4
@@ -879,11 +898,26 @@ tty = true
 
     assert_eq!(manifest.claude.home, None);
     assert_eq!(manifest.claude.seed_from_keychain, true);
-    assert_eq!(manifest.claude.shared, ["agents"]);
+    assert_eq!(manifest.claude.shared, ["widgets"]);
 
     assert_eq!(manifest.image.packages, ["jq"]);
     assert_eq!(manifest.image.run.len(), 1);
     assert_eq!(manifest.image.run_as_root, ["install -d -o claude /opt/vendor"]);
+  }
+
+  #[test]
+  fn user_config_takes_claude_shared() {
+    let config: UserConfig = toml::from_str("[claude]\nshared = [\"widgets\"]\n").expect("config should parse");
+
+    assert_eq!(config.claude.shared, ["widgets"]);
+  }
+
+  /// The user's config describes the developer, not a project: a project's
+  /// settings there would apply to every project at once.
+  #[test]
+  fn user_config_refuses_project_settings() {
+    assert!(toml::from_str::<UserConfig>("[container]\ncpus = 8\n").is_err());
+    assert!(toml::from_str::<UserConfig>("[claude]\nseed_from_keychain = false\n").is_err());
   }
 
   #[test]
