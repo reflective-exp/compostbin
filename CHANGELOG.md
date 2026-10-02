@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.12.0
+
 - Update containerization framework to v0.2.2.
 - Copy `~/.claude/agents` into every session, alongside `CLAUDE.md`,
   `settings.json` and `skills`.
