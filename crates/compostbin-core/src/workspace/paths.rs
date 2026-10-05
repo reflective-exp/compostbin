@@ -179,9 +179,10 @@ mod tests {
       .canonicalize("nope/absent")
       .expect_err("missing path should error");
 
-    assert_eq!(error.path(), root.join("nope/absent").as_path());
     assert!(
-      error.to_string().contains("nope/absent"),
+      error
+        .to_string()
+        .starts_with(&format!("{}: ", root.join("nope/absent").display())),
       "error should name the path: {error}"
     );
   }

@@ -7,15 +7,6 @@ pub const CREDENTIALS_FILE_NAME: &str = ".credentials.json";
 /// The Keychain item the host's Claude Code writes its token to.
 pub const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
-/// What `seed` did, so the caller can say so without re-reading the filesystem.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SeedOutcome {
-  Disabled,
-  KeptExisting,
-  NotInKeychain,
-  Seeded,
-}
-
 /// A place to read the host's Claude token from. `Ok(None)` — no such entry — is
 /// not an error: the session may authenticate by API key.
 pub trait CredentialSource {
@@ -43,7 +34,7 @@ impl CredentialSource for Keychain {
     let output = Command::new("security")
       .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
       .output()
-      .at("security")?;
+      .map_err(CredentialError::Security)?;
 
     if output.status.code() == Some(KEYCHAIN_ITEM_NOT_FOUND) {
       return Ok(None);
@@ -62,26 +53,25 @@ impl CredentialSource for Keychain {
 /// Copies the host's Claude token into the bind-mounted Claude home, only when
 /// none is there already: the container refreshes its own token into that same
 /// file, and it may be newer than the Keychain's.
-pub fn seed(claude_home: &Path, enabled: bool, source: &impl CredentialSource) -> Result<SeedOutcome, CredentialError> {
-  if !enabled {
-    return Ok(SeedOutcome::Disabled);
-  }
-
+///
+/// Returns whether a token was wanted and the Keychain had none, the one
+/// outcome the caller has to say something about.
+pub fn seed(claude_home: &Path, enabled: bool, source: &impl CredentialSource) -> Result<bool, CredentialError> {
   let destination = claude_home.join(CREDENTIALS_FILE_NAME);
 
-  if destination.exists() {
-    return Ok(SeedOutcome::KeptExisting);
+  if !enabled || destination.exists() {
+    return Ok(false);
   }
 
   let Some(secret) = source.read()? else {
-    return Ok(SeedOutcome::NotInKeychain);
+    return Ok(true);
   };
 
   std::fs::create_dir_all(claude_home).at(claude_home)?;
   std::fs::write(&destination, secret).at(&destination)?;
   restrict_to_owner(&destination)?;
 
-  Ok(SeedOutcome::Seeded)
+  Ok(false)
 }
 
 fn restrict_to_owner(path: &Path) -> Result<(), CredentialError> {
@@ -114,9 +104,9 @@ mod tests {
   fn writes_the_keychain_secret_into_a_missing_claude_home() {
     let home = TempDir::new().expect("temp dir");
 
-    let outcome = seed(&claude_home(&home), true, &found()).expect("seeding should succeed");
+    let missing = seed(&claude_home(&home), true, &found()).expect("seeding should succeed");
 
-    assert_eq!(outcome, SeedOutcome::Seeded);
+    assert!(!missing);
     assert_eq!(
       std::fs::read_to_string(credentials_path(&home)).expect("credentials should exist"),
       SECRET
@@ -129,9 +119,9 @@ mod tests {
     std::fs::create_dir_all(claude_home(&home)).expect("create home");
     std::fs::write(credentials_path(&home), "newer").expect("write existing");
 
-    let outcome = seed(&claude_home(&home), true, &found()).expect("seeding should succeed");
+    let missing = seed(&claude_home(&home), true, &FakeSource(None)).expect("seeding should succeed");
 
-    assert_eq!(outcome, SeedOutcome::KeptExisting);
+    assert!(!missing, "a token already there needs nothing from the Keychain");
     assert_eq!(
       std::fs::read_to_string(credentials_path(&home)).expect("credentials should exist"),
       "newer"
@@ -142,9 +132,9 @@ mod tests {
   fn writes_nothing_when_seeding_is_disabled() {
     let home = TempDir::new().expect("temp dir");
 
-    let outcome = seed(&claude_home(&home), false, &found()).expect("seeding should succeed");
+    let missing = seed(&claude_home(&home), false, &FakeSource(None)).expect("seeding should succeed");
 
-    assert_eq!(outcome, SeedOutcome::Disabled);
+    assert!(!missing, "a disabled seed never asks the Keychain");
     assert!(!credentials_path(&home).exists());
   }
 
@@ -152,9 +142,9 @@ mod tests {
   fn reports_a_missing_keychain_entry_without_failing() {
     let home = TempDir::new().expect("temp dir");
 
-    let outcome = seed(&claude_home(&home), true, &FakeSource(None)).expect("seeding should succeed");
+    let missing = seed(&claude_home(&home), true, &FakeSource(None)).expect("seeding should succeed");
 
-    assert_eq!(outcome, SeedOutcome::NotInKeychain);
+    assert!(missing);
     assert!(!credentials_path(&home).exists());
   }
 

@@ -1,9 +1,9 @@
 //! What a session asks the engine for: the container it creates, and each
 //! process it attaches to it.
 
-use crate::host::{Forward, GUEST_PORTS_TARGET, GUEST_SPOOL_TARGET};
+use crate::host::{Forward, GUEST_SPOOL_TARGET};
+use crate::image::GUEST_PORTS_NAME;
 use crate::session::briefing::MANAGED_SETTINGS_TARGET;
-use crate::session::image::GUEST_PORTS_NAME;
 use crate::session::{Process, Session};
 use compostbin_engine::model::{EnvVar, ExecSpec, Mount, Resources, RunSpec, SocketRelay};
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 pub const CLAUDE_HOME_TARGET: &str = "/home/claude/.claude";
 /// The container's own process, keeping it alive so `exec` has something to
 /// attach to.
-pub const KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
+const KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
 /// Names no real compositor: nothing in the guest draws, it only has to be set.
 pub const CLIPBOARD_DISPLAY: &str = "compostbin-clipboard";
 
@@ -67,13 +67,7 @@ impl Session {
       .forwards()
       .into_iter()
       .map(|forward| SocketRelay {
-        target: PathBuf::from(GUEST_PORTS_TARGET).join(
-          forward
-            .listen
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_default(),
-        ),
+        target: forward.guest_target(),
         source: forward.listen,
       })
       .collect()
@@ -142,7 +136,7 @@ impl Session {
       .collect()
   }
 
-  pub fn run_spec(&self) -> RunSpec {
+  pub(super) fn run_spec(&self) -> RunSpec {
     RunSpec {
       arguments: self.process(),
       env: self.inherited_env(),
@@ -164,11 +158,11 @@ impl Session {
   /// work, not the caller's. Given the caller's stdin it would read what was
   /// meant for the process being attached, swallowing a piped prompt before
   /// Claude starts.
-  pub fn setup_spec(&self, line: &str) -> ExecSpec {
+  pub(super) fn setup_spec(&self, line: &str) -> ExecSpec {
     ExecSpec {
       interactive: false,
       tty: false,
-      ..self.exec_spec(&["bash", "-euo", "pipefail", "-c", line].map(str::to_string))
+      ..self.exec_spec(["bash", "-euo", "pipefail", "-c", line].map(str::to_string))
     }
   }
 
@@ -185,7 +179,7 @@ impl Session {
   /// `WAYLAND_DISPLAY`, with `[host] clipboard`, is what makes Claude copy at
   /// all: on Linux it looks for `wl-copy` only when there is a display to copy
   /// to. There is none, but the guest's `wl-copy` sends to the host's.
-  pub fn exec_spec(&self, arguments: &[String]) -> ExecSpec {
+  fn exec_spec(&self, arguments: impl IntoIterator<Item = String>) -> ExecSpec {
     let mut env = self.inherited_env();
     env.extend([
       EnvVar::Set {
@@ -206,7 +200,7 @@ impl Session {
     }
 
     ExecSpec {
-      arguments: arguments.to_vec(),
+      arguments: arguments.into_iter().collect(),
       env,
       interactive: true,
       name: self.container_name(),
@@ -217,11 +211,11 @@ impl Session {
   }
 
   /// `exec_spec` for an attached process, as its user and on its streams.
-  pub fn process_spec(&self, process: &Process) -> ExecSpec {
+  pub(super) fn process_spec(&self, process: &Process) -> ExecSpec {
     ExecSpec {
       tty: process.tty,
       user: Some(process.user.clone()),
-      ..self.exec_spec(&process.argv)
+      ..self.exec_spec(process.argv.iter().cloned())
     }
   }
 }
@@ -229,8 +223,8 @@ impl Session {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::session::fixtures::session;
-  use crate::workspace::paths::PathResolver;
+  use crate::session::fixtures::{session, session_at};
+  use std::path::Path;
 
   /// Otherwise a line reads the stdin a piped `run -- -p` meant for Claude.
   #[test]
@@ -248,7 +242,7 @@ mod tests {
   #[test]
   fn builds_exec_spec() {
     assert_eq!(
-      session().exec_spec(&["claude".to_string(), "--continue".to_string()]),
+      session().exec_spec(["claude".to_string(), "--continue".to_string()]),
       ExecSpec {
         arguments: vec!["claude".to_string(), "--continue".to_string()],
         env: vec![
@@ -281,11 +275,11 @@ mod tests {
       value: CLIPBOARD_DISPLAY.to_string(),
     };
 
-    assert!(!session.exec_spec(&[]).env.contains(&display));
+    assert!(!session.exec_spec([]).env.contains(&display));
 
     session.manifest.host.clipboard = true;
 
-    assert!(session.exec_spec(&[]).env.contains(&display));
+    assert!(session.exec_spec([]).env.contains(&display));
     assert!(
       session
         .mounts()
@@ -297,11 +291,7 @@ mod tests {
 
   #[test]
   fn mounts_project_dir_when_outside_every_root() {
-    let session = Session::new(
-      toml::from_str("").expect("empty manifest should parse"),
-      PathResolver::new("/Users/user/code/loose", "/Users/user"),
-      "/Users/user/code/loose",
-    );
+    let session = session_at(Path::new("/Users/user"), "", "code/loose");
 
     assert_eq!(
       session.mounts(),

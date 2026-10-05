@@ -15,13 +15,12 @@ pub trait Engine {
 
   /// Whether this container is running, and so ready for `exec`. A stopped
   /// container doesn't exist: it dies with the process that started it.
-  fn is_running(&self, name: &str) -> Result<bool, EngineError>;
+  fn is_running(&self, name: &str) -> bool;
 
   /// Whether `run` can skip unpacking this image. False until its first
   /// (slow) run.
   fn is_unpacked(&self, image: &str) -> Result<bool, EngineError>;
 
-  /// The engine and its version. `None` when unknown, which `doctor` reports
-  /// rather than treating as a failure.
-  fn version(&self) -> Result<Option<String>, EngineError>;
+  /// The engine and its version.
+  fn version(&self) -> String;
 }

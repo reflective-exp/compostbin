@@ -6,25 +6,21 @@ use compostbin_engine::engine::Engine;
 use compostbin_engine::error::EngineError;
 
 pub fn version(engine: &impl Engine) -> Check {
-  match engine.version() {
-    Ok(Some(version)) => check("engine", Status::Ok, version),
-    Ok(None) => check("engine", Status::Warn, "cannot say what version it is"),
-    Err(error) => check("engine", Status::Fail, error.to_string()),
-  }
+  check("engine", Status::Ok, engine.version())
 }
 
 /// Whether the image store can be read at all.
 ///
 /// There is no daemon to be up or down: a session boots from the store on disk,
 /// which `compostbin build` writes.
-pub fn store(images: &Result<Vec<String>, EngineError>) -> Check {
+pub fn store(images: Result<&[String], &EngineError>) -> Check {
   match images {
     Ok(_) => check("image store", Status::Ok, "readable"),
     Err(error) => check("image store", Status::Fail, format!("{error}; run `compostbin build`")),
   }
 }
 
-pub fn base_image(session: &Session, images: &Result<Vec<String>, EngineError>) -> Check {
+pub fn base_image(session: &Session, images: Result<&[String], &EngineError>) -> Check {
   let wanted = &session.manifest.project.image;
 
   match images {

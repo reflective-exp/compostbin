@@ -27,6 +27,17 @@ pub enum Origin {
   Root,
 }
 
+impl fmt::Display for Origin {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(match self {
+      Self::Explicit => "explicit",
+      Self::Local => "local",
+      Self::Project => "project",
+      Self::Root => "in-root",
+    })
+  }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
   pub guest: PathBuf,
@@ -59,10 +70,6 @@ pub struct Escapes {
   pub escapes: Vec<Escape>,
   pub exhausted: bool,
 }
-
-/// Directory entries `escaping_symlinks` looks at before giving up: enough for
-/// an ordinary source tree, few enough to stay imperceptible.
-pub const WALK_LIMIT: usize = 50_000;
 
 /// The host paths a session exposes, each with the `/workspace` path it appears
 /// at in the guest.
@@ -219,7 +226,7 @@ mod tests {
     workspace.push(root.join("project"), None, Origin::Project, false);
 
     assert_eq!(
-      workspace.escaping_symlinks(WALK_LIMIT),
+      workspace.escaping_symlinks(usize::MAX),
       Escapes {
         escapes: vec![Escape {
           link: root.join("project/src/vendor"),
@@ -242,7 +249,7 @@ mod tests {
     workspace.push(root.join("libfoo"), None, Origin::Explicit, true);
 
     assert_eq!(
-      workspace.escaping_symlinks(WALK_LIMIT),
+      workspace.escaping_symlinks(usize::MAX),
       Escapes::default(),
       "the target is mounted too, so the link is live in the container"
     );
@@ -258,7 +265,7 @@ mod tests {
     workspace.push(root.join("project"), None, Origin::Project, false);
 
     assert_eq!(
-      workspace.escaping_symlinks(WALK_LIMIT),
+      workspace.escaping_symlinks(usize::MAX),
       Escapes::default(),
       "equally broken in both places is not a divergence"
     );
@@ -274,7 +281,7 @@ mod tests {
     workspace.push(root.join("project"), None, Origin::Project, false);
 
     assert_eq!(
-      workspace.escaping_symlinks(WALK_LIMIT),
+      workspace.escaping_symlinks(usize::MAX),
       Escapes::default(),
       "a link back into the tree is fine, and descending it would never terminate"
     );
@@ -295,7 +302,7 @@ mod tests {
     workspace.push(root.join("workspace/project"), None, Origin::Explicit, true);
 
     assert_eq!(
-      workspace.escaping_symlinks(WALK_LIMIT).escapes,
+      workspace.escaping_symlinks(usize::MAX).escapes,
       [Escape {
         link: root.join("workspace/project/vendor"),
         target: root.join("elsewhere"),

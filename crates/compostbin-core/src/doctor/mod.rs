@@ -24,7 +24,7 @@ pub struct Check {
   /// The findings behind `detail` (missing paths, dead symlinks, allowlisted
   /// commands), kept out of the sentence so they print one per line.
   pub items: Vec<String>,
-  pub name: String,
+  pub name: &'static str,
   pub status: Status,
 }
 
@@ -37,34 +37,35 @@ pub fn diagnose(
   api_key_present: bool,
 ) -> Vec<Check> {
   let images = engine.images();
+  let running = session.is_running(engine);
 
   vec![
     engine::version(engine),
-    engine::store(&images),
-    engine::base_image(session, &images),
+    engine::store(images.as_deref()),
+    engine::base_image(session, images.as_deref()),
     mounts::mounted_paths(session),
     mounts::dangling_symlinks(session),
-    mounts::live_mounts(session, engine),
+    mounts::live_mounts(session, running),
     mounts::root_breadth(session),
     host::credentials(session, credentials, api_key_present),
     host::allowlist(session),
-    host::ports(session, engine),
+    host::ports(session, running),
   ]
 }
 
 /// A name, a verdict, and a sentence explaining it.
-fn check(name: &str, status: Status, detail: impl Into<String>) -> Check {
+fn check(name: &'static str, status: Status, detail: impl Into<String>) -> Check {
   Check {
     detail: detail.into(),
     items: Vec::new(),
-    name: name.to_string(),
+    name,
     status,
   }
 }
 
 /// A check whose sentence heads a list, so it must describe the items without
 /// naming any.
-fn listed(name: &str, status: Status, detail: impl Into<String>, items: Vec<String>) -> Check {
+fn listed(name: &'static str, status: Status, detail: impl Into<String>, items: Vec<String>) -> Check {
   Check {
     items,
     ..check(name, status, detail)
@@ -75,9 +76,9 @@ fn listed(name: &str, status: Status, detail: impl Into<String>, items: Vec<Stri
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::fixtures;
   use crate::manifest::TomlFile;
   use crate::session::credentials::{CREDENTIALS_FILE_NAME, FakeSource};
+  use crate::session::fixtures;
   use crate::session::record::Record;
   use compostbin_engine::fake::RecordingEngine;
   use std::path::Path;

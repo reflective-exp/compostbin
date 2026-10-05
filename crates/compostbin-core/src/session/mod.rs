@@ -1,26 +1,25 @@
 //! One project's container, and the state that outlives it.
 //!
-//! The public submodules are what a session owns rather than uses: its image,
-//! its token, the host Claude config it starts from, and the record of what its
-//! container was created with. The private ones split `Session` itself: `state`
-//! is where it keeps things on the host, `spec` what it asks the engine for, and
-//! `lifecycle` how it creates, attaches to, and cleans up after its container.
+//! The public submodules are what a session owns rather than uses: its
+//! briefing, its token, the host Claude config it starts from, and the record of
+//! what its container was created with. The private ones split `Session`
+//! itself: `state` is where it keeps things on the host, `spec` what it asks the
+//! engine for, and `lifecycle` how it creates, attaches to, and cleans up after
+//! its container.
 
 pub mod briefing;
 pub mod credentials;
-pub mod image;
 pub mod record;
 pub mod settings;
 
 #[cfg(test)]
-mod fixtures;
+pub(crate) mod fixtures;
 mod lifecycle;
 mod spec;
 mod state;
 
 pub use crate::session::lifecycle::Process;
-pub use crate::session::spec::{CLAUDE_HOME_TARGET, CLIPBOARD_DISPLAY, KEEPALIVE_COMMAND};
-pub use crate::session::state::{CLAUDE_HOME_DIR, PORTS_DIR, PORTS_LOG, SPOOL_DIR};
+pub use crate::session::spec::{CLAUDE_HOME_TARGET, CLIPBOARD_DISPLAY};
 
 use crate::error::{ManifestError, PathError};
 use crate::host::PortEvent;
@@ -96,12 +95,23 @@ impl Session {
     }
   }
 
-  /// Configured by profile `name` alone; neither project manifest is read.
-  pub fn profiled(name: &str, resolver: PathResolver, project_dir: impl Into<PathBuf>) -> Result<Self, ManifestError> {
+  /// Configured by the project's manifest and its local overlay, or by
+  /// `profile` alone, in which case neither project manifest is read.
+  pub fn load(
+    profile: Option<&str>,
+    resolver: PathResolver,
+    project_dir: impl Into<PathBuf>,
+  ) -> Result<Self, ManifestError> {
+    let project_dir = project_dir.into();
+    let manifest = match profile {
+      Some(name) => Manifest::parse(&resolver.resolve(&profile_path(name)))?,
+      None => Manifest::load(&project_dir.join(MANIFEST_RELATIVE_PATH))?,
+    };
+
     Ok(Self {
-      manifest: Manifest::parse(&resolver.resolve(&profile_path(name)))?,
-      profile: Some(name.to_string()),
-      project_dir: project_dir.into(),
+      manifest,
+      profile: profile.map(str::to_string),
+      project_dir,
       resolver,
     })
   }
@@ -118,10 +128,8 @@ impl Session {
   /// `path` must be canonical: a symlink out of a root looks contained and is
   /// not. `local` records it in the uncommitted manifest instead of the one the
   /// project shares.
-  pub fn add(&mut self, path: impl Into<PathBuf>, readonly: bool, local: bool) -> AddOutcome {
-    let path = path.into();
-
-    if let Some(root) = root_containing(&path, &self.resolved_roots()) {
+  pub fn add(&mut self, path: &Path, readonly: bool, local: bool) -> AddOutcome {
+    if let Some(root) = root_containing(path, &self.resolved_roots()) {
       return AddOutcome::AlreadyMounted {
         root: root.to_path_buf(),
       };
@@ -184,7 +192,7 @@ impl Session {
     workspace
   }
 
-  pub fn resolved_roots(&self) -> Vec<PathBuf> {
+  fn resolved_roots(&self) -> Vec<PathBuf> {
     self
       .manifest
       .workspace
@@ -206,7 +214,7 @@ mod tests {
   fn add_inside_a_root_changes_nothing() {
     let mut session = session();
 
-    let outcome = session.add("/Users/user/workspace/other", false, false);
+    let outcome = session.add(Path::new("/Users/user/workspace/other"), false, false);
 
     assert_eq!(
       outcome,
@@ -222,7 +230,7 @@ mod tests {
   fn add_outside_every_root_records_a_path() {
     let mut session = session();
 
-    let outcome = session.add("/Users/user/vendor/libfoo", true, false);
+    let outcome = session.add(Path::new("/Users/user/vendor/libfoo"), true, false);
 
     assert_eq!(outcome, AddOutcome::NeedsRestart);
     assert_eq!(session.manifest.paths[1].source, "/Users/user/vendor/libfoo");
@@ -244,7 +252,7 @@ mod tests {
   fn a_local_path_mounts_and_says_where_it_came_from() {
     let mut session = session();
 
-    session.add("/Users/user/vendor/libfoo", false, true);
+    session.add(Path::new("/Users/user/vendor/libfoo"), false, true);
 
     assert!(session.manifest.paths[1].local);
     let entry = session
@@ -270,8 +278,8 @@ mod tests {
     std::fs::create_dir_all(project_dir.join(".config")).expect("project dir");
     std::fs::write(project_dir.join(MANIFEST_RELATIVE_PATH), "[container]\ncpus = 1\n").expect("manifest");
 
-    let session =
-      Session::profiled("rust", PathResolver::new(&project_dir, &home), &project_dir).expect("the profile should load");
+    let session = Session::load(Some("rust"), PathResolver::new(&project_dir, &home), &project_dir)
+      .expect("the profile should load");
 
     (temp, session)
   }
@@ -285,10 +293,24 @@ mod tests {
   }
 
   #[test]
+  fn without_a_profile_the_projects_manifest_configures_it() {
+    let temp = TempDir::new().expect("temp dir");
+    let project_dir = temp.path().join("api");
+    std::fs::create_dir_all(project_dir.join(".config")).expect("project dir");
+    std::fs::write(project_dir.join(MANIFEST_RELATIVE_PATH), "[container]\ncpus = 1\n").expect("manifest");
+
+    let session = Session::load(None, PathResolver::new(&project_dir, temp.path()), &project_dir)
+      .expect("the manifest should load");
+
+    assert_eq!(session.manifest.container.cpus, 1);
+    assert_eq!(session.config_path(), MANIFEST_RELATIVE_PATH);
+  }
+
+  #[test]
   fn a_missing_profile_names_its_file() {
     let temp = TempDir::new().expect("temp dir");
 
-    let Err(error) = Session::profiled("absent", PathResolver::new(temp.path(), temp.path()), temp.path()) else {
+    let Err(error) = Session::load(Some("absent"), PathResolver::new(temp.path(), temp.path()), temp.path()) else {
       panic!("a profile that is not there should not load");
     };
 

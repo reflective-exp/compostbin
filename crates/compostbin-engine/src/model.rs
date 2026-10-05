@@ -29,12 +29,11 @@ impl BuildStep {
   }
 }
 
-/// A host directory mounted into every step of a build: what a `COPY` reads
-/// from, or anything else a step needs from outside the image.
+/// A host directory mounted read-only into every step of a build: what a
+/// `COPY` reads from, or anything else a step needs from outside the image.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildMount {
   pub destination: String,
-  pub readonly: bool,
   pub source: PathBuf,
 }
 
@@ -47,7 +46,7 @@ pub struct BuildPlan {
   /// Whether to start from cached snapshots. Off still writes them.
   pub cache: bool,
   /// Host directories the steps can read, and where each appears in the guest.
-  /// A step that names one is keyed on its contents; see [`crate::cache`].
+  /// A step that names one is keyed on its contents.
   pub mounts: Vec<BuildMount>,
   /// `NAME=VALUE`, visible to every step and written into the image config.
   pub environment: Vec<String>,

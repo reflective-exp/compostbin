@@ -7,13 +7,18 @@
 //! Both halves of that are worth a session: that the relay carries a request
 //! and its answer, and that a port nobody declared is not reachable.
 
-use compostbin_test::{Project, stderr};
+use compostbin_core::host::Forward;
+use compostbin_test::{Project, poll_until, stderr, stdout, unused_port};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::FileTypeExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use std::time::Duration;
+
+/// How long the creating process is given to bind a port's socket.
+const BIND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A host service on loopback that answers each line with what it was given.
 /// Bound before the manifest is written, since the manifest has to name the
@@ -63,16 +68,6 @@ impl Service {
   }
 }
 
-/// A port number nothing is listening on: bound to learn a free one, then
-/// released.
-fn unused_port() -> u16 {
-  TcpListener::bind("127.0.0.1:0")
-    .expect("bind a host port")
-    .local_addr()
-    .expect("the bound address")
-    .port()
-}
-
 impl Drop for Service {
   fn drop(&mut self) {
     self.stop.store(true, Ordering::Relaxed);
@@ -116,7 +111,7 @@ ports = [{}]
     stderr(&output)
   );
   assert_eq!(
-    String::from_utf8_lossy(&output.stdout),
+    stdout(&output),
     "the host says: hello",
     "a host service answers at the guest's own localhost"
   );
@@ -142,18 +137,12 @@ ports = [{}]
   // bound for exactly as long as it runs — so one has to be running to look.
   // Dropping the guard kills it, and the container with it.
   let running = project.guest_in_background("sleep 60");
-  let socket = project
-    .state_dir()
-    .join(format!("ports/{}.sock", service.port));
+  let socket = Forward::to_loopback(&project.session().port_sockets(), service.port).listen;
 
-  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-  while !socket.exists() && std::time::Instant::now() < deadline {
-    std::thread::sleep(std::time::Duration::from_millis(50));
-  }
-
-  let kind = std::fs::symlink_metadata(&socket)
-    .unwrap_or_else(|error| panic!("nothing was bound at {}: {error}", socket.display()))
-    .file_type();
+  let kind = poll_until(BIND_TIMEOUT, &format!("a socket bound at {}", socket.display()), || {
+    std::fs::symlink_metadata(&socket).ok()
+  })
+  .file_type();
 
   assert!(
     kind.is_socket(),
@@ -193,7 +182,7 @@ ports = [{}, {}]
 
   assert!(output.status.success(), "{}", stderr(&output));
   assert_eq!(
-    String::from_utf8_lossy(&output.stdout),
+    stdout(&output),
     "the first says: hello\nthe second says: hello",
     "each port carried its own service's answer"
   );
@@ -215,18 +204,14 @@ ports = [{port}]
 
   let unanswered = ask(&project, port, "anyone there");
 
-  assert_eq!(
-    String::from_utf8_lossy(&unanswered.stdout),
-    "",
-    "the relay has nothing to answer with"
-  );
+  assert_eq!(stdout(&unanswered), "", "the relay has nothing to answer with");
   assert_eq!(
     project.guest_output("echo the session is still up"),
     "the session is still up",
     "and a service that is not running does not take the session with it"
   );
 
-  let log = std::fs::read_to_string(project.state_dir().join("ports.log")).unwrap_or_default();
+  let log = std::fs::read_to_string(project.session().ports_log()).unwrap_or_default();
 
   assert!(
     log.contains(&format!("nothing answers at 127.0.0.1:{port}")),

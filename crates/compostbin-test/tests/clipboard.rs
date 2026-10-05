@@ -5,12 +5,16 @@
 //! found. It is also the only shared thing these tests touch, so they run one
 //! at a time.
 
-use compostbin_core::manifest::CLIPBOARD_COMMAND;
+use compostbin_core::host::CLIPBOARD_COMMAND;
+use compostbin_core::image::CLIPBOARD_TOOLS;
 use compostbin_core::session::CLIPBOARD_DISPLAY;
-use compostbin_core::session::image::CLIPBOARD_TOOLS;
-use compostbin_test::{Lock, Project, exclusive, stderr, stdout};
+use compostbin_test::{Lock, Project, exclusive, poll_until, stderr, stdout};
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::Duration;
+
+/// How long a guest's copy is given to land on the host.
+const COPY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Holds the machine's one pasteboard for the length of a test, and puts back
 /// what was on it. Held across processes, since that is how the tests run.
@@ -42,7 +46,7 @@ fn paste() -> String {
     .output()
     .expect("pbpaste should run");
 
-  String::from_utf8_lossy(&output.stdout).into_owned()
+  stdout(&output)
 }
 
 fn copy(contents: &str) {
@@ -95,7 +99,7 @@ fn every_tool_reaches_the_pasteboard() {
   assert!(
     finished.status.success(),
     "a copying tool failed: {}{}",
-    String::from_utf8_lossy(&finished.stdout),
+    stdout(&finished),
     stderr(&finished)
   );
 }
@@ -103,16 +107,9 @@ fn every_tool_reaches_the_pasteboard() {
 /// The guest's copy crosses to the host as a command of its own, so it lands a
 /// moment after the tool says it has run.
 fn wait_for_the_pasteboard(expected: &str, tool: &str) {
-  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-
-  while paste() != expected {
-    assert!(
-      std::time::Instant::now() < deadline,
-      "{tool} never reached the host pasteboard, which holds {:?}",
-      paste()
-    );
-    std::thread::sleep(std::time::Duration::from_millis(50));
-  }
+  poll_until(COPY_TIMEOUT, &format!("{tool} to reach the host pasteboard"), || {
+    (paste() == expected).then_some(())
+  });
 }
 
 /// Claude on Linux looks for `wl-copy` only when there is a display to copy to.

@@ -1,12 +1,11 @@
 //! Turning compostbin's specs into what `containerization_framework` takes.
 //!
 //! Everything compostbin decides and the framework does not: which host
-//! variables an `Inherit` resolves against, where a guest sits on the NAT
-//! network, what a builder container is called, and how a build's cache keys
-//! are derived.
+//! variables an `Inherit` resolves against, how a session or build is laid
+//! onto the VM, and what a builder container is called.
 
+use super::cache::Keys;
 use super::nat;
-use crate::cache::Keys;
 use crate::model::{BuildPlan, EnvVar, Resources, RunSpec, SocketRelay};
 use containerization_framework::{self as framework, model};
 use std::path::Path;
@@ -88,7 +87,9 @@ pub fn boot(spec: &RunSpec) -> framework::BootSpec {
 ///
 /// The image every compostbin build produces is a Debian derivative, so the
 /// default `bash -euo pipefail -c` holds and nothing overrides the shell.
-pub fn build(plan: &BuildPlan, keys: &Keys, name: String) -> framework::BuildPlan {
+pub fn build(plan: &BuildPlan, keys: Keys, name: String) -> framework::BuildPlan {
+  let interface = nat::interface(&name);
+
   framework::BuildPlan {
     cpus: plan.resources.cpus,
     memory_in_bytes: plan.resources.memory_in_bytes,
@@ -96,17 +97,17 @@ pub fn build(plan: &BuildPlan, keys: &Keys, name: String) -> framework::BuildPla
     mounts: plan
       .mounts
       .iter()
-      .map(|mount| share(&mount.source, mount.destination.clone(), mount.readonly))
+      .map(|mount| share(&mount.source, mount.destination.clone(), true))
       .collect(),
     steps: plan
       .steps
       .iter()
-      .zip(&keys.steps)
-      .map(|(step, key)| framework::BuildStep {
+      .zip(keys.steps)
+      .map(|(step, cache_key)| framework::BuildStep {
         name: step.name.clone(),
         script: step.script.clone(),
         user: step.user.clone(),
-        cache_key: key.clone(),
+        cache_key,
       })
       .collect(),
     environment: plan.environment.clone(),
@@ -117,13 +118,7 @@ pub fn build(plan: &BuildPlan, keys: &Keys, name: String) -> framework::BuildPla
       restore: plan.cache,
       ..framework::CachePolicy::default()
     },
-    ..framework::BuildPlan::new(
-      name.clone(),
-      plan.base.clone(),
-      plan.tag.clone(),
-      nat::interface(&name),
-      keys.base.clone(),
-    )
+    ..framework::BuildPlan::new(name, plan.base.clone(), plan.tag.clone(), interface, keys.base)
   }
 }
 
@@ -252,8 +247,8 @@ mod tests {
     );
     plan.steps = vec![crate::model::BuildStep::root("packages", "apt-get update")];
 
-    let keys = crate::cache::keys(&plan).expect("a plan with no mount should key");
-    let built = build(&plan, &keys, "cb-builder-0123abcd".to_string());
+    let keys = crate::containerization::cache::keys(&plan).expect("a plan with no mount should key");
+    let built = build(&plan, keys.clone(), "cb-builder-0123abcd".to_string());
 
     assert_eq!(built.name, "cb-builder-0123abcd");
     assert_eq!(built.base_key, keys.base);
@@ -273,10 +268,10 @@ mod tests {
     );
     plan.cache = false;
 
-    let keys = crate::cache::keys(&plan).expect("a plan should key");
+    let keys = crate::containerization::cache::keys(&plan).expect("a plan should key");
 
     assert!(
-      !build(&plan, &keys, "cb-builder-0123abcd".to_string())
+      !build(&plan, keys, "cb-builder-0123abcd".to_string())
         .cache
         .restore
     );

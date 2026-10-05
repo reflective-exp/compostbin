@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// Paths whose contents are secrets. Mounting one, or anything inside it, hands
 /// the container credentials it has no business holding.
-pub const SENSITIVE_PATHS: [&str; 7] = [
+const SENSITIVE_PATHS: [&str; 7] = [
   "/etc",
   "/private/etc",
   "~/.aws",
@@ -20,7 +20,7 @@ pub const SENSITIVE_PATHS: [&str; 7] = [
 ];
 /// Paths not secret in themselves, but covering a whole account or machine,
 /// `SENSITIVE_PATHS` included.
-pub const BROAD_PATHS: [&str; 6] = ["/", "/Users", "~", "~/Desktop", "~/Documents", "~/Downloads"];
+const BROAD_PATHS: [&str; 6] = ["/", "/Users", "~", "~/Desktop", "~/Documents", "~/Downloads"];
 
 /// Why a path should probably not be mounted.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36,7 +36,7 @@ impl fmt::Display for Danger {
     match self {
       Self::Broad(path) => write!(
         formatter,
-        "{} covers a whole account or machine, so mounting it mounts every secret under it",
+        "{} covers a whole account or machine, so the container can read and rewrite every secret under it",
         path.display()
       ),
       Self::Sensitive(path) => write!(formatter, "{} holds credentials", path.display()),

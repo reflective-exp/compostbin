@@ -7,6 +7,7 @@
 //! that nothing here could remove afterwards — so those are what
 //! `compostbin build` is for, not what a test suite does on every run.
 
+use compostbin_core::image;
 use compostbin_test::{Project, stderr, stdout};
 
 #[test]
@@ -30,7 +31,7 @@ fn names_the_store_it_provisions() {
   let project = Project::new("cbt-build-store");
 
   let output = project.compostbin(&["build"]);
-  let store = project.home().join(".cache/compostbin/images");
+  let store = image::store(project.session().resolver());
 
   assert!(
     stdout(&output).contains(&format!("building compostbin/base:latest into {}", store.display())),

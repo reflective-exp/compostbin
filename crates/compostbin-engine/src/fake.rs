@@ -24,7 +24,7 @@ pub enum Call {
 
 /// The calls a fake has been given, in order.
 #[derive(Debug)]
-pub struct Calls<C> {
+struct Calls<C> {
   recorded: RefCell<Vec<C>>,
 }
 
@@ -38,7 +38,7 @@ impl<C> Default for Calls<C> {
 
 impl<C: Clone> Calls<C> {
   /// Every recorded call, in order.
-  pub fn all(&self) -> Vec<C> {
+  fn all(&self) -> Vec<C> {
     self.recorded.borrow().clone()
   }
 
@@ -57,7 +57,6 @@ pub struct RecordingEngine {
   unpacked: RefCell<Vec<String>>,
   /// `None` poses an engine that cannot say what images exist.
   images: Option<Vec<String>>,
-  version: Option<String>,
   exit_code: i32,
 }
 
@@ -82,12 +81,10 @@ impl RecordingEngine {
     }
   }
 
-  /// Poses a working engine holding exactly these images: one that can also
-  /// say its version, which `RecordingEngine::new()` cannot.
+  /// Poses a working engine holding exactly these images.
   pub fn with_images(images: &[&str]) -> Self {
     Self {
       images: Some(images.iter().copied().map(str::to_string).collect()),
-      version: Some(VERSION.to_string()),
       ..Self::default()
     }
   }
@@ -127,10 +124,10 @@ impl Engine for RecordingEngine {
     Ok(())
   }
 
-  fn is_running(&self, name: &str) -> Result<bool, EngineError> {
+  fn is_running(&self, name: &str) -> bool {
     self.calls.record(Call::IsRunning(name.to_string()));
 
-    Ok(self.running.borrow().iter().any(|running| running == name))
+    self.running.borrow().iter().any(|running| running == name)
   }
 
   fn is_unpacked(&self, image: &str) -> Result<bool, EngineError> {
@@ -145,10 +142,10 @@ impl Engine for RecordingEngine {
     )
   }
 
-  fn version(&self) -> Result<Option<String>, EngineError> {
+  fn version(&self) -> String {
     self.calls.record(Call::Version);
 
-    Ok(self.version.clone())
+    VERSION.to_string()
   }
 }
 
@@ -210,10 +207,8 @@ mod tests {
   fn records_calls_in_order() {
     let engine = RecordingEngine::new();
 
-    engine
-      .is_running("cb-test")
-      .expect("is_running should succeed");
-    engine.version().expect("version should succeed");
+    engine.is_running("cb-test");
+    engine.version();
 
     assert_eq!(engine.calls(), [Call::IsRunning("cb-test".to_string()), Call::Version]);
   }

@@ -6,7 +6,8 @@
 //! into the guest over vsock rather than mounted there, so nothing listens on a
 //! network address and no other container can reach a forwarded port.
 
-use crate::host::POLL_INTERVAL;
+use crate::host::GUEST_PORTS_TARGET;
+use crate::host::agent::POLL_INTERVAL;
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
@@ -24,8 +25,8 @@ const BUFFER_SIZE: usize = 16 * 1024;
 /// The guest end of the relay is `root:root` with this mode copied, and the
 /// session runs as `claude`, so anything narrower is refused inside the
 /// container. The session directory confines these, not the socket mode.
-pub const SOCKET_MODE: u32 = 0o666;
-pub const SOCKET_SUFFIX: &str = ".sock";
+const SOCKET_MODE: u32 = 0o666;
+const SOCKET_SUFFIX: &str = ".sock";
 
 /// One declared port: the socket the guest reaches through, and the host
 /// service behind it.
@@ -40,7 +41,7 @@ impl Forward {
   /// is named after the port so the guest can find it without being told.
   pub fn to_loopback(directory: &Path, port: u16) -> Self {
     Self {
-      listen: directory.join(format!("{port}{SOCKET_SUFFIX}")),
+      listen: directory.join(socket_name(port)),
       upstream: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
     }
   }
@@ -48,6 +49,15 @@ impl Forward {
   pub fn port(&self) -> u16 {
     self.upstream.port()
   }
+
+  /// Where the guest's relay looks for this port's socket.
+  pub fn guest_target(&self) -> PathBuf {
+    Path::new(GUEST_PORTS_TARGET).join(socket_name(self.port()))
+  }
+}
+
+fn socket_name(port: u16) -> String {
+  format!("{port}{SOCKET_SUFFIX}")
 }
 
 /// A bound listener. It must outlive the container created with it: the relay
@@ -84,12 +94,6 @@ impl std::fmt::Display for PortEvent {
       Self::UpstreamRefused(forward, error) => write!(formatter, "nothing answers at {}: {error}", forward.upstream),
     }
   }
-}
-
-/// Whether another agent is already accepting on this socket. A refused
-/// connection (a socket left by a dead agent) or a missing socket means no.
-pub fn served(forward: &Forward) -> bool {
-  UnixStream::connect(&forward.listen).is_ok()
 }
 
 /// Binds every forward, reporting each as it comes up. All or nothing: a
@@ -155,7 +159,7 @@ pub fn relay(bound: &[Bound], stop: &AtomicBool, report: &(dyn Fn(PortEvent) + S
       for (bound, refused) in bound.iter().zip(&refused) {
         // Every connection waiting, not one per wake.
         while let Ok((guest, _)) = bound.listener.accept() {
-          let forward = bound.forward.clone();
+          let forward = &bound.forward;
           scope.spawn(move || connect(guest, forward, refused, stop, report));
         }
       }
@@ -189,7 +193,7 @@ fn ready_to_accept(waiting: &mut [libc::pollfd], timeout: Duration) -> bool {
 /// One guest connection, relayed until both directions have ended.
 fn connect(
   guest: UnixStream,
-  forward: Forward,
+  forward: &Forward,
   refused: &AtomicBool,
   stop: &AtomicBool,
   report: &(dyn Fn(PortEvent) + Sync),
@@ -205,7 +209,7 @@ fn connect(
     }
     Err(error) => {
       if !refused.swap(true, Ordering::Relaxed) {
-        report(PortEvent::UpstreamRefused(forward, error.to_string()));
+        report(PortEvent::UpstreamRefused(forward.clone(), error.to_string()));
       }
       close_cleanly(&guest);
       return;
@@ -333,6 +337,7 @@ fn waiting(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use compostbin_engine::containerization::served;
   use std::net::TcpListener;
   use std::sync::Mutex;
   use std::time::Instant;
@@ -444,6 +449,7 @@ mod tests {
       "127.0.0.1:7001".parse::<SocketAddr>().expect("an address")
     );
     assert_eq!(forward.port(), 7001);
+    assert_eq!(forward.guest_target(), PathBuf::from("/run/compostbin/ports/7001.sock"));
   }
 
   /// The guest end is root-owned with this mode copied, and the session is not
@@ -475,11 +481,11 @@ mod tests {
     let stale = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
     drop(stale);
     assert!(forward.listen.exists(), "the path outlives the listener");
-    assert!(!served(&forward), "nothing is accepting on it");
+    assert!(!served(&forward.listen), "nothing is accepting on it");
 
     // Bound, not dropped: the listener is what makes the socket answer.
     let _rebound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("rebind");
-    assert!(served(&forward));
+    assert!(served(&forward.listen));
   }
 
   /// Keeps a second `run` from unbinding the session's live relay.
@@ -489,13 +495,13 @@ mod tests {
     let forward = forward(&directory, free_port());
     let events = Mutex::new(Vec::new());
 
-    assert!(!served(&forward), "nothing is bound yet");
+    assert!(!served(&forward.listen), "nothing is bound yet");
 
     let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
-    assert!(served(&forward));
+    assert!(served(&forward.listen));
 
     drop(bound);
-    assert!(!served(&forward));
+    assert!(!served(&forward.listen));
   }
 
   #[test]

@@ -1,16 +1,13 @@
-use crate::error::{At, ManifestError};
+use crate::error::{At, InvalidMemory, ManifestError};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Session state, keyed by container name: Claude's home, kept so `--continue`
-/// works, beside transient state that `clean` empties.
-pub const SESSIONS_DIR: &str = "~/.local/state/compostbin/sessions";
-pub const DEFAULT_CONTAINER_CPUS: u32 = 4;
-pub const DEFAULT_CONTAINER_MEMORY: Memory = Memory::gibibytes(8);
-pub const DEFAULT_HOST_CONCURRENCY: usize = 8;
-pub const DEFAULT_IMAGE: &str = "compostbin/base:latest";
+const DEFAULT_CONTAINER_CPUS: u32 = 4;
+const DEFAULT_CONTAINER_MEMORY: Memory = Memory::gibibytes(8);
+const DEFAULT_HOST_CONCURRENCY: usize = 8;
+const DEFAULT_IMAGE: &str = "compostbin/base:latest";
 /// Checked in beside the project it configures.
 pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
 /// Hand-written manifests, each replacing a project's own under `--profile`.
@@ -18,10 +15,6 @@ pub const PROFILES_DIR: &str = "~/.config/compostbin/profiles";
 /// The user's own configuration, applied to every session whatever configures
 /// the project.
 pub const USER_CONFIG_PATH: &str = "~/.config/compostbin/config.toml";
-/// The host command `[host] clipboard` serves, and what the guest's `pbcopy`,
-/// `xclip`, `xsel` and `wl-copy` send.
-pub const CLIPBOARD_COMMAND: &str = "clipboard";
-const CLIPBOARD_ARGV: &[&str] = &["pbcopy"];
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -95,7 +88,7 @@ impl Manifest {
 
   /// Writes the local `[[paths]]` beside the manifest, leaving the committed
   /// file alone. Removes the local file when nothing local is left.
-  pub fn save_local(&self, manifest_path: &Path) -> Result<(), ManifestError> {
+  fn save_local(&self, manifest_path: &Path) -> Result<(), ManifestError> {
     let path = local_path(manifest_path);
     let local = LocalManifest {
       paths: self
@@ -187,9 +180,9 @@ pub struct UserClaudeConfig {
 /// the developer.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct LocalManifest {
+struct LocalManifest {
   #[serde(serialize_with = "PathEntry::serialize_sorted_by_source")]
-  pub paths: Vec<PathEntry>,
+  paths: Vec<PathEntry>,
 }
 
 /// `…/compostbin.toml` becomes `…/compostbin.local.toml`, so a manifest found
@@ -267,10 +260,10 @@ impl Memory {
 }
 
 impl std::str::FromStr for Memory {
-  type Err = String;
+  type Err = InvalidMemory;
 
-  fn from_str(text: &str) -> Result<Self, String> {
-    let invalid = || format!("\"{text}\" is not a memory size: expected a number, optionally followed by G, M, or K");
+  fn from_str(text: &str) -> Result<Self, InvalidMemory> {
+    let invalid = || InvalidMemory(text.to_string());
     let trimmed = text.trim();
 
     let (digits, scale) = match trimmed.char_indices().last() {
@@ -297,9 +290,9 @@ impl std::str::FromStr for Memory {
 }
 
 impl TryFrom<String> for Memory {
-  type Error = String;
+  type Error = InvalidMemory;
 
-  fn try_from(text: String) -> Result<Self, String> {
+  fn try_from(text: String) -> Result<Self, InvalidMemory> {
     text.parse()
   }
 }
@@ -367,25 +360,6 @@ impl HostConfig {
   /// project that has not opted in has no way to run anything on the host.
   pub fn has_commands(&self) -> bool {
     self.clipboard || !self.commands.is_empty()
-  }
-
-  /// What the agent serves: `commands`, plus `clipboard` when it is on. A
-  /// declared `clipboard` wins, so a project can point it elsewhere.
-  pub fn served_commands(&self) -> BTreeMap<String, HostCommand> {
-    let mut served = self.commands.clone();
-
-    if self.clipboard {
-      served
-        .entry(CLIPBOARD_COMMAND.to_string())
-        .or_insert_with(|| HostCommand {
-          arguments: false,
-          argv: CLIPBOARD_ARGV.iter().copied().map(str::to_string).collect(),
-          deny: Vec::new(),
-          tty: false,
-        });
-    }
-
-    served
   }
 
   /// No ports, no listener: nothing binds on the host.
@@ -645,38 +619,19 @@ tty = true
     let manifest: Manifest = toml::from_str("[host]\nclipboard = true\n").expect("should parse");
 
     assert!(manifest.host.has_commands());
-    assert_eq!(manifest.host.served_commands()[CLIPBOARD_COMMAND].argv, ["pbcopy"]);
 
     let rendered = toml::to_string(&manifest).expect("should serialize");
     assert!(rendered.contains("[host]\nclipboard = true\n"), "{rendered}");
   }
 
   #[test]
-  fn serves_no_clipboard_unless_asked() {
+  fn renders_no_clipboard_unless_asked() {
     let manifest: Manifest = toml::from_str(HOST_MANIFEST).expect("should parse");
 
-    assert!(
-      !manifest
-        .host
-        .served_commands()
-        .contains_key(CLIPBOARD_COMMAND)
-    );
     assert!(
       !toml::to_string(&manifest)
         .expect("should serialize")
         .contains("clipboard")
-    );
-  }
-
-  #[test]
-  fn a_declared_clipboard_command_wins() {
-    let manifest: Manifest =
-      toml::from_str("[host]\nclipboard = true\n[host.commands.clipboard]\nargv = [\"tee\", \"/tmp/copied\"]\n")
-        .expect("should parse");
-
-    assert_eq!(
-      manifest.host.served_commands()[CLIPBOARD_COMMAND].argv,
-      ["tee", "/tmp/copied"]
     );
   }
 

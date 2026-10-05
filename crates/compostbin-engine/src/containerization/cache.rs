@@ -16,7 +16,8 @@ use crate::error::EngineError;
 use crate::model::{BuildMount, BuildPlan};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -79,8 +80,8 @@ enum Entry {
 }
 
 /// One digest over every file under a mount's source, in path order, because
-/// `read_dir` order is the filesystem's. Contents are read while hashing, so
-/// the whole tree is never in memory at once.
+/// `read_dir` order is the filesystem's. Contents stream into the hash, so no
+/// file is ever in memory whole.
 fn digest_of(root: &Path) -> Result<String, EngineError> {
   let mut entries = Vec::new();
 
@@ -95,7 +96,9 @@ fn digest_of(root: &Path) -> Result<String, EngineError> {
     match entry {
       Entry::File { executable, path } => {
         key.field(if executable { b"755" } else { b"644" });
-        key.field(&fs::read(&path).map_err(|error| unreadable(&path, error))?);
+        key
+          .contents(&path)
+          .map_err(|error| unreadable(&path, error))?;
       }
       Entry::Link { target } => {
         key.field(b"symlink");
@@ -107,11 +110,13 @@ fn digest_of(root: &Path) -> Result<String, EngineError> {
   Ok(key.finish())
 }
 
-fn unreadable(path: &Path, error: std::io::Error) -> EngineError {
+fn unreadable(path: &Path, error: io::Error) -> EngineError {
   EngineError::unavailable(format!("read the mounted directory at {}", path.display()), error)
 }
 
-/// Every file under `directory`, each paired with its path relative to `root`.
+/// Every file and symlink under `directory`, each paired with its path relative
+/// to `root`. FIFOs, sockets, and devices have no contents to key, and reading
+/// one could block forever, so they are left out.
 fn collect(root: &Path, directory: &Path, into: &mut Vec<(String, Entry)>) -> Result<(), EngineError> {
   let listing = fs::read_dir(directory).map_err(|error| unreadable(directory, error))?;
 
@@ -142,6 +147,10 @@ fn collect(root: &Path, directory: &Path, into: &mut Vec<(String, Entry)>) -> Re
           target: target.to_string_lossy().into_owned(),
         },
       ));
+      continue;
+    }
+
+    if !kind.is_file() {
       continue;
     }
 
@@ -178,6 +187,32 @@ impl Key {
     self.0.update(value);
   }
 
+  /// The file at `path` as one field, the same as `field` over its bytes.
+  ///
+  /// Opened non-blocking, so a file swapped for a FIFO since `collect` saw it
+  /// fails the check below instead of hanging the open.
+  fn contents(&mut self, path: &Path) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+      .read(true)
+      .custom_flags(libc::O_NONBLOCK)
+      .open(path)?;
+    let metadata = file.metadata()?;
+
+    if !metadata.is_file() {
+      return Err(io::Error::other("no longer a regular file"));
+    }
+
+    self.0.update(metadata.len().to_le_bytes());
+
+    // The prefix promised this many bytes; any other count frames every field
+    // after it differently.
+    if io::copy(&mut file, &mut Hashing(&mut self.0))? != metadata.len() {
+      return Err(io::Error::other("changed while it was read"));
+    }
+
+    Ok(())
+  }
+
   fn finish(self) -> String {
     self
       .0
@@ -185,6 +220,20 @@ impl Key {
       .iter()
       .map(|byte| format!("{byte:02x}"))
       .collect()
+  }
+}
+
+/// Feeds a hash from `io::copy`.
+struct Hashing<'a>(&'a mut Sha256);
+
+impl Write for Hashing<'_> {
+  fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+    self.0.update(bytes);
+    Ok(bytes.len())
+  }
+
+  fn flush(&mut self) -> io::Result<()> {
+    Ok(())
   }
 }
 
@@ -312,7 +361,6 @@ mod tests {
   fn mounting(source: impl Into<PathBuf>) -> BuildMount {
     BuildMount {
       destination: MOUNT.to_string(),
-      readonly: true,
       source: source.into(),
     }
   }
@@ -391,6 +439,30 @@ mod tests {
     assert_ne!(
       keys(&with_mount(&linked, &reads)).expect("a key").steps[1],
       keys(&with_mount(&written, &reads)).expect("a key").steps[1]
+    );
+  }
+
+  /// Reading a FIFO with no writer would block the build forever.
+  #[test]
+  fn keys_a_mount_holding_a_fifo_as_if_it_were_not_there() {
+    let reads = format!("cp -r {MOUNT}/. /usr/local/bin/");
+    let plain = context_with("one");
+    let piped = context_with("one");
+    let fifo = std::ffi::CString::new(
+      piped
+        .path()
+        .join("pipe")
+        .into_os_string()
+        .into_encoded_bytes(),
+    )
+    .expect("a path without a NUL");
+
+    // SAFETY: a NUL-terminated path this test owns.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0, "a FIFO");
+
+    assert_eq!(
+      keys(&with_mount(&plain, &reads)).expect("a key"),
+      keys(&with_mount(&piped, &reads)).expect("a key")
     );
   }
 

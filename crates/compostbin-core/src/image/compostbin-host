@@ -21,6 +21,20 @@ if [ "$#" -lt 1 ]; then
   exit 64
 fi
 
+# The request is one field per line, so a newline would split an argument in
+# two, and once written the host cannot tell. Refused here, with the status a
+# host refusal has.
+newline='
+'
+for argument in "$@"; do
+  case "$argument" in
+    *"$newline"*)
+      echo "compostbin-host: an argument may not contain a newline" >&2
+      exit 126
+      ;;
+  esac
+done
+
 # Timestamp first, so ids sort into arrival order and are served in it. The
 # random suffix is for concurrency: subagents call this script independently,
 # and two must not pick the same id.
@@ -60,7 +74,7 @@ if [ -t 1 ]; then
 fi
 
 # One field per line, command first. Nothing quotes or escapes, so there is no
-# quoting bug to have; the host rejects a newline in an argument.
+# quoting bug to have; a newline in an argument was refused above.
 printf '%s\n' "$@" > "$spool/requests/$id.partial"
 # Rename, so the agent never sees a half-written request.
 mv "$spool/requests/$id.partial" "$spool/requests/$id.request"

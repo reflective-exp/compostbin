@@ -12,37 +12,11 @@ pub struct Request {
   pub command: String,
 }
 
-impl Request {
-  pub fn new(command: impl Into<String>, arguments: Vec<String>) -> Self {
-    Self {
-      arguments,
-      command: command.into(),
-    }
-  }
-
-  /// One field per line, command first: the writer is a shell script, and
-  /// `printf '%s\n'` has no escaping to get wrong. So no argument may contain a
-  /// newline.
-  pub fn render(&self) -> Result<String, Refusal> {
-    for field in std::iter::once(&self.command).chain(self.arguments.iter()) {
-      if field.contains('\n') {
-        return Err(Refusal::NewlineInArgument(field.clone()));
-      }
-    }
-
-    let mut rendered = self.command.clone();
-    for argument in &self.arguments {
-      rendered.push('\n');
-      rendered.push_str(argument);
-    }
-    rendered.push('\n');
-
-    Ok(rendered)
-  }
-}
-
-/// The inverse of `render`, and the only way a request is built from what the
-/// guest wrote into the spool.
+/// One field per line, command first: the writer is a shell script, and
+/// `printf '%s\n'` has no escaping to get wrong. So the guest client refuses an
+/// argument containing a newline, which would arrive here as two.
+///
+/// The only way a request is built from what the guest wrote into the spool.
 impl FromStr for Request {
   type Err = Refusal;
 
@@ -226,20 +200,9 @@ mod tests {
   #[test]
   fn round_trips_a_request_through_its_wire_format() {
     let request = Request::new("test-one", vec!["-p".to_string(), "compostbin-core".to_string()]);
-    let rendered = request.render().expect("should render");
+    let rendered = request.render();
 
     assert_eq!(rendered, "test-one\n-p\ncompostbin-core\n");
     assert_eq!(rendered.parse::<Request>().expect("should parse"), request);
-  }
-
-  /// A newline would parse as a further argument, so it is refused at the writer.
-  #[test]
-  fn refuses_to_render_an_argument_containing_a_newline() {
-    let argument = "one\ntwo".to_string();
-
-    assert_eq!(
-      Request::new("test-one", vec![argument.clone()]).render(),
-      Err(Refusal::NewlineInArgument(argument))
-    );
   }
 }

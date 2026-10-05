@@ -17,6 +17,33 @@ use std::time::Duration;
 /// How often a process asks whether its window changed size.
 const RESIZE_POLL: Duration = Duration::from_millis(100);
 
+/// Set by the SIGWINCH handler. One per process: a process attaches at most
+/// one terminal.
+static RESIZED: AtomicBool = AtomicBool::new(false);
+
+/// Installs the SIGWINCH handler, once.
+pub fn watch_for_resize() {
+  static INSTALLED: std::sync::Once = std::sync::Once::new();
+
+  INSTALLED.call_once(|| {
+    // SAFETY: `note_resize` only stores into an atomic, which is
+    // async-signal-safe.
+    unsafe {
+      libc::signal(libc::SIGWINCH, note_resize as *const () as libc::sighandler_t);
+    }
+  });
+}
+
+extern "C" fn note_resize(_signal: libc::c_int) {
+  RESIZED.store(true, Ordering::Relaxed);
+}
+
+/// Whether the window changed size since last asked. Non-blocking, so the
+/// poller can stop when its attach ends.
+pub fn resized() -> bool {
+  RESIZED.swap(false, Ordering::Relaxed)
+}
+
 /// Runs `attached`, calling `resize` each time this process's window changes
 /// size while it runs, and returns `attached`'s value.
 ///

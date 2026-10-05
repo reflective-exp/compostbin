@@ -39,6 +39,15 @@ impl fmt::Display for EngineError {
 
 impl Error for EngineError {}
 
+impl From<containerization_framework::Error> for EngineError {
+  fn from(error: containerization_framework::Error) -> Self {
+    match error {
+      containerization_framework::Error::Failed { action, message } => Self::Failed { action, message },
+      containerization_framework::Error::Unavailable { action, message } => Self::Unavailable { action, message },
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -53,5 +62,15 @@ mod tests {
       EngineError::unavailable("read the image store", "it has never been built").to_string(),
       "cannot read the image store: it has never been built"
     );
+  }
+
+  /// The framework's error already names its action; wrapping it as a message
+  /// would say it twice.
+  #[test]
+  fn takes_a_framework_error_as_its_own() {
+    let error = EngineError::from(containerization_framework::Error::unavailable("boot cb", "no kernel"));
+
+    assert!(matches!(error, EngineError::Unavailable { .. }));
+    assert_eq!(error.to_string(), "cannot boot cb: no kernel");
   }
 }

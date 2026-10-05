@@ -1,17 +1,22 @@
-//! Claude skills to be installed into the host's `~/.claude/skills`.
-//! Sessions gain access via the sessions bind mounts.
+//! What `install` puts on the host: Claude skills, into `~/.claude/skills`, and
+//! the directory profiles are written in. Sessions see the skills through their
+//! bind mounts.
 
 use crate::error::{At, PathError};
+use crate::manifest::PROFILES_DIR;
+use crate::session::settings::HOST_CLAUDE_HOME;
+use crate::workspace::paths::PathResolver;
 use std::collections::BTreeSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
-pub struct Skill {
-  pub name: &'static str,
+struct Skill {
+  name: &'static str,
   /// Paths relative to the skill's directory, and their contents.
-  pub files: &'static [(&'static str, &'static str)],
+  files: &'static [(&'static str, &'static str)],
 }
 
-pub const SKILLS: &[Skill] = &[Skill {
+const SKILLS: &[Skill] = &[Skill {
   name: "compostbin-manifest",
   files: &[
     ("SKILL.md", include_str!("compostbin-manifest/SKILL.md")),
@@ -34,24 +39,67 @@ pub const SKILLS: &[Skill] = &[Skill {
   ],
 }];
 
+/// What to do to one path, carrying the contents to write when there are any.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
-  Create,
-  Update,
+  Create(&'static str),
+  /// An empty directory, for the user to fill.
+  CreateDirectory,
+  Update(&'static str),
   /// In a skill's directory but no longer shipped.
   Remove,
+}
+
+/// The verb, as a plan is shown before it is applied.
+impl fmt::Display for Action {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(match self {
+      Self::Create(_) | Self::CreateDirectory => "create",
+      Self::Update(_) => "update",
+      Self::Remove => "remove",
+    })
+  }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Change {
   pub action: Action,
   pub path: PathBuf,
-  contents: Option<&'static str>,
 }
 
-/// What installing into `skills_dir` would change. Files already current are
-/// left out, so an empty plan means up to date.
-pub fn plan(skills_dir: &Path) -> Result<Vec<Change>, PathError> {
+/// The verb and the path, a directory marked by its trailing `/`.
+impl fmt::Display for Change {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let slash = if self.action == Action::CreateDirectory {
+      "/"
+    } else {
+      ""
+    };
+    write!(formatter, "{} {}{slash}", self.action, self.path.display())
+  }
+}
+
+/// What installing would change: the profiles directory when there is none
+/// yet, then the skills. Files already current are left out, so an empty plan
+/// means up to date.
+pub fn plan(resolver: &PathResolver) -> Result<Vec<Change>, PathError> {
+  let mut changes = Vec::new();
+  let profiles = resolver.resolve(PROFILES_DIR);
+
+  if !profiles.is_dir() {
+    changes.push(Change {
+      action: Action::CreateDirectory,
+      path: profiles,
+    });
+  }
+
+  changes.extend(plan_skills(&resolver.resolve(HOST_CLAUDE_HOME).join("skills"))?);
+
+  Ok(changes)
+}
+
+/// What installing into `skills_dir` would change.
+fn plan_skills(skills_dir: &Path) -> Result<Vec<Change>, PathError> {
   let mut changes = Vec::new();
 
   for skill in SKILLS {
@@ -62,15 +110,11 @@ pub fn plan(skills_dir: &Path) -> Result<Vec<Change>, PathError> {
       let path = dir.join(name);
       let action = match std::fs::read(&path).at(&path) {
         Ok(existing) if existing == contents.as_bytes() => continue,
-        Ok(_) => Action::Update,
-        Err(error) if error.is_not_found() => Action::Create,
+        Ok(_) => Action::Update(contents),
+        Err(error) if error.is_not_found() => Action::Create(contents),
         Err(error) => return Err(error),
       };
-      changes.push(Change {
-        action,
-        path,
-        contents: Some(contents),
-      });
+      changes.push(Change { action, path });
     }
 
     for path in files_under(&dir)? {
@@ -78,7 +122,6 @@ pub fn plan(skills_dir: &Path) -> Result<Vec<Change>, PathError> {
         changes.push(Change {
           action: Action::Remove,
           path,
-          contents: None,
         });
       }
     }
@@ -89,14 +132,15 @@ pub fn plan(skills_dir: &Path) -> Result<Vec<Change>, PathError> {
 
 pub fn apply(changes: &[Change]) -> Result<(), PathError> {
   for change in changes {
-    match change.contents {
-      Some(contents) => {
+    match change.action {
+      Action::Create(contents) | Action::Update(contents) => {
         if let Some(parent) = change.path.parent() {
           std::fs::create_dir_all(parent).at(parent)?;
         }
         std::fs::write(&change.path, contents).at(&change.path)?;
       }
-      None => std::fs::remove_file(&change.path).at(&change.path)?,
+      Action::CreateDirectory => std::fs::create_dir_all(&change.path).at(&change.path)?,
+      Action::Remove => std::fs::remove_file(&change.path).at(&change.path)?,
     }
   }
 
@@ -145,8 +189,12 @@ mod tests {
   fn installs_every_file_into_a_fresh_directory() {
     let temp = TempDir::new().expect("temp dir");
 
-    let changes = plan(temp.path()).expect("plan");
-    assert!(changes.iter().all(|change| change.action == Action::Create));
+    let changes = plan_skills(temp.path()).expect("plan");
+    assert!(
+      changes
+        .iter()
+        .all(|change| matches!(change.action, Action::Create(_)))
+    );
 
     apply(&changes).expect("apply");
 
@@ -154,18 +202,18 @@ mod tests {
       let path = temp.path().join("compostbin-manifest").join(name);
       assert_eq!(std::fs::read_to_string(&path).expect("installed"), *contents);
     }
-    assert_eq!(plan(temp.path()).expect("plan"), [], "installed is up to date");
+    assert_eq!(plan_skills(temp.path()).expect("plan"), [], "installed is up to date");
   }
 
   #[test]
   fn updates_a_changed_file_and_removes_one_no_longer_shipped() {
     let temp = TempDir::new().expect("temp dir");
-    apply(&plan(temp.path()).expect("plan")).expect("apply");
+    apply(&plan_skills(temp.path()).expect("plan")).expect("apply");
     let dir = temp.path().join("compostbin-manifest");
     std::fs::write(dir.join("SKILL.md"), "edited").expect("edit");
     std::fs::write(dir.join("references/retired.md"), "gone").expect("stale");
 
-    let changes = plan(temp.path()).expect("plan");
+    let changes = plan_skills(temp.path()).expect("plan");
 
     let summary: Vec<(Action, PathBuf)> = changes
       .iter()
@@ -174,14 +222,43 @@ mod tests {
     assert_eq!(
       summary,
       [
-        (Action::Update, dir.join("SKILL.md")),
+        (Action::Update(manifest_skill().files[0].1), dir.join("SKILL.md")),
         (Action::Remove, dir.join("references/retired.md")),
       ]
     );
 
     apply(&changes).expect("apply");
-    assert_eq!(plan(temp.path()).expect("plan"), []);
+    assert_eq!(plan_skills(temp.path()).expect("plan"), []);
     assert!(!dir.join("references/retired.md").exists());
+  }
+
+  /// Profiles are written by hand, so `install` only makes somewhere to put them.
+  #[test]
+  fn creates_the_profiles_directory_once() {
+    let temp = TempDir::new().expect("temp dir");
+    let resolver = PathResolver::new(temp.path(), temp.path());
+    let profiles = temp.path().join(".config/compostbin/profiles");
+
+    let changes = plan(&resolver).expect("plan");
+
+    assert_eq!(
+      changes[0],
+      Change {
+        action: Action::CreateDirectory,
+        path: profiles.clone(),
+      }
+    );
+    assert_eq!(changes[0].to_string(), format!("create {}/", profiles.display()));
+    assert!(
+      changes[1..]
+        .iter()
+        .all(|change| change.path.starts_with(temp.path().join(".claude/skills")))
+    );
+
+    apply(&changes).expect("apply");
+
+    assert!(profiles.is_dir());
+    assert_eq!(plan(&resolver).expect("plan"), [], "installed is up to date");
   }
 
   /// Other skills in the same directory are the user's.
@@ -192,7 +269,7 @@ mod tests {
     std::fs::create_dir_all(theirs.parent().expect("parent")).expect("create");
     std::fs::write(&theirs, "how to deploy").expect("write");
 
-    apply(&plan(temp.path()).expect("plan")).expect("apply");
+    apply(&plan_skills(temp.path()).expect("plan")).expect("apply");
 
     assert_eq!(std::fs::read_to_string(&theirs).expect("kept"), "how to deploy");
   }

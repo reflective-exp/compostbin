@@ -8,7 +8,7 @@
 //! that a refusal reaches the caller rather than being swallowed.
 
 use compostbin_core::error::Refusal;
-use compostbin_core::host::REJECTED_EXIT_CODE;
+use compostbin_core::host::{REJECTED_EXIT_CODE, Spool};
 use compostbin_test::{Project, code, stderr, stdout};
 
 /// A project whose host commands are shells: an allowlist entry is argv on the
@@ -159,6 +159,19 @@ fn denied_arguments_are_refused() {
   );
 }
 
+/// A request is one field per line, so a newline would smuggle in a second
+/// argument; the guest client refuses it before anything is sent.
+#[test]
+fn an_argument_containing_a_newline_is_refused() {
+  let project = with_host_commands("cbt-host-newline");
+
+  let output = project.guest("compostbin-host repeat \"$(printf 'one\\ntwo')\"");
+
+  assert_eq!(code(&output), REJECTED_EXIT_CODE);
+  assert!(stderr(&output).contains("newline"), "stderr: {}", stderr(&output));
+  assert_eq!(stdout(&output), "", "nothing ran");
+}
+
 /// `tty = true` asks for a terminal; a caller capturing the output has none to
 /// give, and must not get the merged streams a pty produces.
 #[test]
@@ -282,7 +295,9 @@ fn no_commands_means_no_channel() {
     stderr(&output)
   );
   assert!(
-    !project.state_dir().join("host/requests").exists(),
+    !Spool::new(project.session().host_spool())
+      .requests()
+      .exists(),
     "with no allowlist there is no spool to write requests into"
   );
 }

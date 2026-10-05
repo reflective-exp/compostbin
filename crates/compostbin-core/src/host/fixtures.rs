@@ -1,9 +1,44 @@
-//! Allowlist and spool fixtures shared by the submodule tests.
+//! Allowlist and spool fixtures shared by the submodule tests, and the guest
+//! client's half of the wire format.
 
-use crate::host::Spool;
+use crate::error::PathError;
+use crate::host::REQUEST_SUFFIX;
+use crate::host::request::Request;
+use crate::host::spool::{Spool, publish};
 use crate::manifest::HostCommand;
 use std::collections::BTreeMap;
 use tempfile::TempDir;
+
+impl Request {
+  pub fn new(command: impl Into<String>, arguments: Vec<String>) -> Self {
+    Self {
+      arguments,
+      command: command.into(),
+    }
+  }
+
+  /// What the guest client writes: one field per line, command first. The
+  /// client refuses a newline in a field, so a fixture must not contain one.
+  pub fn render(&self) -> String {
+    let fields: Vec<&str> = std::iter::once(&self.command)
+      .chain(&self.arguments)
+      .map(String::as_str)
+      .collect();
+    assert!(
+      fields.iter().all(|field| !field.contains('\n')),
+      "the guest client never sends a newline in a field: {fields:?}"
+    );
+
+    fields.iter().map(|field| format!("{field}\n")).collect()
+  }
+}
+
+impl Spool {
+  /// Writes a request the way the guest does: `.partial` first, then rename.
+  pub fn submit(&self, id: &str, request: &Request) -> Result<(), PathError> {
+    publish(&self.requests(), &format!("{id}{REQUEST_SUFFIX}"), request.render())
+  }
+}
 
 pub fn commands(entries: &[(&str, &[&str], bool)]) -> BTreeMap<String, HostCommand> {
   entries

@@ -8,28 +8,28 @@
 //!   ([`control`], [`terminal`]);
 //! - nothing lists containers, so a container is up iff something answers on
 //!   its control socket;
-//! - where a guest sits on the NAT network ([`nat`]), what a builder container
-//!   is called, and what invalidates a build ([`crate::cache`]) are all
-//!   compostbin's to decide ([`spec`]).
+//! - where a guest sits on the NAT network ([`nat`]), what invalidates a build
+//!   ([`cache`]), and what a builder container is called ([`spec`]) are all
+//!   compostbin's to decide.
 
+mod cache;
 mod control;
 mod nat;
 mod spec;
 mod terminal;
 
 use crate::builder::Builder;
-use crate::cache;
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::model::{BuildPlan, ExecSpec, RunSpec};
 use containerization_framework::{self as framework, Session, Stdio};
-use std::io;
+use std::error::Error;
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use containerization_framework::{Store, StoreError};
+pub use control::served;
 
 /// The store at `root`, booting the kernel and init image the framework pins.
 ///
@@ -44,9 +44,11 @@ pub fn store(root: impl Into<PathBuf>) -> Store {
   Store::at(root, kernel, framework::INITFS_REFERENCE, initfs)
 }
 
-/// Set by the SIGWINCH handler. One per process: a process attaches at most
-/// one terminal.
-static RESIZED: AtomicBool = AtomicBool::new(false);
+/// Where the container `name` answers attaches while it runs, given the
+/// directory a `FrameworkEngine` keeps one runtime directory per container in.
+pub fn control_socket(runtime_dir: &Path, name: &str) -> PathBuf {
+  runtime_dir.join(name).join(control::CONTROL_SOCKET)
+}
 
 /// The owner's exec id; can't collide with a joiner's `attach-<n>`.
 const OWNER_ATTACH: &str = "attach-owner";
@@ -54,10 +56,13 @@ const OWNER_ATTACH: &str = "attach-owner";
 /// What an attach that never ran reports. Outside the guest exit code range.
 const FAILED: i32 = -1;
 
+/// What `FrameworkEngine::reporting` is given.
+type Report = dyn Fn(&dyn Error) + Send + Sync;
+
 pub struct FrameworkEngine {
   /// Told about a joined client whose attach broke, since that leaves the rest
   /// of the session running and has no call to return to. Ignored by default.
-  attach_failed: Arc<dyn Fn(io::Error) + Send + Sync>,
+  attach_failed: Arc<Report>,
   /// One directory per container, holding its control socket.
   runtime_dir: PathBuf,
   session: Session,
@@ -73,15 +78,11 @@ impl FrameworkEngine {
   }
 
   /// Hands broken attaches to `report`, which decides what to say about them.
-  pub fn reporting(self, report: impl Fn(io::Error) + Send + Sync + 'static) -> Self {
+  pub fn reporting(self, report: impl Fn(&dyn Error) + Send + Sync + 'static) -> Self {
     Self {
       attach_failed: Arc::new(report),
       ..self
     }
-  }
-
-  fn socket(&self, name: &str) -> PathBuf {
-    control::socket_path(&self.runtime_dir.join(name))
   }
 
   /// Runs a guest process against the caller's stdio, as the owner of the VM.
@@ -108,7 +109,7 @@ impl FrameworkEngine {
   /// A joiner's attach has no call to return an error to, so a failure comes
   /// back as the code reserved for one and is reported beside it.
   fn serve_control_socket(&self, name: String) -> Result<(), EngineError> {
-    let path = self.socket(&name);
+    let path = control_socket(&self.runtime_dir, &name);
     let listener = control::bind(&path).map_err(|error| EngineError::failed("bind the control socket", error))?;
     let attach_failed = Arc::clone(&self.attach_failed);
     let session = Session::new(self.session.store().clone());
@@ -120,14 +121,14 @@ impl FrameworkEngine {
         |request, stdio, id| match Self::attach(&session, &name, id, request, *stdio) {
           Ok(code) => code,
           Err(error) => {
-            attach_failed(io::Error::other(error.to_string()));
+            attach_failed(&error);
             FAILED
           }
         },
         |id, terminal| {
           let _ = session.resize(id, terminal);
         },
-        |error| attach_failed(error),
+        |error| attach_failed(&error),
       );
     });
 
@@ -160,7 +161,7 @@ impl Engine for FrameworkEngine {
 
     let stdio = if attached {
       // Only a terminal has a window, so only then is there anything to watch.
-      watch_for_resize();
+      terminal::watch_for_resize();
       Stdio::terminal(descriptor, libc::STDOUT_FILENO)
     } else {
       Stdio::inherit(spec.interactive)
@@ -179,7 +180,7 @@ impl Engine for FrameworkEngine {
       // directly; a joiner has to ask over the control socket.
       let code = if attached {
         terminal::while_resizing(
-          &resized,
+          &terminal::resized,
           || {
             let _ = self.session.resize(OWNER_ATTACH, descriptor);
           },
@@ -189,13 +190,18 @@ impl Engine for FrameworkEngine {
         attach()
       };
 
-      return code.map_err(|error| EngineError::failed("exec", error));
+      return Ok(code?);
     }
 
     // Not duplicated: `SCM_RIGHTS` already copies each one, and the owner dups
     // again.
-    control::request(&self.socket(&spec.name), &request, &stdio, &resized)
-      .map_err(|error| EngineError::failed("attach", error))
+    control::request(
+      &control_socket(&self.runtime_dir, &spec.name),
+      &request,
+      &stdio,
+      &terminal::resized,
+    )
+    .map_err(|error| EngineError::failed("attach", error))
   }
 
   /// Read from the store's index; there is no daemon to ask.
@@ -207,29 +213,23 @@ impl Engine for FrameworkEngine {
   }
 
   fn run(&self, spec: &RunSpec) -> Result<(), EngineError> {
-    self
-      .session
-      .boot(&spec::boot(spec))
-      .map_err(|error| EngineError::failed("boot", error))?;
+    self.session.boot(&spec::boot(spec))?;
 
     self.serve_control_socket(spec.name.clone())
   }
 
-  fn is_running(&self, name: &str) -> Result<bool, EngineError> {
+  fn is_running(&self, name: &str) -> bool {
     // A socket file with nothing answering is a container that died with its
     // owner. Not `Session::is_running`, which answers for this process alone.
-    Ok(control::served(&self.socket(name)))
+    control::served(&control_socket(&self.runtime_dir, name))
   }
 
   fn is_unpacked(&self, image: &str) -> Result<bool, EngineError> {
-    self
-      .session
-      .is_unpacked(image)
-      .map_err(|error| EngineError::failed("find the image", error))
+    Ok(self.session.is_unpacked(image)?)
   }
 
-  fn version(&self) -> Result<Option<String>, EngineError> {
-    Ok(Some(Session::version()))
+  fn version(&self) -> String {
+    Session::version()
   }
 }
 
@@ -247,51 +247,20 @@ impl FrameworkBuilder {
 
 impl Builder for FrameworkBuilder {
   fn build(&self, plan: &BuildPlan) -> Result<(), EngineError> {
-    let action = format!("build {}", plan.tag);
     let keys = cache::keys(plan)?;
-    let name = spec::builder_name().map_err(|error| EngineError::failed(&action, error))?;
+    let name = spec::builder_name().map_err(|error| EngineError::failed(format!("build {}", plan.tag), error))?;
 
-    self
-      .builder
-      .build(&spec::build(plan, &keys, name))
-      .map_err(|error| EngineError::failed(action, error))
+    Ok(self.builder.build(&spec::build(plan, keys, name))?)
   }
 
   fn provision(&self) -> Result<(), EngineError> {
-    self
-      .builder
-      .provision()
-      .map_err(|error| EngineError::failed("provision the image store", error))
+    Ok(self.builder.provision()?)
   }
-}
-
-/// Installs the SIGWINCH handler, once.
-fn watch_for_resize() {
-  static INSTALLED: std::sync::Once = std::sync::Once::new();
-
-  INSTALLED.call_once(|| {
-    // SAFETY: `note_resize` only stores into an atomic, which is
-    // async-signal-safe.
-    unsafe {
-      libc::signal(libc::SIGWINCH, note_resize as *const () as libc::sighandler_t);
-    }
-  });
-}
-
-extern "C" fn note_resize(_signal: libc::c_int) {
-  RESIZED.store(true, Ordering::Relaxed);
-}
-
-/// Whether the window changed size since last asked. Non-blocking, so the
-/// poller can stop when its attach ends.
-fn resized() -> bool {
-  RESIZED.swap(false, Ordering::Relaxed)
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::path::Path;
 
   #[test]
   fn names_the_kernel_and_init_image_for_the_versions_the_framework_pins() {

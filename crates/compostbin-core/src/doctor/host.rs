@@ -2,10 +2,10 @@
 //! on the host, and the token it authenticates with.
 
 use super::{Check, Status, check, listed};
-use crate::host::served;
+use crate::host::served_commands;
 use crate::session::Session;
 use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialSource, KEYCHAIN_SERVICE};
-use compostbin_engine::engine::Engine;
+use compostbin_engine::containerization::served;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ pub fn allowlist(session: &Session) -> Check {
     );
   }
 
-  let served = session.manifest.host.served_commands();
+  let served = served_commands(&session.manifest.host);
   let commands: Vec<String> = served
     .iter()
     .map(|(name, command)| {
@@ -48,7 +48,7 @@ pub fn allowlist(session: &Session) -> Check {
 ///
 /// Each port is relayed into this container alone, so there is no wider reach
 /// to report.
-pub fn ports(session: &Session, engine: &impl Engine) -> Check {
+pub fn ports(session: &Session, running: bool) -> Check {
   if !session.manifest.host.has_ports() {
     return check("host ports", Status::Ok, "no [host] ports: nothing is forwarded");
   }
@@ -57,7 +57,7 @@ pub fn ports(session: &Session, engine: &impl Engine) -> Check {
   // sockets has died. The record cannot show this, and rebinding cannot fix it.
   let forwards = session.forwards();
 
-  if session.is_running(engine).unwrap_or(false) && !forwards.iter().all(served) {
+  if running && !forwards.iter().all(|forward| served(&forward.listen)) {
     return check(
       "host ports",
       Status::Warn,

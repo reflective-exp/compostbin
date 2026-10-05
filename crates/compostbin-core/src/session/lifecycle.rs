@@ -2,10 +2,11 @@
 
 use crate::error::{At, SessionError};
 use crate::host::{self, PortEvent};
+use crate::image;
 use crate::manifest::{TomlFile, USER_CONFIG_PATH, UserConfig};
-use crate::session::credentials::{self, CredentialSource, SeedOutcome};
+use crate::session::credentials::{self, CredentialSource};
 use crate::session::record::Record;
-use crate::session::{Notice, Session, briefing, image, settings};
+use crate::session::{Notice, Session, briefing, settings};
 use compostbin_engine::engine::Engine;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,10 +28,10 @@ pub struct Process {
 
 impl Process {
   /// What `run` attaches: Claude, on a terminal whenever the caller has one.
-  pub fn claude(arguments: &[String]) -> Self {
+  pub fn claude(arguments: Vec<String>) -> Self {
     Self {
       argv: std::iter::once(CLAUDE.to_string())
-        .chain(arguments.iter().cloned())
+        .chain(arguments)
         .collect(),
       tty: true,
       user: image::USER.to_string(),
@@ -39,12 +40,8 @@ impl Process {
 
   /// What `exec` attaches: a command of the caller's own, reading and writing
   /// the caller's streams unless it asked for a terminal.
-  pub fn command(argv: &[String], tty: bool, user: &str) -> Self {
-    Self {
-      argv: argv.to_vec(),
-      tty,
-      user: user.to_string(),
-    }
+  pub fn command(argv: Vec<String>, tty: bool, user: String) -> Self {
+    Self { argv, tty, user }
   }
 
   /// Only Claude needs setup to succeed; anything else may be debugging it.
@@ -84,7 +81,9 @@ impl Session {
     }
 
     engine.run(&spec)?;
-    Record::of(&spec.mounts, &spec.sockets).save(&self.mount_record())?;
+    Record::of(&spec.mounts, &spec.sockets)
+      .save(&self.mount_record())
+      .map_err(SessionError::Record)?;
 
     Ok(())
   }
@@ -92,8 +91,8 @@ impl Session {
   /// Whether the container is up, and so whether `run` will attach rather than
   /// create. Anything whose work belongs to creation (binding the port sockets,
   /// above all) must ask first.
-  pub fn is_running(&self, engine: &impl Engine) -> Result<bool, SessionError> {
-    Ok(engine.is_running(&self.container_name())?)
+  pub fn is_running(&self, engine: &impl Engine) -> bool {
+    engine.is_running(&self.container_name())
   }
 
   /// Attaches `process` to the session, creating the container first unless it
@@ -119,7 +118,7 @@ impl Session {
   ) -> Result<i32, SessionError> {
     self.prepare(credentials, notify)?;
 
-    if self.is_running(engine)? {
+    if self.is_running(engine) {
       return Ok(engine.exec(&self.process_spec(process))?);
     }
 
@@ -139,13 +138,7 @@ impl Session {
     let home = self.claude_home();
     std::fs::create_dir_all(&home).at(&home)?;
 
-    let seeded = credentials::seed(
-      &self.claude_home(),
-      self.manifest.claude.seed_from_keychain,
-      credentials,
-    )?;
-
-    if seeded == SeedOutcome::NotInKeychain {
+    if credentials::seed(&home, self.manifest.claude.seed_from_keychain, credentials)? {
       notify(Notice::NotInKeychain);
     }
 
@@ -160,11 +153,7 @@ impl Session {
       .chain(self.manifest.claude.shared.iter().cloned())
       .collect();
 
-    let shared = settings::share(
-      &self.resolver.resolve(settings::HOST_CLAUDE_HOME),
-      &self.claude_home(),
-      &extra,
-    )?;
+    let shared = settings::share(&self.resolver.resolve(settings::HOST_CLAUDE_HOME), &home, &extra)?;
 
     if !shared.is_empty() {
       notify(Notice::Shared(shared));
@@ -205,7 +194,7 @@ impl Session {
         scope.spawn(|| {
           if let Err(error) = host::serve(
             spool,
-            &self.manifest.host.served_commands(),
+            &host::served_commands(&self.manifest.host),
             &self.project_dir,
             self.manifest.host.concurrency,
             &stop,
@@ -268,11 +257,10 @@ impl Session {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::fixtures;
   use crate::host::Spool;
   use crate::manifest::{MANIFEST_RELATIVE_PATH, PathEntry};
   use crate::session::credentials::FakeSource;
-  use crate::session::fixtures::{MANIFEST, PROJECT};
+  use crate::session::fixtures::{self, MANIFEST, PROJECT};
   use compostbin_engine::fake::{Call, RecordingEngine};
   use std::os::unix::fs::FileTypeExt;
 
@@ -280,21 +268,21 @@ mod tests {
 
   fn run(session: &Session, engine: &RecordingEngine) -> i32 {
     session
-      .run(engine, &FakeSource(None), &Process::claude(&[]), &quiet)
+      .run(engine, &FakeSource(None), &Process::claude(Vec::new()), &quiet)
       .expect("run should succeed")
   }
 
   fn claude(session: &Session) -> Call {
-    Call::Exec(session.process_spec(&Process::claude(&[])))
+    Call::Exec(session.process_spec(&Process::claude(Vec::new())))
   }
 
   fn root_shell() -> Process {
-    Process::command(&["bash".to_string()], true, "root")
+    Process::command(vec!["bash".to_string()], true, "root".to_string())
   }
 
   #[test]
   fn run_attaches_to_an_already_running_container() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
     let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
     run(&session, &engine);
@@ -308,7 +296,7 @@ mod tests {
 
   #[test]
   fn run_attaches_another_process_to_a_running_container() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
     let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
     session
@@ -327,7 +315,7 @@ mod tests {
   /// A shell can start the session as well as Claude can.
   #[test]
   fn run_creates_a_container_for_another_process() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
     let engine = RecordingEngine::new();
 
     session
@@ -350,7 +338,7 @@ mod tests {
   /// Another session's container is not this one: `run` creates its own.
   #[test]
   fn run_creates_a_container_that_is_not_running() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
     let engine = RecordingEngine::with_running(&["compostbin-other"]);
 
     run(&session, &engine);
@@ -369,13 +357,13 @@ mod tests {
   /// Only an image's first run unpacks it, and only that one says so.
   #[test]
   fn run_says_when_it_unpacks_the_image_first() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
     let image = session.run_spec().image;
     let unpacking = |engine: &RecordingEngine| {
       let said = std::sync::Mutex::new(Vec::new());
 
       session
-        .run(engine, &FakeSource(None), &Process::claude(&[]), &|notice| {
+        .run(engine, &FakeSource(None), &Process::claude(Vec::new()), &|notice| {
           if let Notice::Unpacking(image) = notice {
             said.lock().expect("unpoisoned").push(image);
           }
@@ -394,10 +382,10 @@ mod tests {
 
   #[test]
   fn run_passes_its_arguments_through_to_claude() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
     let engine = RecordingEngine::new();
 
-    let process = Process::claude(&["--continue".to_string()]);
+    let process = Process::claude(vec!["--continue".to_string()]);
 
     session
       .run(&engine, &FakeSource(None), &process, &quiet)
@@ -413,7 +401,7 @@ mod tests {
 
   #[test]
   fn run_sets_up_a_new_container_before_starting_claude() {
-    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
     session.manifest.container.setup = vec!["./bin/setup".to_string(), "true".to_string()];
     let engine = RecordingEngine::new();
 
@@ -432,7 +420,7 @@ mod tests {
   /// The creator already set it up.
   #[test]
   fn joining_a_running_session_sets_nothing_up() {
-    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
     session.manifest.container.setup = vec!["./bin/setup".to_string()];
     let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
@@ -444,13 +432,13 @@ mod tests {
 
   #[test]
   fn failed_setup_does_not_start_claude() {
-    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
     session.manifest.container.setup = vec!["false".to_string(), "true".to_string()];
     let engine = RecordingEngine::exiting_with(3);
     let said = std::sync::Mutex::new(Vec::new());
 
     let code = session
-      .run(&engine, &FakeSource(None), &Process::claude(&[]), &|notice| {
+      .run(&engine, &FakeSource(None), &Process::claude(Vec::new()), &|notice| {
         if let Notice::SetupFailed { line, code } = notice {
           said.lock().expect("unpoisoned").push((line, code));
         }
@@ -465,7 +453,7 @@ mod tests {
   /// A shell may be there to find out why setup fails.
   #[test]
   fn failed_setup_still_starts_another_process() {
-    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
     session.manifest.container.setup = vec!["false".to_string(), "true".to_string()];
     let engine = RecordingEngine::exiting_with(3);
     let said = std::sync::Mutex::new(Vec::new());
@@ -516,7 +504,7 @@ mod tests {
   /// is using.
   #[test]
   fn joining_a_running_session_binds_nothing() {
-    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
     session.manifest.host.ports = vec![7001];
 
     run(&session, &RecordingEngine::with_running(&["compostbin-cb"]));
@@ -526,12 +514,12 @@ mod tests {
 
   #[test]
   fn run_says_when_there_is_no_token_to_seed() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
     let said = std::sync::Mutex::new(Vec::new());
     let engine = RecordingEngine::with_unpacked(&[&session.run_spec().image]);
 
     session
-      .run(&engine, &FakeSource(None), &Process::claude(&[]), &|notice| {
+      .run(&engine, &FakeSource(None), &Process::claude(Vec::new()), &|notice| {
         said.lock().expect("lock").push(format!("{notice:?}"))
       })
       .expect("run should succeed");
@@ -544,7 +532,7 @@ mod tests {
   /// reaches the session it creates, not the one after.
   #[test]
   fn creating_the_container_writes_the_briefing() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
 
     run(&session, &RecordingEngine::new());
 
@@ -566,7 +554,7 @@ mod tests {
   /// which the manifest stops describing once edited.
   #[test]
   fn records_the_mounts_the_container_was_created_with() {
-    let (temp, mut session) = fixtures::session(MANIFEST, PROJECT);
+    let (temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
     let base = temp.path().canonicalize().expect("canonical temp");
     let engine = RecordingEngine::new();
 
@@ -597,7 +585,7 @@ mod tests {
   /// that container is still up.
   #[test]
   fn creating_a_container_sweeps_the_last_ones_leftovers() {
-    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
     session.manifest.host =
       toml::from_str("[commands.test]\nargv = [\"cargo\", \"nextest\", \"run\"]\n").expect("host config should parse");
     session
@@ -621,7 +609,7 @@ mod tests {
   /// The same edit, once the container has actually been recreated.
   #[test]
   fn recreating_the_container_records_the_new_mounts() {
-    let (temp, mut session) = fixtures::session(MANIFEST, PROJECT);
+    let (temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
     let base = temp.path().canonicalize().expect("canonical temp");
 
     run(&session, &RecordingEngine::new());

@@ -1,5 +1,7 @@
 //! Reading what a finished command left behind.
 
+use compostbin_core::host::SIGNAL_EXIT_BASE;
+use std::os::unix::process::ExitStatusExt;
 use std::process::Output;
 
 pub fn stdout(output: &Output) -> String {
@@ -13,5 +15,10 @@ pub fn stderr(output: &Output) -> String {
 /// The exit code, or the signal a killed process died of, as a shell reports
 /// it.
 pub fn code(output: &Output) -> i32 {
-  output.status.code().unwrap_or(-1)
+  let status = output.status;
+
+  status
+    .code()
+    .or_else(|| status.signal().map(|signal| SIGNAL_EXIT_BASE + signal))
+    .expect("a finished process either exited or was killed")
 }

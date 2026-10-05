@@ -1,5 +1,9 @@
 use clap::{Args, Parser, Subcommand};
-use compostbin_core::session::image;
+use compostbin_core::error::ManifestError;
+use compostbin_core::image;
+use compostbin_core::session::Session;
+use compostbin_core::workspace::paths::PathResolver;
+use std::path::Path;
 
 #[derive(Debug, Parser)]
 #[command(name = "compostbin", about = "Run Claude Code in a container")]
@@ -98,6 +102,13 @@ pub struct Config {
   /// project's manifest
   #[arg(long, value_parser = profile_name)]
   pub profile: Option<String>,
+}
+
+impl Config {
+  /// The session this configuration selects for `project_dir`.
+  pub fn load(&self, resolver: PathResolver, project_dir: &Path) -> Result<Session, ManifestError> {
+    Session::load(self.profile.as_deref(), resolver, project_dir)
+  }
 }
 
 /// A file name under the profiles directory, not a path out of it.

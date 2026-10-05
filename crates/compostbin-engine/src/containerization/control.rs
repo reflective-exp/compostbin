@@ -17,7 +17,7 @@ use containerization_framework::{Stdio, UNATTACHED};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Socket file name, inside the container's runtime directory.
 pub const CONTROL_SOCKET: &str = "control.sock";
@@ -45,16 +45,20 @@ fn labelled(stdio: &Stdio) -> [(char, RawFd); MAX_DESCRIPTORS] {
   ]
 }
 
-/// Only `labelled` names the labels; anything else is a decoding bug, and
-/// filing it under a stream would attach the caller to the wrong one.
-fn set(stdio: &mut Stdio, label: char, descriptor: RawFd) {
-  match label {
-    't' => stdio.terminal = descriptor,
-    'i' => stdio.stdin = descriptor,
-    'o' => stdio.stdout = descriptor,
-    'e' => stdio.stderr = descriptor,
-    other => unreachable!("{other} is not a stream `labelled` names"),
-  }
+/// Files `descriptor` under the stream `label` names. `None` for a label
+/// `labelled` doesn't name: guessing would attach the caller to the wrong one.
+fn set(stdio: &mut Stdio, label: char, descriptor: RawFd) -> Option<()> {
+  let stream = match label {
+    't' => &mut stdio.terminal,
+    'i' => &mut stdio.stdin,
+    'o' => &mut stdio.stdout,
+    'e' => &mut stdio.stderr,
+    _ => return None,
+  };
+
+  *stream = descriptor;
+
+  Some(())
 }
 
 /// Only the streams the caller attached, in the order they cross.
@@ -75,20 +79,14 @@ fn labels(stdio: &Stdio) -> String {
 /// Pairs the labels a request carried with the descriptors that came beside
 /// it. `None` when they disagree, or a label names no stream.
 fn from_labels(labels: &str, descriptors: &[RawFd]) -> Option<Stdio> {
-  let named = |label: char| {
-    labelled(&Stdio::nothing())
-      .iter()
-      .any(|(named, _)| *named == label)
-  };
-
-  if labels.chars().count() != descriptors.len() || !labels.chars().all(named) {
+  if labels.chars().count() != descriptors.len() {
     return None;
   }
 
   let mut stdio = Stdio::nothing();
 
   for (label, descriptor) in labels.chars().zip(descriptors) {
-    set(&mut stdio, label, *descriptor);
+    set(&mut stdio, label, *descriptor)?;
   }
 
   Some(stdio)
@@ -153,7 +151,8 @@ fn split(line: &str) -> Vec<String> {
   line.split(UNIT).map(str::to_string).collect()
 }
 
-/// Whether a live owner answers at this path.
+/// Whether something is accepting on the unix socket at this path: a control
+/// socket's owner, or a port relay.
 ///
 /// The inode outlives its owner, so only a connect tells dead from listening.
 pub fn served(path: &Path) -> bool {
@@ -242,7 +241,7 @@ where
     let terminal = stdio.terminal;
 
     // Only a client on a terminal has a window to resize, and only it nudges.
-    if terminal != UNATTACHED {
+    if stdio.has_terminal() {
       scope.spawn(move || {
         let mut byte = [0u8; 1];
 
@@ -285,7 +284,7 @@ pub fn request(path: &Path, request: &Request, stdio: &Stdio, resized: &(dyn Fn(
   };
 
   // Only a caller with a terminal has a window that can change size.
-  if stdio.terminal == UNATTACHED {
+  if !stdio.has_terminal() {
     return wait();
   }
 
@@ -298,11 +297,6 @@ pub fn request(path: &Path, request: &Request, stdio: &Stdio, resized: &(dyn Fn(
     },
     wait,
   )
-}
-
-/// Where a container's control socket lives, given its directory.
-pub fn socket_path(container_dir: &Path) -> PathBuf {
-  container_dir.join(CONTROL_SOCKET)
 }
 
 /// `sendmsg` with the payload and the descriptors in one `SCM_RIGHTS` control
@@ -559,14 +553,14 @@ mod tests {
   fn says_nothing_is_served_at_a_path_with_no_socket() {
     let directory = tempfile::tempdir().expect("a temp dir");
 
-    assert!(!served(&socket_path(directory.path())));
+    assert!(!served(&directory.path().join(CONTROL_SOCKET)));
   }
 
   /// Every stream a caller without a terminal sends, which is the most of them.
   #[test]
   fn carries_three_descriptors_and_a_payload_across() {
     let directory = tempfile::tempdir().expect("a temp dir");
-    let path = socket_path(directory.path());
+    let path = directory.path().join(CONTROL_SOCKET);
     let listener = bind(&path).expect("bind");
     let stdio = Stdio::inherit(true);
 
@@ -600,7 +594,7 @@ mod tests {
   #[test]
   fn rebinds_over_a_socket_whose_owner_is_gone() {
     let directory = tempfile::tempdir().expect("a temp dir");
-    let path = socket_path(directory.path());
+    let path = directory.path().join(CONTROL_SOCKET);
 
     drop(bind(&path).expect("the first bind"));
 

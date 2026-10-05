@@ -6,14 +6,11 @@
 //! questions: whether the store it reads is the one a session boots from, and
 //! whether a container that is really running is seen as running.
 
-use compostbin_test::{Project, code, stderr, stdout};
+use compostbin_test::{Project, code, poll_until, stderr, stdout, unused_port};
+use std::time::Duration;
 
-/// `doctor` fails a session that cannot authenticate, which one made by the
-/// harness cannot: it never reads the Keychain. A key in the environment is
-/// the other way to authenticate, and the one a test can arrange.
-fn diagnose(project: &Project) -> std::process::Output {
-  project.compostbin_with_env(&["doctor"], &[("ANTHROPIC_API_KEY", "not-a-real-key")])
-}
+/// How long a container is given to come up.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The check names, so a check dropped from `doctor` is noticed here too.
 const CHECKS: [&str; 10] = [
@@ -33,7 +30,7 @@ const CHECKS: [&str; 10] = [
 fn healthy_project_passes() {
   let project = Project::new("cbt-doctor");
 
-  let output = diagnose(&project);
+  let output = project.doctor();
   let report = stdout(&output);
 
   assert_eq!(code(&output), 0, "doctor failed: {report}{}", stderr(&output));
@@ -56,7 +53,7 @@ fn healthy_project_passes() {
 fn built_base_image_is_reported() {
   let project = Project::new("cbt-doctor-image");
 
-  let report = stdout(&diagnose(&project));
+  let report = stdout(&project.doctor());
   let line = report
     .lines()
     .find(|line| line.contains("base image:"))
@@ -72,15 +69,9 @@ fn built_base_image_is_reported() {
 fn missing_path_fails() {
   let project = Project::new("cbt-doctor-missing");
   let absent = project.home().join("never-created");
-  project.manifest(&format!(
-    r#"
-[[paths]]
-source = "{}"
-"#,
-    absent.display()
-  ));
+  project.mount(&absent, false);
 
-  let output = diagnose(&project);
+  let output = project.doctor();
   let report = stdout(&output);
 
   assert_eq!(code(&output), 1, "a failing check makes doctor exit non-zero");
@@ -96,14 +87,14 @@ source = "{}"
 fn running_container_is_seen() {
   let project = Project::new("cbt-doctor-live");
 
-  let before = stdout(&diagnose(&project));
+  let before = stdout(&project.doctor());
   assert!(
     before.contains("is not running"),
     "nothing is up before the first command:\n{before}"
   );
 
   let running = project.guest_in_background("sleep 60");
-  let during = wait_until(&project, |report| !report.contains("is not running"));
+  let during = once_running(&project);
 
   assert!(
     during.contains("ok    container mounts") && during.contains("the mounts the manifest declares"),
@@ -118,21 +109,14 @@ fn running_container_is_seen() {
 #[test]
 fn mid_session_edit_is_drift() {
   let project = Project::new("cbt-doctor-drift");
-  let libfoo = project.home().join("libfoo");
-  std::fs::create_dir(&libfoo).expect("create libfoo");
+  let libfoo = project.sibling("libfoo", &[]);
 
   let running = project.guest_in_background("sleep 60");
-  wait_until(&project, |report| !report.contains("is not running"));
+  once_running(&project);
 
-  project.manifest(&format!(
-    r#"
-[[paths]]
-source = "{}"
-"#,
-    libfoo.display()
-  ));
+  project.mount(&libfoo, false);
 
-  let report = stdout(&diagnose(&project));
+  let report = stdout(&project.doctor());
 
   assert!(
     report.contains("warn  container mounts") && report.contains("exit it and `compostbin run` again"),
@@ -152,12 +136,7 @@ source = "{}"
 #[test]
 fn idle_port_is_reported() {
   let project = Project::new("cbt-doctor-ports");
-  // Bound and dropped, so the port is one nothing is listening on.
-  let port = std::net::TcpListener::bind("127.0.0.1:0")
-    .expect("bind")
-    .local_addr()
-    .expect("address")
-    .port();
+  let port = unused_port();
   project.manifest(&format!(
     r#"
 [host]
@@ -165,7 +144,7 @@ ports = [{port}]
 "#
   ));
 
-  let output = diagnose(&project);
+  let output = project.doctor();
   let report = stdout(&output);
 
   assert_eq!(code(&output), 0, "a service that has not started yet is not a failure");
@@ -191,7 +170,7 @@ argv = ["cargo", "nextest", "run"]
 "#,
   );
 
-  let report = stdout(&diagnose(&project));
+  let report = stdout(&project.doctor());
 
   assert!(
     report.contains("warn  host commands"),
@@ -204,22 +183,9 @@ argv = ["cargo", "nextest", "run"]
   );
 }
 
-/// Polls `doctor` until the report says what the test is waiting for, since a
-/// container takes a moment to come up.
-fn wait_until(project: &Project, ready: impl Fn(&str) -> bool) -> String {
-  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-
-  loop {
-    let report = stdout(&diagnose(project));
-
-    if ready(&report) {
-      return report;
-    }
-
-    assert!(
-      std::time::Instant::now() < deadline,
-      "the session never came up:\n{report}"
-    );
-    std::thread::sleep(std::time::Duration::from_millis(100));
-  }
+/// Polls `doctor` until it sees the container running, and returns that report.
+fn once_running(project: &Project) -> String {
+  poll_until(START_TIMEOUT, "doctor to see the session running", || {
+    Some(stdout(&project.doctor())).filter(|report| !report.contains("is not running"))
+  })
 }

@@ -5,6 +5,7 @@
 //! skills — and expects to find in every container. The copy is the host's to
 //! make, so the test for it is whether the guest ends up holding it.
 
+use compostbin_core::manifest::USER_CONFIG_PATH;
 use compostbin_core::session::CLAUDE_HOME_TARGET;
 use compostbin_core::session::settings::HOST_CLAUDE_SETTINGS;
 use compostbin_test::{Project, stderr};
@@ -72,9 +73,9 @@ shared = ["widgets"]
 #[test]
 fn user_config_can_share_more() {
   let project = with_a_host_home("cbt-shared-user");
-  let config = project.home().join(".config/compostbin");
-  std::fs::create_dir_all(&config).expect("create config dir");
-  std::fs::write(config.join("config.toml"), "[claude]\nshared = [\"widgets\"]\n").expect("write config");
+  let config = project.session().resolver().resolve(USER_CONFIG_PATH);
+  std::fs::create_dir_all(config.parent().expect("config has a parent")).expect("create config dir");
+  std::fs::write(&config, "[claude]\nshared = [\"widgets\"]\n").expect("write config");
 
   assert_eq!(
     project.guest_output(&format!("cat {CLAUDE_HOME_TARGET}/widgets/sprocket")),
@@ -122,7 +123,7 @@ fn no_host_home_still_works() {
 
   assert_eq!(project.guest_output("echo started"), "started");
   assert!(
-    project.state_dir().join("claude-home").is_dir(),
+    project.session().claude_home().is_dir(),
     "the home is a mount source, so it exists whether or not anything was put in it"
   );
 }

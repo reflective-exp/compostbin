@@ -10,7 +10,8 @@
 //! `settings::share` overwrites from the host.
 
 use crate::error::{At, PathError};
-use crate::manifest::{CLIPBOARD_COMMAND, Manifest};
+use crate::host::{CLIPBOARD_COMMAND, served_commands};
+use crate::manifest::Manifest;
 use std::path::Path;
 
 /// Claude's managed settings directory on Linux. Fixed by Claude Code, not by
@@ -72,10 +73,10 @@ pub fn briefing(manifest: &Manifest, config: &str) -> String {
      which is not installed.\n\nThis project declares:\n\n",
   );
 
-  let commands = manifest.host.served_commands();
+  let commands = served_commands(&manifest.host);
   let width = commands.keys().map(String::len).max().unwrap_or_default();
 
-  for (name, command) in &commands {
+  for (name, command) in commands.iter() {
     // The argv gives the name its meaning; the notes are the two ways a command
     // can differ from exact.
     let mut notes = Vec::new();

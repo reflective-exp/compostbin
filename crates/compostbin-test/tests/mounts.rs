@@ -35,17 +35,8 @@ fn project_is_the_workdir_and_writes_reach_the_host() {
 #[test]
 fn extra_path_mounts_under_its_basename() {
   let project = Project::new("cbt-extra-path");
-  let libfoo = project.home().join("libfoo");
-  std::fs::create_dir(&libfoo).expect("create libfoo");
-  std::fs::write(libfoo.join("marker"), "a sibling checkout\n").expect("write marker");
-
-  project.manifest(&format!(
-    r#"
-[[paths]]
-source = "{}"
-"#,
-    libfoo.display()
-  ));
+  let libfoo = project.sibling("libfoo", &[("marker", "a sibling checkout\n")]);
+  project.mount(&libfoo, false);
 
   assert_eq!(
     project.guest_output("cat /workspace/libfoo/marker && echo written > /workspace/libfoo/new && echo ok"),
@@ -58,18 +49,8 @@ source = "{}"
 #[test]
 fn readonly_path_refuses_writes() {
   let project = Project::new("cbt-readonly");
-  let notes = project.home().join("notes");
-  std::fs::create_dir(&notes).expect("create notes");
-  std::fs::write(notes.join("kept"), "read me\n").expect("write note");
-
-  project.manifest(&format!(
-    r#"
-[[paths]]
-readonly = true
-source = "{}"
-"#,
-    notes.display()
-  ));
+  let notes = project.sibling("notes", &[("kept", "read me\n")]);
+  project.mount(&notes, true);
 
   assert_eq!(
     project.guest_output("cat /workspace/notes/kept"),
@@ -98,9 +79,7 @@ source = "{}"
 #[test]
 fn a_declared_target_is_where_the_path_lands() {
   let project = Project::new("cbt-target");
-  let vendor = project.home().join("vendor");
-  std::fs::create_dir(&vendor).expect("create vendor");
-  std::fs::write(vendor.join("marker"), "at a fixed path\n").expect("write marker");
+  let vendor = project.sibling("vendor", &[("marker", "at a fixed path\n")]);
 
   project.manifest(&format!(
     r#"
@@ -129,19 +108,10 @@ target = "/opt/vendor"
 #[test]
 fn the_local_manifest_mounts_too() {
   let project = Project::new("cbt-local");
-  let shared = project.home().join("shared");
-  let scratch = project.home().join("scratch");
-  std::fs::create_dir(&shared).expect("create shared");
-  std::fs::create_dir(&scratch).expect("create scratch");
-  std::fs::write(scratch.join("marker"), "mine alone\n").expect("write marker");
+  let shared = project.sibling("shared", &[]);
+  let scratch = project.sibling("scratch", &[("marker", "mine alone\n")]);
 
-  project.manifest(&format!(
-    r#"
-[[paths]]
-source = "{}"
-"#,
-    shared.display()
-  ));
+  project.mount(&shared, false);
   project.write(
     ".config/compostbin.local.toml",
     &format!(
@@ -208,7 +178,7 @@ fn claude_home_outlives_the_container() {
   project.guest_output(&format!("echo remembered > {CLAUDE_HOME_TARGET}/marker"));
 
   assert_eq!(
-    std::fs::read_to_string(project.state_dir().join("claude-home/marker")).expect("read the marker"),
+    std::fs::read_to_string(project.session().claude_home().join("marker")).expect("read the marker"),
     "remembered\n",
     "the guest's Claude home is a directory on the host that the container only borrows"
   );
@@ -224,9 +194,7 @@ fn claude_home_outlives_the_container() {
 #[test]
 fn nothing_undeclared_is_mounted() {
   let project = Project::new("cbt-undeclared");
-  let elsewhere = project.home().join("elsewhere");
-  std::fs::create_dir(&elsewhere).expect("create elsewhere");
-  std::fs::write(elsewhere.join("secret"), "not for the guest\n").expect("write secret");
+  let elsewhere = project.sibling("elsewhere", &[("secret", "not for the guest\n")]);
 
   assert_eq!(
     project.guest_output("ls /workspace"),

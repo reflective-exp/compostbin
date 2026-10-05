@@ -12,9 +12,7 @@ use compostbin_test::{Project, stderr, stdout};
 #[test]
 fn a_path_added_to_a_live_session_reaches_the_next_container() {
   let project = Project::new("cbt-add-live");
-  let libfoo = project.home().join("libfoo");
-  std::fs::create_dir(&libfoo).expect("create libfoo");
-  std::fs::write(libfoo.join("marker"), "added mid-session\n").expect("write marker");
+  let libfoo = project.sibling("libfoo", &[("marker", "added mid-session\n")]);
 
   // The owner reports what it can see before and after, stepped over its own
   // stdin so that `add` runs between the two.

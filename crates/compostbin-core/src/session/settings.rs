@@ -77,7 +77,7 @@ pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<
     // carry a path-based copy out onto the host. So everything below is created
     // through `home`'s descriptor, exclusively and without following links: a
     // link planted at any moment ends the copy with an error instead.
-    remove(&destination)?;
+    crate::fs::remove(&destination)?;
 
     if metadata.is_dir() {
       copy_tree(&source, home, OsStr::new(&name), &destination, MAX_DEPTH)?;
@@ -89,21 +89,6 @@ pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<
   }
 
   Ok(copied)
-}
-
-/// Removes whatever is at `path`, directory or file; a no-op when nothing is.
-fn remove(path: &Path) -> Result<(), PathError> {
-  let Ok(metadata) = std::fs::symlink_metadata(path) else {
-    return Ok(());
-  };
-
-  let removed = if metadata.is_dir() {
-    std::fs::remove_dir_all(path)
-  } else {
-    std::fs::remove_file(path)
-  };
-
-  removed.at(path)
 }
 
 /// Creates `name` inside `parent`. `destination` only names it in errors: a path

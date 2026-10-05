@@ -1,12 +1,18 @@
 #![cfg(feature = "integration")]
 //! Who owns the container, and what `clean` may take while it is up.
 
+use compostbin_core::host::Spool;
 use compostbin_core::session::CLAUDE_HOME_TARGET;
-use compostbin_test::{Project, stderr, stdout};
+use compostbin_test::{Project, poll_until, stderr, stdout};
+use std::time::Duration;
 
 /// Something container-local: `/tmp` is not mounted, so a file there says
 /// which container a command ran in.
 const LOCAL_MARKER: &str = "/tmp/joined";
+/// How long a container is given to come up.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a container is given to go once its creator has.
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A second command joins the session rather than making one of its own, which
 /// is what makes `compostbin shell` a client of a running `run`.
@@ -45,20 +51,15 @@ fn container_goes_with_its_creator() {
   wait_until_up(&project);
 
   assert!(
-    running_report(&project).contains("is running"),
+    stdout(&project.doctor()).contains("is running"),
     "the container is up while its creator is"
   );
 
   drop(running);
 
-  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-  while running_report(&project).contains("is running") {
-    assert!(
-      std::time::Instant::now() < deadline,
-      "the container outlived the command that created it"
-    );
-    std::thread::sleep(std::time::Duration::from_millis(100));
-  }
+  poll_until(STOP_TIMEOUT, "the container to go with its creator", || {
+    (!stdout(&project.doctor()).contains("is running")).then_some(())
+  });
 }
 
 /// The spool is a mount source, and a running container's mount is attached to
@@ -91,7 +92,9 @@ argv = ["echo", "still served"]
   let cleaned = project.compostbin(&["clean"]);
   assert!(cleaned.status.success(), "clean failed: {}", stderr(&cleaned));
   assert!(
-    project.state_dir().join("host/requests").is_dir(),
+    Spool::new(project.session().host_spool())
+      .requests()
+      .is_dir(),
     "the spool is emptied in place, never unlinked: the container is holding it"
   );
 
@@ -117,7 +120,7 @@ argv = ["echo", "still served"]
 fn clean_all_discards_the_conversation() {
   let project = Project::new("cbt-clean-all");
   project.guest_output(&format!("echo a conversation > {CLAUDE_HOME_TARGET}/history"));
-  let history = project.state_dir().join("claude-home/history");
+  let history = project.session().claude_home().join("history");
 
   project.compostbin(&["clean"]);
   assert!(history.exists(), "`clean` is for transient state");
@@ -128,28 +131,12 @@ fn clean_all_discards_the_conversation() {
   assert!(!history.exists(), "`--all` takes the Claude home with it");
 }
 
-/// What `doctor` says about the container, which is the only way to ask from
-/// outside the process that owns it.
-fn running_report(project: &Project) -> String {
-  let report = stdout(&project.compostbin_with_env(&["doctor"], &[("ANTHROPIC_API_KEY", "k")]));
-
-  report
-    .lines()
-    .find(|line| line.contains("container mounts"))
-    .unwrap_or_default()
-    .to_string()
-}
-
 fn wait_until_up(project: &Project) {
-  let socket = project.state_dir().join("control.sock");
-  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+  let socket = project.control_socket();
 
-  while !socket.exists() {
-    assert!(
-      std::time::Instant::now() < deadline,
-      "the session never came up: no socket at {}",
-      socket.display()
-    );
-    std::thread::sleep(std::time::Duration::from_millis(50));
-  }
+  poll_until(
+    START_TIMEOUT,
+    &format!("a control socket at {}", socket.display()),
+    || socket.exists().then_some(()),
+  );
 }

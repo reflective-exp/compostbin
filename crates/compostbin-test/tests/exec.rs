@@ -110,7 +110,7 @@ fn exec_starts_the_container() {
   let project = Project::new("cbt-cold-start");
 
   assert!(
-    !project.state_dir().join("control.sock").exists(),
+    !project.control_socket().exists(),
     "nothing is running before the first command"
   );
   assert_eq!(project.guest_output("echo up"), "up");

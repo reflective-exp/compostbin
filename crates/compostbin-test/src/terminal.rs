@@ -42,18 +42,16 @@ impl Terminal {
       .stdout(stdio(&slave))
       .stderr(stdio(&slave));
 
-    let raw = slave.as_raw_fd();
-
     // SAFETY: pre_exec runs between fork and exec, where only async-signal-safe
-    // calls are allowed; setsid and ioctl are. `raw` survives the fork with the
-    // inherited descriptor table.
+    // calls are allowed; setsid and ioctl are. By then stdin is already the
+    // slave, so it is what becomes the controlling terminal.
     unsafe {
-      command.pre_exec(move || {
+      command.pre_exec(|| {
         if libc::setsid() < 0 {
           return Err(io::Error::last_os_error());
         }
 
-        if libc::ioctl(raw, libc::TIOCSCTTY as _, 0) < 0 {
+        if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) < 0 {
           return Err(io::Error::last_os_error());
         }
 
@@ -143,7 +141,26 @@ fn open() -> (OwnedFd, OwnedFd) {
   assert!(opened >= 0, "could not open a pty: {}", io::Error::last_os_error());
 
   // SAFETY: both descriptors are freshly opened and owned by us alone.
-  unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) }
+  let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+  close_on_exec(&master);
+  close_on_exec(&slave);
+
+  (master, slave)
+}
+
+/// openpty cannot open its descriptors close-on-exec, so this does. Otherwise
+/// the command would inherit the master as well as its three copies of the
+/// slave, as would anything else spawned meanwhile — and a stray slave keeps
+/// the reader from ever seeing the end of the output.
+fn close_on_exec(descriptor: &OwnedFd) {
+  // SAFETY: F_SETFD on a descriptor we own touches nothing but its flags.
+  let set = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+
+  assert!(
+    set >= 0,
+    "could not mark the pty close-on-exec: {}",
+    io::Error::last_os_error()
+  );
 }
 
 fn stdio(slave: &OwnedFd) -> Stdio {

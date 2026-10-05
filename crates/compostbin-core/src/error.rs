@@ -10,14 +10,17 @@ use compostbin_engine::error::EngineError;
 use std::error::Error;
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// A Claude token that could not be read from the Keychain or written into
 /// Claude's home.
 #[derive(Debug)]
 pub enum CredentialError {
   Io(PathError),
+  /// `security` answered, and its answer was a failure.
   Keychain(String),
+  /// `security` itself could not be run.
+  Security(io::Error),
 }
 
 impl fmt::Display for CredentialError {
@@ -25,6 +28,7 @@ impl fmt::Display for CredentialError {
     match self {
       Self::Io(error) => error.fmt(formatter),
       Self::Keychain(message) => write!(formatter, "reading the login Keychain: {message}"),
+      Self::Security(error) => write!(formatter, "running `security`: {error}"),
     }
   }
 }
@@ -34,6 +38,7 @@ impl Error for CredentialError {
     match self {
       Self::Io(error) => error.source(),
       Self::Keychain(_) => None,
+      Self::Security(error) => Some(error),
     }
   }
 }
@@ -171,11 +176,21 @@ impl From<PathError> for SessionError {
   }
 }
 
-impl From<ManifestError> for SessionError {
-  fn from(error: ManifestError) -> Self {
-    Self::Record(error)
+/// A manifest's memory size that is not one, as written.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidMemory(pub(crate) String);
+
+impl fmt::Display for InvalidMemory {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      formatter,
+      "\"{}\" is not a memory size: expected a number, optionally followed by G, M, or K",
+      self.0
+    )
   }
 }
+
+impl Error for InvalidMemory {}
 
 /// A filesystem error that names its path, which `std::io::Error` alone does
 /// not.
@@ -191,10 +206,6 @@ impl PathError {
       path: path.into(),
       source,
     }
-  }
-
-  pub fn path(&self) -> &Path {
-    &self.path
   }
 
   /// Whether nothing was there. Several callers treat that as ordinary (no
@@ -230,7 +241,7 @@ impl<T> At<T> for io::Result<T> {
 }
 
 /// Why a host command was refused — an outcome reported to the guest, not a
-/// failure of the agent. Separate from `HostError` so it compares by value.
+/// failure of the agent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Refusal {
   /// Declared without `arguments = true`.
@@ -239,7 +250,6 @@ pub enum Refusal {
   /// Declared with an empty `argv`.
   EmptyCommand(String),
   EmptyRequest,
-  NewlineInArgument(String),
   UnknownCommand(String),
 }
 
@@ -256,50 +266,9 @@ impl fmt::Display for Refusal {
       ),
       Self::EmptyCommand(name) => write!(formatter, "\"{name}\" has an empty argv, so it names nothing to run"),
       Self::EmptyRequest => write!(formatter, "the request names no command"),
-      Self::NewlineInArgument(argument) => write!(
-        formatter,
-        "an argument may not contain a newline, which \"{argument}\" does"
-      ),
       Self::UnknownCommand(name) => write!(formatter, "\"{name}\" is not in [host.commands]"),
     }
   }
 }
 
 impl Error for Refusal {}
-
-/// A host command that could not be submitted or served.
-#[derive(Debug)]
-pub enum HostError {
-  Io(PathError),
-  Refused(Refusal),
-}
-
-impl fmt::Display for HostError {
-  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Self::Io(error) => error.fmt(formatter),
-      Self::Refused(refusal) => refusal.fmt(formatter),
-    }
-  }
-}
-
-impl Error for HostError {
-  fn source(&self) -> Option<&(dyn Error + 'static)> {
-    match self {
-      Self::Io(error) => error.source(),
-      Self::Refused(refusal) => refusal.source(),
-    }
-  }
-}
-
-impl From<PathError> for HostError {
-  fn from(error: PathError) -> Self {
-    Self::Io(error)
-  }
-}
-
-impl From<Refusal> for HostError {
-  fn from(refusal: Refusal) -> Self {
-    Self::Refused(refusal)
-  }
-}

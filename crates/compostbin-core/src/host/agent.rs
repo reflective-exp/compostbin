@@ -9,8 +9,7 @@ use crate::host::pty::Pty;
 use crate::host::request::{Request, Resolved, resolve};
 use crate::host::spool::Spool;
 use crate::host::{
-  CHUNK_SIZE, ERROR_STREAM, INPUT_EOF_SUFFIX, INPUT_SUFFIX, OUTPUT_STREAM, REJECTED_EXIT_CODE, SIGNAL_EXIT_BASE,
-  TTY_SUFFIX,
+  ERROR_STREAM, INPUT_EOF_SUFFIX, INPUT_SUFFIX, OUTPUT_STREAM, REJECTED_EXIT_CODE, SIGNAL_EXIT_BASE, TTY_SUFFIX,
 };
 use crate::manifest::HostCommand;
 use std::collections::BTreeMap;
@@ -23,7 +22,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Immediate enough for a command, rare enough to be invisible on the host.
-pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
+pub(super) const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Big enough that a noisy build does not make thousands of files.
+const CHUNK_SIZE: usize = 64 * 1024;
 
 /// Runs a claimed request through to its status file and clears the claim.
 fn complete(
@@ -36,18 +38,6 @@ fn complete(
   let status = run_claimed(spool, commands, project_dir, id, claimed)?;
   spool.write_status(id, status)?;
   std::fs::remove_file(claimed).at(claimed)
-}
-
-/// Claims and runs one request in the caller's thread, reporting whether there
-/// was anything to do. Sessions use `serve` instead.
-#[cfg(test)]
-fn serve_once(spool: &Spool, commands: &BTreeMap<String, HostCommand>, project_dir: &Path) -> Result<bool, PathError> {
-  let Some((id, claimed)) = spool.claim_next()? else {
-    return Ok(false);
-  };
-
-  complete(spool, commands, project_dir, &id, &claimed)?;
-  Ok(true)
 }
 
 /// Runs one claimed request, returning the exit code to report. Refusals go to
@@ -198,12 +188,15 @@ fn pump_stdin(spool: &Spool, id: &str, mut sink: Box<dyn Write + Send>, finished
   let input_path = spool.responses().join(format!("{id}{INPUT_SUFFIX}"));
   let eof_path = spool.responses().join(format!("{id}{INPUT_EOF_SUFFIX}"));
   let mut offset = 0;
+  let mut buffer = Vec::new();
 
   loop {
     let ended = eof_path.exists() || finished.load(Ordering::Relaxed);
 
+    // Reopened every poll: across the mount, a descriptor held while the guest
+    // appends can stay short (see the guest_input_streaming integration test).
     if let Ok(mut file) = File::open(&input_path) {
-      let mut buffer = Vec::new();
+      buffer.clear();
       if file.seek(SeekFrom::Start(offset)).is_ok() && file.read_to_end(&mut buffer).is_ok() && !buffer.is_empty() {
         offset += buffer.len() as u64;
         // Normal: the command may simply not read input.
@@ -270,6 +263,21 @@ mod tests {
   use crate::host::{PARTIAL_SUFFIX, STATUS_SUFFIX};
   use std::path::PathBuf;
   use tempfile::TempDir;
+
+  /// Claims and runs one request in the caller's thread, reporting whether there
+  /// was anything to do. Sessions use `serve` instead.
+  fn serve_once(
+    spool: &Spool,
+    commands: &BTreeMap<String, HostCommand>,
+    project_dir: &Path,
+  ) -> Result<bool, PathError> {
+    let Some((id, claimed)) = spool.claim_next()? else {
+      return Ok(false);
+    };
+
+    complete(spool, commands, project_dir, &id, &claimed)?;
+    Ok(true)
+  }
 
   /// What a caller of `compostbin-host` sees. A missing stream reads as empty,
   /// since a refused request writes no stdout.

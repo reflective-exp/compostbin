@@ -1,7 +1,6 @@
 //! The request/response directory tree, from either side of the mount.
 
-use crate::error::{At, HostError, PathError};
-use crate::host::request::Request;
+use crate::error::{At, PathError};
 use crate::host::{
   ERROR_STREAM, PARTIAL_SUFFIX, REQUEST_SUFFIX, REQUESTS_DIR, RESPONSES_DIR, RUNNING_DIR, SEQUENCE_WIDTH, STATUS_SUFFIX,
 };
@@ -20,7 +19,7 @@ impl Spool {
     self.root.join(REQUESTS_DIR)
   }
 
-  pub fn running(&self) -> PathBuf {
+  pub(super) fn running(&self) -> PathBuf {
     self.root.join(RUNNING_DIR)
   }
 
@@ -45,21 +44,10 @@ impl Spool {
   pub fn empty(&self) -> Result<(), PathError> {
     self.create()?;
 
+    // The guest writes here too, and nothing stops it leaving a directory
+    // behind: one left in place would fail every later `clean`.
     for directory in [self.requests(), self.running(), self.responses()] {
-      for entry in std::fs::read_dir(&directory).at(&directory)? {
-        let entry = entry.at(&directory)?;
-        let path = entry.path();
-
-        // The guest writes here too, and nothing stops it leaving a directory
-        // behind: one left in place would fail every later `clean`.
-        let removed = if entry.file_type().at(&path)?.is_dir() {
-          std::fs::remove_dir_all(&path)
-        } else {
-          std::fs::remove_file(&path)
-        };
-
-        removed.at(&path)?;
-      }
+      crate::fs::empty(&directory)?;
     }
 
     Ok(())
@@ -98,12 +86,6 @@ impl Spool {
 
     removed.sort();
     Ok(removed)
-  }
-
-  /// Writes a request the way the guest does: `.partial` first, then rename.
-  pub fn submit(&self, id: &str, request: &Request) -> Result<(), HostError> {
-    let rendered = request.render()?;
-    Ok(publish(&self.requests(), &format!("{id}{REQUEST_SUFFIX}"), rendered)?)
   }
 
   /// Takes the oldest unclaimed request, returning its id and where it now is.
@@ -149,24 +131,25 @@ impl Spool {
   /// arrival order.
   fn next_request_id(&self) -> Result<Option<String>, PathError> {
     let directory = self.requests();
+    let mut oldest: Option<String> = None;
 
-    let mut ids: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&directory).at(&directory)? {
       let name = entry.at(&directory)?.file_name();
-      let name = name.to_string_lossy();
 
-      if let Some(id) = name.strip_suffix(REQUEST_SUFFIX) {
-        ids.push(id.to_string());
+      if let Some(id) = name.to_string_lossy().strip_suffix(REQUEST_SUFFIX)
+        && oldest.as_deref().is_none_or(|oldest| id < oldest)
+      {
+        oldest = Some(id.to_string());
       }
     }
 
-    Ok(ids.into_iter().min())
+    Ok(oldest)
   }
 }
 
 /// Writes `<name>.partial`, then renames it to `name`, so a reader across the
 /// mount never finds the file incomplete.
-fn publish(directory: &Path, name: &str, contents: impl AsRef<[u8]>) -> Result<(), PathError> {
+pub(super) fn publish(directory: &Path, name: &str, contents: impl AsRef<[u8]>) -> Result<(), PathError> {
   let partial = directory.join(format!("{name}{PARTIAL_SUFFIX}"));
 
   std::fs::write(&partial, contents).at(&partial)?;
@@ -178,6 +161,7 @@ mod tests {
   use super::*;
   use crate::host::OUTPUT_STREAM;
   use crate::host::fixtures::spool;
+  use crate::host::request::Request;
   use tempfile::TempDir;
 
   /// Creating a container is the moment a killed client's leftovers are provably

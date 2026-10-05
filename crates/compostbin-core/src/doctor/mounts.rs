@@ -6,23 +6,23 @@ use super::{Check, Status, check, listed};
 use crate::manifest::TomlFile;
 use crate::session::Session;
 use crate::session::record::Record;
-use crate::workspace::danger::{Danger, danger};
-use crate::workspace::{Escape, WALK_LIMIT};
-use compostbin_engine::engine::Engine;
+use crate::workspace::danger::danger;
+use crate::workspace::{Escape, Origin};
 
-/// Roots and explicit paths only. Claude's home is excluded: `run` creates it,
-/// so its absence before the first session is normal.
+/// Directory entries `escaping_symlinks` looks at before giving up: enough for
+/// an ordinary source tree, few enough to stay imperceptible.
+const WALK_LIMIT: usize = 50_000;
+
+/// Roots and explicit paths only. The project directory is where compostbin
+/// was invoked, so it exists; Claude's home is excluded: `run` creates it, so
+/// it is normally absent before the first session.
 pub fn mounted_paths(session: &Session) -> Check {
-  let declared = session
-    .manifest
-    .workspace
-    .roots
+  let missing: Vec<String> = session
+    .workspace()
+    .entries()
     .iter()
-    .chain(session.manifest.paths.iter().map(|entry| &entry.source));
-  let missing: Vec<String> = declared
-    .map(|raw| session.resolver().resolve(raw))
-    .filter(|path| !path.exists())
-    .map(|path| path.display().to_string())
+    .filter(|entry| entry.origin != Origin::Project && !entry.host.exists())
+    .map(|entry| entry.host.display().to_string())
     .collect();
 
   if missing.is_empty() {
@@ -85,19 +85,8 @@ pub fn dangling_symlinks(session: &Session) -> Check {
 ///
 /// A warning, since recreating is the user's call, but the fix is named because
 /// it is not guessable.
-pub fn live_mounts(session: &Session, engine: &impl Engine) -> Check {
+pub fn live_mounts(session: &Session, running: bool) -> Check {
   let name = session.container_name();
-
-  let running = match engine.is_running(&name) {
-    Ok(running) => running,
-    Err(error) => {
-      return check(
-        "container mounts",
-        Status::Fail,
-        format!("cannot tell whether {name} is running: {error}"),
-      );
-    }
-  };
 
   if !running {
     return check(
@@ -155,18 +144,7 @@ pub fn root_breadth(session: &Session) -> Check {
         .host
         .canonicalize()
         .unwrap_or_else(|_| entry.host.clone());
-      danger(&judged, session.resolver()).map(|danger| (entry, danger))
-    })
-    .map(|(entry, danger)| match danger {
-      Danger::Broad(_) => format!(
-        "{} covers a whole account, so the container can read and rewrite all of it",
-        entry.host.display()
-      ),
-      Danger::Sensitive(path) => format!(
-        "{} is mounted, exposing the credentials in {}",
-        entry.host.display(),
-        path.display()
-      ),
+      danger(&judged, session.resolver()).map(|danger| format!("{}: {danger}", entry.host.display()))
     })
     .collect();
 

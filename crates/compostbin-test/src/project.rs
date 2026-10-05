@@ -1,11 +1,14 @@
 //! A throwaway project, and the session it starts.
 
 use crate::output::{stderr, stdout};
+use crate::poll::poll_until;
 use crate::signing::signed_binary;
 use crate::terminal::Terminal;
+use compostbin_core::image::IMAGE_STORE;
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, Memory, TomlFile};
-use compostbin_core::session::NAME_PREFIX;
-use compostbin_core::session::image::IMAGE_STORE;
+use compostbin_core::session::Session;
+use compostbin_core::workspace::paths::PathResolver;
+use compostbin_engine::containerization::control_socket;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -19,7 +22,8 @@ const HOME_PARENT: &str = "/tmp";
 /// How long [`Project::wait_for`] gives the guest. Generous, because the first
 /// command in a project is waiting on a container to be created.
 const GUEST_TIMEOUT: Duration = Duration::from_secs(60);
-const GUEST_POLL: Duration = Duration::from_millis(50);
+/// Stands in for a credential in `doctor`, which fails a session that has none.
+const FAKE_API_KEY: &str = "not-a-real-key";
 /// What a session gets unless the test asks for something else: enough to run
 /// a shell, little enough that the whole suite can run at once.
 const TEST_CPUS: u32 = 1;
@@ -82,15 +86,19 @@ impl Project {
   /// could not load fails here, in the test that wrote it.
   pub fn manifest(&self, body: &str) {
     let declared: toml::Table = toml::from_str(body).expect("the manifest body should parse");
-    let mut manifest: Manifest = toml::from_str(body).expect("the manifest body should parse");
+    let declares_cpus = declares(&declared, "cpus");
+    let declares_memory = declares(&declared, "memory");
+    let mut manifest: Manifest = declared
+      .try_into()
+      .expect("the manifest body should be a manifest");
 
     manifest.claude.seed_from_keychain = false;
     manifest.project.name = Some(self.name.clone());
 
-    if !declares(&declared, "cpus") {
+    if !declares_cpus {
       manifest.container.cpus = TEST_CPUS;
     }
-    if !declares(&declared, "memory") {
+    if !declares_memory {
       manifest.container.memory = TEST_MEMORY;
     }
 
@@ -116,17 +124,40 @@ impl Project {
     self.dir.join(MANIFEST_RELATIVE_PATH)
   }
 
-  /// What the container is called, and so what the session's state directory
-  /// is named after.
-  pub fn container_name(&self) -> String {
-    format!("{NAME_PREFIX}{}", self.name)
+  /// The session `compostbin` runs for this project, loaded as it would load
+  /// it, so a test asks it where things are rather than knowing.
+  pub fn session(&self) -> Session {
+    Session::load(None, PathResolver::new(&self.dir, self.home()), &self.dir).expect("the manifest should load")
   }
 
-  pub fn state_dir(&self) -> PathBuf {
-    self
-      .home()
-      .join(".local/state/compostbin/sessions")
-      .join(self.container_name())
+  /// Where the running container answers attaches; there only while it runs.
+  pub fn control_socket(&self) -> PathBuf {
+    let session = self.session();
+
+    control_socket(&session.sessions_dir(), &session.container_name())
+  }
+
+  /// A directory beside the project, holding `files`, for a test to mount.
+  pub fn sibling(&self, name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let path = self.home().join(name);
+    std::fs::create_dir(&path).expect("create the sibling");
+    for (file, contents) in files {
+      std::fs::write(path.join(file), contents).expect("write into the sibling");
+    }
+
+    path
+  }
+
+  /// Writes a manifest that mounts `path` and nothing else.
+  pub fn mount(&self, path: &Path, readonly: bool) {
+    self.manifest(&format!(
+      r#"
+[[paths]]
+readonly = {readonly}
+source = "{}"
+"#,
+      path.display()
+    ));
   }
 
   /// Writes a file in the project directory, creating its parents.
@@ -154,16 +185,12 @@ impl Project {
   /// act on a command still in flight.
   pub fn wait_for(&self, relative: &str) {
     let path = self.dir.join(relative);
-    let deadline = std::time::Instant::now() + GUEST_TIMEOUT;
 
-    while !std::fs::read(&path).is_ok_and(|body| !body.is_empty()) {
-      assert!(
-        std::time::Instant::now() < deadline,
-        "the guest never wrote {}",
-        path.display()
-      );
-      std::thread::sleep(GUEST_POLL);
-    }
+    poll_until(GUEST_TIMEOUT, &format!("the guest to write {}", path.display()), || {
+      std::fs::read(&path)
+        .is_ok_and(|body| !body.is_empty())
+        .then_some(())
+    });
   }
 
   /// Runs `compostbin` in the project directory, on this project's home.
@@ -171,15 +198,16 @@ impl Project {
     self.invoke(arguments, None, &[])
   }
 
-  /// The same, with `input` on the command's stdin.
-  pub fn compostbin_with_input(&self, arguments: &[&str], input: &str) -> Output {
-    self.invoke(arguments, Some(input), &[])
-  }
-
   /// The same, with extra environment variables — what `[container] env` names
   /// has to be set on this side to be passed through.
   pub fn compostbin_with_env(&self, arguments: &[&str], env: &[(&str, &str)]) -> Output {
     self.invoke(arguments, None, env)
+  }
+
+  /// `compostbin doctor`, with a key in the environment: a harness session
+  /// never reads the Keychain, so without one the credentials check fails.
+  pub fn doctor(&self) -> Output {
+    self.compostbin_with_env(&["doctor"], &[("ANTHROPIC_API_KEY", FAKE_API_KEY)])
   }
 
   /// Runs a shell line in the guest, which is what most of these tests assert
@@ -190,7 +218,7 @@ impl Project {
 
   /// The same, with `input` reaching the guest's stdin.
   pub fn guest_with_input(&self, script: &str, input: &str) -> Output {
-    self.compostbin_with_input(&["exec", "sh", "-c", one_line(script)], input)
+    self.invoke(&["exec", "sh", "-c", one_line(script)], Some(input), &[])
   }
 
   /// A guest line that must succeed, as its trimmed stdout.
@@ -314,7 +342,11 @@ impl Drop for Project {
   /// would be one stale clone per test, forever.
   fn drop(&mut self) {
     let containers = real_cache().join("images/containers");
-    let _ = std::fs::remove_dir_all(containers.join(self.container_name()));
+    // Not `session()`: a panic here, while a failed test unwinds, would abort
+    // the run.
+    if let Ok(session) = Session::load(None, PathResolver::new(&self.dir, self.home()), &self.dir) {
+      let _ = std::fs::remove_dir_all(containers.join(session.container_name()));
+    }
   }
 }
 

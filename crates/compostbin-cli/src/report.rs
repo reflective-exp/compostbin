@@ -1,7 +1,25 @@
 //! Terminal rendering of a diagnosis.
 
-use compostbin_core::doctor::{Check, Status};
+use crate::engine::select;
+use compostbin_core::doctor::{self, Check, Status};
+use compostbin_core::session::Session;
+use compostbin_core::session::credentials::Keychain;
+use std::error::Error;
 use std::fmt::{Display, Formatter, Result};
+
+/// Prints every check; non-zero if any failed, so scripts can gate on it.
+pub fn report_diagnosis(session: &Session) -> std::result::Result<i32, Box<dyn Error>> {
+  let checks = doctor::diagnose(
+    session,
+    &select(session)?,
+    &Keychain,
+    std::env::var_os("ANTHROPIC_API_KEY").is_some(),
+  );
+
+  print!("{}", Diagnosis(&checks));
+
+  Ok(i32::from(checks.iter().any(|check| check.status == Status::Fail)))
+}
 
 /// Every check, as the terminal shows it. A newtype so `Display` can be
 /// implemented for core's checks.
@@ -33,11 +51,11 @@ impl Display for Diagnosis<'_> {
 mod tests {
   use super::*;
 
-  fn check(name: &str, status: Status, detail: &str, items: &[&str]) -> Check {
+  fn check(name: &'static str, status: Status, detail: &str, items: &[&str]) -> Check {
     Check {
       detail: detail.to_string(),
       items: items.iter().map(|item| item.to_string()).collect(),
-      name: name.to_string(),
+      name,
       status,
     }
   }

@@ -1,23 +1,26 @@
 //! What a session keeps on the host, and how much of it `clean` may take.
 
 use crate::error::{At, PathError};
+use crate::fs::{empty, remove};
 use crate::host::Spool;
-use crate::manifest::SESSIONS_DIR;
 use crate::session::Session;
 use crate::session::briefing::MANAGED_SETTINGS_DIR;
 use crate::session::record::RECORD_FILE;
 use std::path::{Path, PathBuf};
 
+/// Session state, keyed by container name: Claude's home, kept so `--continue`
+/// works, beside transient state that `clean` empties.
+const SESSIONS_DIR: &str = "~/.local/state/compostbin/sessions";
 /// Under the session state directory: kept, because `claude --continue` reads it.
-pub const CLAUDE_HOME_DIR: &str = "claude-home";
+const CLAUDE_HOME_DIR: &str = "claude-home";
 /// Under the session state directory: requests in flight. `clean` empties it
 /// rather than removing it, because the container mounts it.
-pub const SPOOL_DIR: &str = "host";
+const SPOOL_DIR: &str = "host";
 /// Under the session state directory: one bound socket per declared port,
 /// owned by the `run` that created the container and living exactly as long.
-pub const PORTS_DIR: &str = "ports";
+const PORTS_DIR: &str = "ports";
 /// Where the relay says what it could not, while a session is attached.
-pub const PORTS_LOG: &str = "ports.log";
+const PORTS_LOG: &str = "ports.log";
 
 /// Empties a directory without unlinking it, or removes a plain file.
 ///
@@ -30,26 +33,11 @@ pub const PORTS_LOG: &str = "ports.log";
 /// A symlink is removed rather than followed, so a link planted where a mount
 /// source belongs cannot make this clear something else.
 fn clear(target: &Path) -> Result<(), PathError> {
-  let kind = std::fs::symlink_metadata(target).at(target)?.file_type();
-
-  if !kind.is_dir() {
-    return std::fs::remove_file(target).at(target);
+  if std::fs::symlink_metadata(target).at(target)?.is_dir() {
+    empty(target)
+  } else {
+    remove(target)
   }
-
-  for entry in std::fs::read_dir(target).at(target)? {
-    let entry = entry.at(target)?;
-    let path = entry.path();
-
-    let outcome = if entry.file_type().at(&path)?.is_dir() {
-      std::fs::remove_dir_all(&path)
-    } else {
-      std::fs::remove_file(&path)
-    };
-
-    outcome.at(&path)?;
-  }
-
-  Ok(())
 }
 
 impl Session {
@@ -66,12 +54,14 @@ impl Session {
     }
   }
 
+  /// Where every session keeps its state, each under its own container name.
+  pub fn sessions_dir(&self) -> PathBuf {
+    self.resolver.resolve(SESSIONS_DIR)
+  }
+
   /// Everything this session keeps on the host, under its own container name.
   pub fn state_dir(&self) -> PathBuf {
-    self
-      .resolver
-      .resolve(SESSIONS_DIR)
-      .join(self.container_name())
+    self.sessions_dir().join(self.container_name())
   }
 
   /// What `clean` may delete: state meaningless once the container is gone. Not
@@ -128,15 +118,13 @@ impl Session {
   /// Emptied rather than removed: until this process exits the container still
   /// holds that mount (§`clear`). The rest is left for the next create, which
   /// rebinds the sockets and rewrites the managed settings anyway.
-  pub(super) fn clean_after_exit(&self) -> Result<Vec<PathBuf>, PathError> {
+  pub(super) fn clean_after_exit(&self) -> Result<(), PathError> {
     let spool = self.host_spool();
     if !spool.exists() {
-      return Ok(Vec::new());
+      return Ok(());
     }
 
-    Spool::new(&spool).empty()?;
-
-    Ok(vec![spool])
+    Spool::new(&spool).empty()
   }
 
   /// Inside the session directory, so concurrent projects cannot see each
@@ -157,7 +145,7 @@ impl Session {
 
   /// The mount source must exist before the container starts, and the guest
   /// cannot create it. A no-op with no commands declared.
-  pub fn prepare_host_spool(&self) -> Result<(), PathError> {
+  pub(super) fn prepare_host_spool(&self) -> Result<(), PathError> {
     match self.spool() {
       Some(spool) => spool.create(),
       None => Ok(()),
@@ -198,8 +186,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::fixtures;
-  use crate::session::fixtures::{MANIFEST, PROJECT, session};
+  use crate::session::fixtures::{self, MANIFEST, PROJECT, session};
   use std::os::unix::fs::MetadataExt;
 
   #[test]
@@ -214,7 +201,7 @@ mod tests {
   /// nothing behind.
   #[test]
   fn prepares_the_spool_only_when_commands_are_declared() {
-    let (_temp, mut session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
 
     session
       .prepare_host_spool()
@@ -231,7 +218,7 @@ mod tests {
 
   #[test]
   fn cleans_transient_state_but_keeps_the_conversation() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
     Spool::new(session.host_spool())
       .create()
       .expect("create spool");
@@ -276,7 +263,7 @@ mod tests {
   /// present and permanently empty.
   #[test]
   fn cleaning_keeps_the_inode_a_running_container_mounts() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
     Spool::new(session.host_spool())
       .create()
       .expect("create spool");
@@ -297,16 +284,15 @@ mod tests {
 
   #[test]
   fn exit_cleanup_keeps_managed_settings() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
     Spool::new(session.host_spool())
       .create()
       .expect("create spool");
     std::fs::write(session.host_spool().join("running").join("0001"), "claimed").expect("write a claim");
     std::fs::create_dir_all(session.managed_settings()).expect("create managed settings");
 
-    let cleared = session.clean_after_exit().expect("clean should succeed");
+    session.clean_after_exit().expect("clean should succeed");
 
-    assert_eq!(cleared, [session.host_spool()]);
     assert_eq!(
       std::fs::read_dir(session.host_spool().join("running"))
         .expect("read running")
@@ -326,7 +312,7 @@ mod tests {
 
   #[test]
   fn cleaning_everything_takes_the_session_directory() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
     std::fs::create_dir_all(session.claude_home()).expect("create claude home");
 
     assert_eq!(
@@ -338,7 +324,7 @@ mod tests {
 
   #[test]
   fn cleaning_state_that_is_already_gone_is_not_an_error() {
-    let (_temp, session) = fixtures::session(MANIFEST, PROJECT);
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
 
     assert_eq!(
       session.clean(true).expect("clean should succeed"),

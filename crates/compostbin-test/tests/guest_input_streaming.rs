@@ -14,10 +14,10 @@
 //! looking, so its first look at `stream` lands mid-write; a later look would
 //! only measure whole-file propagation, which already works.
 
-use compostbin_test::{Project, stderr, stdout};
+use compostbin_test::{Project, poll_until, stderr, stdout};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Finer than the guest's write interval, to catch the file mid-write.
@@ -110,18 +110,6 @@ fn format_elapsed(elapsed: Duration) -> String {
   format!("{}ms", elapsed.as_millis())
 }
 
-fn wait_for(path: &Path, timeout: Duration, what: &str) {
-  let deadline = Instant::now() + timeout;
-  while !path.exists() {
-    assert!(
-      Instant::now() < deadline,
-      "timed out waiting for {what} at {}",
-      path.display()
-    );
-    std::thread::sleep(POLL);
-  }
-}
-
 #[test]
 fn appends_reach_the_host_as_they_happen() {
   let project = Project::new("cbt-streaming");
@@ -137,7 +125,9 @@ fn appends_reach_the_host_as_they_happen() {
 
   println!("shared directory (host): {}", directory.display());
   appender.send("go");
-  wait_for(&stream, START_TIMEOUT, "the guest to start appending");
+  poll_until(START_TIMEOUT, "the guest to start appending", || {
+    stream.exists().then_some(())
+  });
 
   let started = Instant::now();
   // `reopen` mirrors `pump_stdin`: fresh open each poll, from the consumed
