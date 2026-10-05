@@ -8,6 +8,7 @@ use crate::session::credentials::{self, CredentialSource};
 use crate::session::record::Record;
 use crate::session::{Notice, Session, briefing, settings};
 use compostbin_engine::engine::Engine;
+use compostbin_engine::error::EngineError;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -64,6 +65,18 @@ impl Session {
   /// because `doctor` can say nothing about unrecorded mounts.
   fn create(&self, engine: &impl Engine, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
     let spec = self.run_spec();
+
+    // A boot from an image missing a blob fails naming the image's own digest,
+    // whichever blob it was.
+    if let Some(digest) = engine.missing_content(&spec.image)? {
+      return Err(
+        EngineError::unavailable(
+          format!("boot from {}", spec.image),
+          format!("blob {digest} is missing; run `compostbin build`"),
+        )
+        .into(),
+      );
+    }
 
     // Said first: the unpack is the slow part of a first run, and a silent wait
     // looks like a hang.
@@ -326,6 +339,7 @@ mod tests {
       engine.calls(),
       [
         Call::IsRunning("compostbin-cb".to_string()),
+        Call::MissingContent(session.run_spec().image),
         Call::IsUnpacked(session.run_spec().image),
         Call::Run(session.run_spec()),
         Call::Exec(session.process_spec(&root_shell())),
@@ -347,10 +361,36 @@ mod tests {
       engine.calls(),
       [
         Call::IsRunning("compostbin-cb".to_string()),
+        Call::MissingContent(session.run_spec().image),
         Call::IsUnpacked(session.run_spec().image),
         Call::Run(session.run_spec()),
         claude(&session),
       ]
+    );
+  }
+
+  /// Booting it would fail naming some other digest.
+  #[test]
+  fn run_refuses_an_image_missing_a_blob_naming_it() {
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
+    let engine = RecordingEngine::missing_content(&[], "sha256:abc");
+
+    let error = session
+      .run(&engine, &FakeSource(None), &Process::claude(Vec::new()), &quiet)
+      .expect_err("a damaged image should not boot");
+
+    assert!(
+      error
+        .to_string()
+        .contains("blob sha256:abc is missing; run `compostbin build`"),
+      "{error}"
+    );
+    assert!(
+      !engine
+        .calls()
+        .iter()
+        .any(|call| matches!(call, Call::Run(_))),
+      "nothing was booted"
     );
   }
 
@@ -408,7 +448,7 @@ mod tests {
     run(&session, &engine);
 
     assert_eq!(
-      engine.calls()[3..],
+      engine.calls()[4..],
       [
         Call::Exec(session.setup_spec("./bin/setup")),
         Call::Exec(session.setup_spec("true")),
@@ -468,7 +508,7 @@ mod tests {
 
     assert_eq!(said.into_inner().expect("unpoisoned"), [("false".to_string(), 3)]);
     assert_eq!(
-      engine.calls()[3..],
+      engine.calls()[4..],
       [
         Call::Exec(session.setup_spec("false")),
         Call::Exec(session.process_spec(&root_shell())),

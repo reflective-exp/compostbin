@@ -4,7 +4,7 @@
 //! agent sets its address directly — so something has to allocate, and that is
 //! compostbin's choice rather than the framework's.
 
-use containerization_framework::model::{Dns, NatInterface};
+use containerization_framework::containerization::{Dns, NatInterface};
 
 /// Gateway of Virtualization.framework's built-in NAT (macOS shared networking).
 ///

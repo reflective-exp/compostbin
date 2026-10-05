@@ -3,9 +3,8 @@
 //!
 //! Only the cheap half: that a store already provisioned is left alone and an
 //! image already built is not built again. Building the base, or a project
-//! image on top of it, takes minutes and leaves an image in the shared store
-//! that nothing here could remove afterwards — so those are what
-//! `compostbin build` is for, not what a test suite does on every run.
+//! image on top of it, takes minutes — so those are what `compostbin build` is
+//! for, not what a test suite does on every run.
 
 use compostbin_core::image;
 use compostbin_test::{Project, stderr, stdout};

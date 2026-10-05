@@ -20,7 +20,7 @@ pub fn store(images: Result<&[String], &EngineError>) -> Check {
   }
 }
 
-pub fn base_image(session: &Session, images: Result<&[String], &EngineError>) -> Check {
+pub fn base_image(session: &Session, engine: &impl Engine, images: Result<&[String], &EngineError>) -> Check {
   let wanted = &session.manifest.project.image;
 
   match images {
@@ -29,7 +29,15 @@ pub fn base_image(session: &Session, images: Result<&[String], &EngineError>) ->
       Status::Fail,
       format!("cannot look for {wanted} while the image store is unreadable"),
     ),
-    Ok(images) if images.contains(wanted) => check("base image", Status::Ok, wanted),
+    Ok(images) if images.contains(wanted) => match engine.missing_content(wanted) {
+      Ok(None) => check("base image", Status::Ok, wanted),
+      Ok(Some(digest)) => check(
+        "base image",
+        Status::Fail,
+        format!("{wanted} is missing blob {digest}; run `compostbin build`"),
+      ),
+      Err(error) => check("base image", Status::Fail, error.to_string()),
+    },
     Ok(_) => check(
       "base image",
       Status::Fail,

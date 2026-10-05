@@ -1,48 +1,53 @@
 //! [`Engine`] and [`Builder`], backed by the `containerization-framework` crate.
 //!
-//! That crate boots a container and runs processes in it; everything around
-//! that is here, because it is compostbin's rather than the framework's:
+//! That crate wraps Containerization's own API; everything around it is here,
+//! because it is compostbin's rather than Containerization's:
 //!
+//! - the kernel and init image every VM boots, and fetching them
+//!   ([`store`], [`provision`]);
+//! - unpacking each image once and cloning it per container ([`unpacked`]);
 //! - a container lives *in* the process that booted it, so whichever command
 //!   creates one also serves the control socket through which later ones join
 //!   ([`control`], [`terminal`]);
 //! - nothing lists containers, so a container is up iff something answers on
 //!   its control socket;
-//! - where a guest sits on the NAT network ([`nat`]), what invalidates a build
-//!   ([`cache`]), and what a builder container is called ([`spec`]) are all
-//!   compostbin's to decide.
+//! - building an image from steps, and what invalidates a build ([`build`],
+//!   [`cache`], [`snapshots`]);
+//! - where a guest sits on the NAT network ([`nat`]).
 
+mod build;
 mod cache;
 mod control;
+mod files;
 mod nat;
+mod oci;
+mod provision;
+mod snapshots;
 mod spec;
+mod stdio;
+mod store;
 mod terminal;
+mod unpacked;
 
 use crate::builder::Builder;
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::model::{BuildPlan, ExecSpec, RunSpec};
-use containerization_framework::{self as framework, Session, Stdio};
+use containerization_framework::containerization::container_manager::RootfsCreateOptions;
+use containerization_framework::containerization::{
+  ContainerManager, Kernel, LinuxContainer, LinuxProcess, LinuxProcessConfiguration, SystemPlatform,
+};
+use containerization_framework::containerization_oci::Platform;
+use std::collections::HashMap;
 use std::error::Error;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use stdio::{Stdio, attached, is_tty};
+use unpacked::Unpacked;
 
-pub use containerization_framework::{Store, StoreError};
 pub use control::served;
-
-/// The store at `root`, booting the kernel and init image the framework pins.
-///
-/// Each is named for its version, so a framework upgrade that moves a pin finds
-/// nothing at the new path and provisioning fetches it, rather than booting
-/// what an older release left behind.
-pub fn store(root: impl Into<PathBuf>) -> Store {
-  let root = root.into();
-  let kernel = root.join(format!("kernels/vmlinux-{}", framework::KERNEL_VERSION));
-  let initfs = root.join(format!("initfs/vminit-{}.ext4", framework::INITFS_VERSION));
-
-  Store::at(root, kernel, framework::INITFS_REFERENCE, initfs)
-}
+pub use store::{Store, StoreError};
 
 /// Where the container `name` answers attaches while it runs, given the
 /// directory a `FrameworkEngine` keeps one runtime directory per container in.
@@ -59,21 +64,167 @@ const FAILED: i32 = -1;
 /// What `FrameworkEngine::reporting` is given.
 type Report = dyn Fn(&dyn Error) + Send + Sync;
 
+/// A line in the build log, on stderr.
+fn note(message: &str) {
+  eprintln!("{message}");
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+  mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A container this process booted.
+struct Booted {
+  /// Held for as long as the container runs.
+  _manager: ContainerManager,
+  container: LinuxContainer,
+  /// What every process in it starts from, as its first process did: a bare
+  /// exec runs as root with only a default `PATH`, ignoring the image's `USER`.
+  seed: LinuxProcessConfiguration,
+}
+
+/// The containers this process booted, and the processes running in them.
+#[derive(Default)]
+struct Running {
+  containers: Mutex<HashMap<String, Arc<Booted>>>,
+  /// By exec id, so a resize reaches its own process.
+  processes: Mutex<HashMap<String, Arc<LinuxProcess>>>,
+}
+
+impl Running {
+  fn booted(&self, name: &str) -> Option<Arc<Booted>> {
+    lock(&self.containers).get(name).cloned()
+  }
+
+  /// Runs a guest process in `name` against `stdio` until it exits, returning
+  /// its exit code.
+  fn attach(&self, name: &str, id: &str, request: &control::Request, stdio: Stdio) -> Result<i32, EngineError> {
+    let booted = self
+      .booted(name)
+      .ok_or_else(|| EngineError::unavailable(format!("attach to {name}"), "this process is not running it"))?;
+    let process = Arc::new(
+      booted
+        .container
+        .exec(id, configuration(&booted.seed, request, stdio))?,
+    );
+
+    lock(&self.processes).insert(id.to_string(), Arc::clone(&process));
+
+    let ran = (|| {
+      process.start()?;
+
+      if stdio.has_terminal() {
+        let _ = self.resize(id, stdio.terminal);
+      }
+
+      process.wait(None)
+    })();
+
+    lock(&self.processes).remove(id);
+    let _ = process.delete();
+
+    Ok(ran?.exit_code)
+  }
+
+  /// Tells the guest that the terminal `id`'s process reads changed size.
+  ///
+  /// A no-op once the process has gone, since the window may change size as it
+  /// exits. The size is re-read from `terminal`, so a stale one cannot race a
+  /// second resize.
+  fn resize(&self, id: &str, terminal: RawFd) -> Result<(), EngineError> {
+    let Some(process) = lock(&self.processes).get(id).cloned() else {
+      return Ok(());
+    };
+
+    let size = terminal::size(terminal).map_err(|error| EngineError::failed(format!("resize {id}"), error))?;
+
+    Ok(process.resize(size)?)
+  }
+}
+
+/// `request` over `seed`, on `stdio`.
+fn configuration(
+  seed: &LinuxProcessConfiguration,
+  request: &control::Request,
+  stdio: Stdio,
+) -> LinuxProcessConfiguration {
+  let mut process = seed.clone();
+
+  process.arguments = request.arguments.clone();
+  // Last, so a variable the caller sets beats the image's.
+  process
+    .environment_variables
+    .extend(request.environment.iter().cloned());
+  process.working_directory = request.working_directory.clone();
+
+  if let Some(user) = &request.user {
+    process.user = build::user(Some(user));
+  }
+
+  if stdio.has_terminal() {
+    // Not `setTerminalIO`, which writes back to the terminal it reads: this
+    // keeps a redirection of the caller's stdout. Stderr has nowhere else to
+    // go; one pty carries every stream.
+    process.terminal = true;
+    process.stdin = attached(stdio.terminal);
+    process.stdout = attached(stdio.stdout);
+
+    // What `setTerminalIO` sets, unless the caller chose.
+    if !process
+      .environment_variables
+      .iter()
+      .any(|variable| variable.starts_with("TERM="))
+    {
+      process.environment_variables.push("TERM=xterm".to_string());
+    }
+  } else {
+    process.stdin = attached(stdio.stdin);
+    process.stdout = attached(stdio.stdout);
+    process.stderr = attached(stdio.stderr);
+  }
+
+  process
+}
+
+/// What a process in a container of `config`'s image starts from, as
+/// Containerization seeds its first process: the image's user, environment and
+/// working directory. The default `PATH` stays when the image declares none.
+fn seed(config: &oci::ImageConfig) -> LinuxProcessConfiguration {
+  let defaults = LinuxProcessConfiguration::default();
+  let mut environment = oci::strings(config, "Env");
+
+  if !environment
+    .iter()
+    .any(|variable| variable.starts_with("PATH="))
+  {
+    environment.extend(defaults.environment_variables.iter().cloned());
+  }
+
+  LinuxProcessConfiguration {
+    environment_variables: environment,
+    working_directory: oci::string(config, "WorkingDir").unwrap_or_else(|| defaults.working_directory.clone()),
+    user: build::user(oci::string(config, "User").as_deref()),
+    ..defaults
+  }
+}
+
 pub struct FrameworkEngine {
   /// Told about a joined client whose attach broke, since that leaves the rest
   /// of the session running and has no call to return to. Ignored by default.
   attach_failed: Arc<Report>,
+  running: Arc<Running>,
   /// One directory per container, holding its control socket.
   runtime_dir: PathBuf,
-  session: Session,
+  store: Store,
 }
 
 impl FrameworkEngine {
   pub fn new(runtime_dir: impl Into<PathBuf>, store: Store) -> Self {
     Self {
       attach_failed: Arc::new(|_| {}),
+      running: Arc::default(),
       runtime_dir: runtime_dir.into(),
-      session: Session::new(store),
+      store,
     }
   }
 
@@ -85,22 +236,48 @@ impl FrameworkEngine {
     }
   }
 
-  /// Runs a guest process against the caller's stdio, as the owner of the VM.
-  fn attach(
-    session: &Session,
-    name: &str,
-    id: &str,
-    request: &control::Request,
-    stdio: Stdio,
-  ) -> Result<i32, framework::Error> {
-    let process = framework::model::LinuxProcessConfiguration {
-      arguments: Some(request.arguments.clone()),
-      environment_variables: request.environment.clone(),
-      working_directory: Some(request.working_directory.clone()),
-      user: request.user.clone().map(framework::model::User::named),
-    };
+  /// Creates and starts `spec`'s container, owned by this process.
+  ///
+  /// The container's directory is cleared first: the VM dies with its process,
+  /// so nothing cleaned up after the previous run, and a container always
+  /// starts from a fresh clone of its image's unpacked rootfs.
+  fn boot(&self, spec: &RunSpec) -> Result<Booted, EngineError> {
+    let directory = self.store.container_dir(&spec.name);
+    let _ = std::fs::remove_dir_all(&directory);
 
-    session.exec(name, id, &process, stdio)
+    let images = self.store.images()?;
+    let kernel = Kernel::new(self.store.kernel(), SystemPlatform::LINUX_ARM);
+    let mut manager = ContainerManager::new(&kernel, &provision::initfs_mount(&self.store), &images, false, false)?;
+    let image = images.get(&spec.image, true)?;
+    let platform = Platform::current()?;
+
+    // Where the manager writes the container's boot log.
+    std::fs::create_dir_all(&directory).map_err(|error| EngineError::failed(format!("boot {}", spec.name), error))?;
+
+    let rootfs = Unpacked::at(self.store.unpacked()).rootfs(&image, &platform, &directory.join("rootfs.ext4"))?;
+
+    // No networking from the manager, which has no `Network` to allocate from:
+    // the interfaces are ours, on Virtualization's NAT, which an unprivileged
+    // process can use.
+    let options = RootfsCreateOptions {
+      networking: false,
+      vm: spec::vm(spec.resources),
+      ..Default::default()
+    };
+    let container = manager.create_with_rootfs(&spec.name, &image, rootfs, options, spec::configure(spec))?;
+
+    container.create()?;
+    container.start()?;
+
+    let seed = oci::image_config(&image, &platform)
+      .map(|config| seed(&config))
+      .unwrap_or_default();
+
+    Ok(Booted {
+      _manager: manager,
+      container,
+      seed,
+    })
   }
 
   /// Serves attaches from other callers on a detached thread, never joined:
@@ -112,13 +289,13 @@ impl FrameworkEngine {
     let path = control_socket(&self.runtime_dir, &name);
     let listener = control::bind(&path).map_err(|error| EngineError::failed("bind the control socket", error))?;
     let attach_failed = Arc::clone(&self.attach_failed);
-    let session = Session::new(self.session.store().clone());
+    let running = Arc::clone(&self.running);
 
     std::thread::spawn(move || {
       control::serve(
         &listener,
         // The request arrives resolved against the client's environment.
-        |request, stdio, id| match Self::attach(&session, &name, id, request, *stdio) {
+        |request, stdio, id| match running.attach(&name, id, request, *stdio) {
           Ok(code) => code,
           Err(error) => {
             attach_failed(&error);
@@ -126,7 +303,7 @@ impl FrameworkEngine {
           }
         },
         |id, terminal| {
-          let _ = session.resize(id, terminal);
+          let _ = running.resize(id, terminal);
         },
         |error| attach_failed(&error),
       );
@@ -143,10 +320,10 @@ impl Engine for FrameworkEngine {
     // streams it interacts through are terminals. A piped prompt or a
     // redirected `run > log` leaves the guest without one, rather than writing
     // a terminal's escapes into whatever the caller redirected to.
-    let attached = spec.tty && framework::is_tty(descriptor) && framework::is_tty(libc::STDOUT_FILENO);
+    let has_terminal = spec.tty && is_tty(descriptor) && is_tty(libc::STDOUT_FILENO);
 
     // Raw while attached, restored on drop. See `terminal` for why.
-    let _raw = if attached {
+    let _raw = if has_terminal {
       Some(terminal::Raw::acquire(descriptor).map_err(|error| EngineError::failed("raw mode", error))?)
     } else {
       None
@@ -159,7 +336,7 @@ impl Engine for FrameworkEngine {
       working_directory: spec::working_directory(spec.workdir.as_deref()),
     };
 
-    let stdio = if attached {
+    let stdio = if has_terminal {
       // Only a terminal has a window, so only then is there anything to watch.
       terminal::watch_for_resize();
       Stdio::terminal(descriptor, libc::STDOUT_FILENO)
@@ -168,33 +345,28 @@ impl Engine for FrameworkEngine {
     };
 
     // The owner attaches directly; anyone else asks the owner to.
-    if self.session.is_running(&spec.name) {
-      // Duplicates, since the framework closes what it is given.
-      let duplicated = stdio
-        .try_clone()
-        .map_err(|error| EngineError::failed("duplicate the caller's stdio", error))?;
-
-      let attach = || Self::attach(&self.session, &spec.name, OWNER_ATTACH, &request, duplicated);
+    if self.running.booted(&spec.name).is_some() {
+      let attach = || {
+        self
+          .running
+          .attach(&spec.name, OWNER_ATTACH, &request, stdio)
+      };
 
       // This process holds the terminal and the VM, so it resizes the guest
       // directly; a joiner has to ask over the control socket.
-      let code = if attached {
+      return if has_terminal {
         terminal::while_resizing(
           &terminal::resized,
           || {
-            let _ = self.session.resize(OWNER_ATTACH, descriptor);
+            let _ = self.running.resize(OWNER_ATTACH, descriptor);
           },
           attach,
         )
       } else {
         attach()
       };
-
-      return Ok(code?);
     }
 
-    // Not duplicated: `SCM_RIGHTS` already copies each one, and the owner dups
-    // again.
     control::request(
       &control_socket(&self.runtime_dir, &spec.name),
       &request,
@@ -206,42 +378,59 @@ impl Engine for FrameworkEngine {
 
   /// Read from the store's index; there is no daemon to ask.
   fn images(&self) -> Result<Vec<String>, EngineError> {
-    self
-      .session
-      .images()
-      .map_err(|error| EngineError::unavailable("read the image index", error))
+    self.store.references()
   }
 
   fn run(&self, spec: &RunSpec) -> Result<(), EngineError> {
-    self.session.boot(&spec::boot(spec))?;
+    let booted = self.boot(spec)?;
+
+    lock(&self.running.containers).insert(spec.name.clone(), Arc::new(booted));
 
     self.serve_control_socket(spec.name.clone())
   }
 
   fn is_running(&self, name: &str) -> bool {
     // A socket file with nothing answering is a container that died with its
-    // owner. Not `Session::is_running`, which answers for this process alone.
+    // owner. Not `Running`, which answers for this process alone.
     control::served(&control_socket(&self.runtime_dir, name))
   }
 
   fn is_unpacked(&self, image: &str) -> Result<bool, EngineError> {
-    Ok(self.session.is_unpacked(image)?)
+    let image = self.store.images()?.get(image, false)?;
+
+    Ok(Unpacked::at(self.store.unpacked()).holds(&image))
   }
 
+  fn missing_content(&self, image: &str) -> Result<Option<String>, EngineError> {
+    let (content, images) = self.store.content()?;
+
+    for digest in images.get(image, false)?.referenced_digests()? {
+      if content.get(&digest)?.is_none() {
+        return Ok(Some(format!("sha256:{digest}")));
+      }
+    }
+
+    Ok(None)
+  }
+
+  /// The init image and kernel booted, which are pinned separately and whose
+  /// mismatch would fail only at runtime.
   fn version(&self) -> String {
-    Session::version()
+    format!(
+      "Containerization {}, kernel {}",
+      store::INITFS_VERSION,
+      store::KERNEL_VERSION
+    )
   }
 }
 
 pub struct FrameworkBuilder {
-  builder: framework::Builder,
+  store: Store,
 }
 
 impl FrameworkBuilder {
   pub fn new(store: Store) -> Self {
-    Self {
-      builder: framework::Builder::new(store),
-    }
+    Self { store }
   }
 }
 
@@ -250,11 +439,11 @@ impl Builder for FrameworkBuilder {
     let keys = cache::keys(plan)?;
     let name = spec::builder_name().map_err(|error| EngineError::failed(format!("build {}", plan.tag), error))?;
 
-    Ok(self.builder.build(&spec::build(plan, keys, name))?)
+    build::build(&self.store, plan, keys, &name)
   }
 
   fn provision(&self) -> Result<(), EngineError> {
-    Ok(self.builder.provision()?)
+    provision::provision(&self.store)
   }
 }
 
@@ -262,18 +451,102 @@ impl Builder for FrameworkBuilder {
 mod tests {
   use super::*;
 
+  fn request() -> control::Request {
+    control::Request {
+      arguments: vec!["bash".to_string()],
+      environment: vec!["IS_SANDBOX=1".to_string()],
+      user: None,
+      working_directory: "/workspace".to_string(),
+    }
+  }
+
+  fn image_seed() -> LinuxProcessConfiguration {
+    let config: oci::ImageConfig =
+      serde_json::from_str(r#"{"User":"claude","Env":["PATH=/usr/bin","LANG=C"],"WorkingDir":"/workspace"}"#)
+        .expect("a config");
+
+    seed(&config)
+  }
+
   #[test]
-  fn names_the_kernel_and_init_image_for_the_versions_the_framework_pins() {
-    let store = store("/images");
+  fn seeds_a_process_from_its_images_user_and_environment() {
+    let seed = image_seed();
+
+    assert_eq!(seed.user.username, "claude");
+    assert_eq!(seed.environment_variables, ["PATH=/usr/bin", "LANG=C"]);
+    assert_eq!(seed.working_directory, "/workspace");
+  }
+
+  #[test]
+  fn keeps_the_default_path_for_an_image_that_declares_none() {
+    let seed = seed(&oci::ImageConfig::new());
 
     assert_eq!(
-      store.kernel(),
-      Path::new(&format!("/images/kernels/vmlinux-{}", framework::KERNEL_VERSION))
+      seed.environment_variables,
+      [format!("PATH={}", LinuxProcessConfiguration::DEFAULT_PATH)]
+    );
+    assert_eq!(seed.user.username, "");
+    assert_eq!(seed.working_directory, "/");
+  }
+
+  #[test]
+  fn runs_a_request_as_the_images_user_unless_it_names_one() {
+    let mut request = request();
+
+    assert_eq!(
+      configuration(&image_seed(), &request, Stdio::nothing())
+        .user
+        .username,
+      "claude"
+    );
+
+    request.user = Some("root".to_string());
+
+    assert_eq!(
+      configuration(&image_seed(), &request, Stdio::nothing())
+        .user
+        .username,
+      "root"
+    );
+  }
+
+  #[test]
+  fn gives_a_terminal_term_and_no_separate_stderr() {
+    let process = configuration(&image_seed(), &request(), Stdio::terminal(7, 8));
+
+    assert!(process.terminal);
+    assert_eq!(
+      (process.stdin, process.stdout, process.stderr),
+      (Some(7), Some(8), None)
     );
     assert_eq!(
-      store.initfs(),
-      Path::new(&format!("/images/initfs/vminit-{}.ext4", framework::INITFS_VERSION))
+      process.environment_variables,
+      ["PATH=/usr/bin", "LANG=C", "IS_SANDBOX=1", "TERM=xterm"]
     );
-    assert_eq!(store.initfs_reference(), framework::INITFS_REFERENCE);
+  }
+
+  #[test]
+  fn leaves_term_alone_when_the_caller_sets_it() {
+    let mut request = request();
+    request.environment.push("TERM=screen".to_string());
+
+    let process = configuration(&image_seed(), &request, Stdio::terminal(7, 8));
+
+    assert!(
+      !process
+        .environment_variables
+        .contains(&"TERM=xterm".to_string())
+    );
+  }
+
+  #[test]
+  fn hands_a_caller_without_a_terminal_its_own_streams() {
+    let process = configuration(&image_seed(), &request(), Stdio::inherit(false));
+
+    assert!(!process.terminal);
+    assert_eq!(
+      (process.stdin, process.stdout, process.stderr),
+      (None, Some(libc::STDOUT_FILENO), Some(libc::STDERR_FILENO))
+    );
   }
 }

@@ -9,6 +9,7 @@
 //! descriptor without touching attributes it doesn't own, so this is the only
 //! place they change.
 
+use containerization_framework::containerization_os::terminal::Size;
 use std::io;
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,6 +91,26 @@ impl<F: Fn()> Drop for Ending<F> {
   fn drop(&mut self) {
     self.0();
   }
+}
+
+/// The window size of the terminal at `descriptor`, as the guest's pty is
+/// resized to.
+pub fn size(descriptor: RawFd) -> io::Result<Size> {
+  // SAFETY: TIOCGWINSZ fills the struct or returns < 0 and leaves it alone.
+  let window = unsafe {
+    let mut window: libc::winsize = std::mem::zeroed();
+
+    if libc::ioctl(descriptor, libc::TIOCGWINSZ, &mut window) < 0 {
+      return Err(io::Error::last_os_error());
+    }
+
+    window
+  };
+
+  Ok(Size {
+    width: window.ws_col,
+    height: window.ws_row,
+  })
 }
 
 /// Puts a terminal in raw mode for as long as it is held.

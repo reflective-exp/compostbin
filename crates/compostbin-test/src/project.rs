@@ -3,8 +3,8 @@
 use crate::output::{stderr, stdout};
 use crate::poll::poll_until;
 use crate::signing::signed_binary;
+use crate::store;
 use crate::terminal::Terminal;
-use compostbin_core::image::IMAGE_STORE;
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, Memory, TomlFile};
 use compostbin_core::session::Session;
 use compostbin_core::workspace::paths::PathResolver;
@@ -47,21 +47,31 @@ impl Project {
   /// A project directory under a fresh home, holding the default manifest.
   /// Call [`Project::manifest`] before the first command to change it: the
   /// container is created by the first one that needs it.
+  ///
+  /// The home starts with a clone of the suite's cache, base image built and
+  /// unpacked. Whatever the test writes there, a build's blob sweep included,
+  /// stays in the clone.
   pub fn new(name: &str) -> Self {
+    Self::with_cache(name, |cache| store::clone(&store::suite_cache(), cache))
+  }
+
+  /// The same, writing to `cache` itself, as preparing the suite's must.
+  pub(crate) fn sharing_cache(name: &str, cache: &Path) -> Self {
+    Self::with_cache(name, |link| {
+      std::os::unix::fs::symlink(cache, link).expect("link the shared cache");
+    })
+  }
+
+  /// `place` puts the cache at the path it is given.
+  fn with_cache(name: &str, place: impl FnOnce(&Path)) -> Self {
     let home = tempfile::TempDir::new_in(HOME_PARENT).expect("temp home");
     // Canonical, so an assertion comparing host paths is not defeated by
     // macOS's `/tmp` -> `/private/tmp` symlink.
     let root = home.path().canonicalize().expect("canonical home");
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).expect("create project dir");
-
-    // The store is the one thing not thrown away: building the base image again
-    // per test would cost minutes each. Everything else under this home is the
-    // test's own.
-    let cache = real_cache();
-    std::fs::create_dir_all(&cache).expect("create the shared cache");
     std::fs::create_dir_all(root.join(".cache")).expect("create cache dir");
-    std::os::unix::fs::symlink(&cache, root.join(".cache/compostbin")).expect("link the image store");
+    place(&root.join(".cache/compostbin"));
 
     let project = Self {
       _home: home,
@@ -336,20 +346,6 @@ impl Drop for Running {
   }
 }
 
-impl Drop for Project {
-  /// The home goes with the `TempDir`, but the container's unpacked rootfs
-  /// lives in the shared store, under this project's name. Left behind it
-  /// would be one stale clone per test, forever.
-  fn drop(&mut self) {
-    let containers = real_cache().join("images/containers");
-    // Not `session()`: a panic here, while a failed test unwinds, would abort
-    // the run.
-    if let Ok(session) = Session::load(None, PathResolver::new(&self.dir, self.home()), &self.dir) {
-      let _ = std::fs::remove_dir_all(containers.join(session.container_name()));
-    }
-  }
-}
-
 /// A script, checked for the newline that would quietly cut it short.
 ///
 /// Arguments cross to the guest as newline-separated lines (see the
@@ -372,19 +368,4 @@ fn declares(body: &toml::Table, key: &str) -> bool {
     .get("container")
     .and_then(toml::Value::as_table)
     .is_some_and(|container| container.contains_key(key))
-}
-
-/// The cache holding the image store the developer already built, which every
-/// project borrows: the images, the kernel, and the build context beside them.
-fn real_cache() -> PathBuf {
-  let home = std::env::var("HOME").expect("HOME");
-  let store = IMAGE_STORE
-    .strip_prefix("~/")
-    .expect("the store is under the home");
-
-  Path::new(&home).join(
-    Path::new(store)
-      .parent()
-      .expect("the store is inside the cache"),
-  )
 }

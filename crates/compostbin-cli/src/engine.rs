@@ -2,7 +2,7 @@
 
 use compostbin_core::image;
 use compostbin_core::session::Session;
-use compostbin_engine::containerization::{self, FrameworkBuilder, FrameworkEngine, StoreError};
+use compostbin_engine::containerization::{FrameworkBuilder, FrameworkEngine, Store, StoreError};
 use std::error::Error;
 use std::fmt;
 
@@ -16,7 +16,7 @@ pub fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn E
     println!("then {}", session.image());
   }
 
-  image::build(session, &FrameworkBuilder::new(containerization::store(store)), cache)?;
+  image::build(session, &FrameworkBuilder::new(Store::at(store)), cache)?;
 
   Ok(0)
 }
@@ -27,10 +27,7 @@ pub struct Unready(StoreError);
 
 impl fmt::Display for Unready {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match &self.0 {
-      StoreError::Unreadable { .. } => self.0.fmt(formatter),
-      unbuilt => write!(formatter, "{unbuilt}; run `compostbin build`"),
-    }
+    write!(formatter, "{}; run `compostbin build`", self.0)
   }
 }
 
@@ -43,7 +40,7 @@ impl Error for Unready {
 /// The engine a session runs on: Containerization.framework, in-process.
 /// Nothing else provides images, so the store must be ready first.
 pub fn select(session: &Session) -> Result<FrameworkEngine, Unready> {
-  let store = containerization::store(image::store(session.resolver()));
+  let store = Store::at(image::store(session.resolver()));
 
   store.ready().map_err(Unready)?;
 

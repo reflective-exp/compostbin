@@ -42,7 +42,7 @@ pub fn diagnose(
   vec![
     engine::version(engine),
     engine::store(images.as_deref()),
-    engine::base_image(session, images.as_deref()),
+    engine::base_image(session, engine, images.as_deref()),
     mounts::mounted_paths(session),
     mounts::dangling_symlinks(session),
     mounts::live_mounts(session, running),
@@ -168,6 +168,28 @@ mod tests {
         .contains("compostbin build"),
       "detail should name the fix: {:?}",
       check(&checks, "base image")
+    );
+  }
+
+  /// Listed in the index is not bootable: the blobs it names can be gone.
+  #[test]
+  fn reports_a_base_image_missing_a_blob() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+    let session = session(&home, &quoted(&base, "workspace"));
+    let image = session.manifest.project.image.clone();
+
+    let checks = diagnose(
+      &session,
+      &RecordingEngine::missing_content(&[&image], "sha256:abc"),
+      &in_keychain(),
+      false,
+    );
+
+    assert_eq!(check(&checks, "base image").status, Status::Fail);
+    assert_eq!(
+      check(&checks, "base image").detail,
+      format!("{image} is missing blob sha256:abc; run `compostbin build`")
     );
   }
 

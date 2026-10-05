@@ -148,6 +148,7 @@ dependencies = [
  "containerization-framework",
  "getrandom",
  "libc",
+ "serde_json",
  "sha2",
  "tempfile",
 ]
@@ -171,13 +172,10 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "containerization-framework"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0efbd04cdf234480fe87f78dcc4b9a9abb13962584e535d8cdfae5ad1f373dd"
+checksum = "5d2f3558895a075b44c5dc6f68cdbffbb6440e151a6e8571e9ec796206719af7"
 dependencies = [
- "libc",
- "serde",
- "serde_json",
  "swift-bridge",
  "swift-bridge-build",
 ]
@@ -289,9 +287,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "linux-raw-sys"

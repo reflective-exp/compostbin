@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Update containerization-framework to v0.3.0.
+- Pull in image/cache management that used to live in containerization.
+
 ## v0.12.0
 
 - Update containerization framework to v0.2.2.

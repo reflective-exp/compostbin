@@ -89,12 +89,17 @@ fn sign(binary: &Path) {
 /// The directory cargo built into: `…/target/<profile>`, two above this test
 /// binary in `…/target/<profile>/deps`.
 pub(crate) fn target_dir() -> PathBuf {
-  std::env::current_exe()
-    .expect("the test binary has a path")
-    .parent()
-    .and_then(Path::parent)
-    .expect("the test binary is under target/<profile>/deps")
-    .to_path_buf()
+  let exe = std::env::current_exe().expect("the running binary has a path");
+  let dir = exe.parent().expect("the running binary is in a directory");
+
+  // A test binary is under `target/<profile>/deps`; `prepare-store` is beside
+  // `compostbin`.
+  if dir.ends_with("deps") {
+    dir.parent().expect("deps is under the profile directory")
+  } else {
+    dir
+  }
+  .to_path_buf()
 }
 
 fn repository_root() -> PathBuf {

@@ -18,6 +18,7 @@ pub enum Call {
   Images,
   IsRunning(String),
   IsUnpacked(String),
+  MissingContent(String),
   Run(RunSpec),
   Version,
 }
@@ -57,6 +58,8 @@ pub struct RecordingEngine {
   unpacked: RefCell<Vec<String>>,
   /// `None` poses an engine that cannot say what images exist.
   images: Option<Vec<String>>,
+  /// The blob every image is posed as missing.
+  missing: Option<String>,
   exit_code: i32,
 }
 
@@ -86,6 +89,14 @@ impl RecordingEngine {
     Self {
       images: Some(images.iter().copied().map(str::to_string).collect()),
       ..Self::default()
+    }
+  }
+
+  /// Poses a store holding these images, each missing the blob `digest`.
+  pub fn missing_content(images: &[&str], digest: &str) -> Self {
+    Self {
+      missing: Some(digest.to_string()),
+      ..Self::with_images(images)
     }
   }
 
@@ -140,6 +151,12 @@ impl Engine for RecordingEngine {
         .iter()
         .any(|unpacked| unpacked == image),
     )
+  }
+
+  fn missing_content(&self, image: &str) -> Result<Option<String>, EngineError> {
+    self.calls.record(Call::MissingContent(image.to_string()));
+
+    Ok(self.missing.clone())
   }
 
   fn version(&self) -> String {

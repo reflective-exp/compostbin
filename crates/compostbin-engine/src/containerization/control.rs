@@ -13,7 +13,7 @@
 //! The socket carries only what a descriptor cannot: the request, a nudge per
 //! window resize, and the exit code back.
 
-use containerization_framework::{Stdio, UNATTACHED};
+use super::stdio::{Stdio, UNATTACHED};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -225,16 +225,12 @@ where
     return Ok(());
   }
 
-  // Owned, so they close once the guest is done; the client keeps its own.
+  // Owned, so they close once the guest is done; the client keeps its own, and
+  // the framework streams duplicates of these.
   let descriptors: Vec<RawFd> = received.iter().map(AsRawFd::as_raw_fd).collect();
 
-  let (request, borrowed) = Request::decode(&payload, &descriptors)
+  let (request, stdio) = Request::decode(&payload, &descriptors)
     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed request"))?;
-
-  // Duplicates the Swift side keeps (see `terminal::lend`). Handing over the
-  // received fds let a later attach reuse a number while a previous reader was
-  // still on it.
-  let stdio = borrowed.try_clone()?;
 
   std::thread::scope(|scope| {
     let mut watching = stream.try_clone()?;
@@ -517,36 +513,6 @@ mod tests {
 
     assert!(!probe(&request().encode(&Stdio::terminal(7, 8)), &[]));
     assert!(!probe("", &[OwnedFd::from(file)]));
-  }
-
-  #[test]
-  fn clones_every_attached_stream_onto_a_descriptor_of_its_own() {
-    let stdio = Stdio::inherit(true).try_clone().expect("clone");
-
-    assert_eq!(stdio.terminal, UNATTACHED);
-
-    for descriptor in [stdio.stdin, stdio.stdout, stdio.stderr] {
-      assert!(
-        descriptor > libc::STDERR_FILENO,
-        "a duplicate, so closing it leaves this process's own stream open"
-      );
-
-      // SAFETY: a descriptor this test duplicated, closed once.
-      unsafe { libc::close(descriptor) };
-    }
-  }
-
-  #[test]
-  fn clones_nothing_for_a_stream_the_caller_left_out() {
-    let stdio = Stdio::inherit(false).try_clone().expect("clone");
-
-    assert_eq!(stdio.stdin, UNATTACHED, "a process that reads no input");
-    assert!(stdio.stdout > libc::STDERR_FILENO);
-
-    for descriptor in [stdio.stdout, stdio.stderr] {
-      // SAFETY: as above.
-      unsafe { libc::close(descriptor) };
-    }
   }
 
   #[test]

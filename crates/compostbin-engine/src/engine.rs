@@ -21,6 +21,10 @@ pub trait Engine {
   /// (slow) run.
   fn is_unpacked(&self, image: &str) -> Result<bool, EngineError>;
 
+  /// The first blob `image` is made of that the store no longer holds, as
+  /// `sha256:<hex>`; `None` when every one is there.
+  fn missing_content(&self, image: &str) -> Result<Option<String>, EngineError>;
+
   /// The engine and its version.
   fn version(&self) -> String;
 }

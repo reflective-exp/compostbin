@@ -1,13 +1,12 @@
 //! Turning compostbin's specs into what `containerization_framework` takes.
 //!
 //! Everything compostbin decides and the framework does not: which host
-//! variables an `Inherit` resolves against, how a session or build is laid
-//! onto the VM, and what a builder container is called.
+//! variables an `Inherit` resolves against, how a session is laid onto the VM,
+//! and what a builder container is called.
 
-use super::cache::Keys;
 use super::nat;
-use crate::model::{BuildPlan, EnvVar, Resources, RunSpec, SocketRelay};
-use containerization_framework::{self as framework, model};
+use crate::model::{EnvVar, Resources, RunSpec, SocketRelay};
+use containerization_framework::containerization::{Mount, UnixSocketConfiguration, VmResources, linux_container};
 use std::path::Path;
 
 /// `NAME=VALUE`.
@@ -33,92 +32,58 @@ pub fn working_directory(workdir: Option<&Path>) -> String {
 }
 
 /// A virtiofs share, read-only if declared so.
-fn share(source: &Path, destination: impl Into<String>, readonly: bool) -> model::Mount {
+pub fn share(source: &Path, destination: impl Into<String>, readonly: bool) -> Mount {
   let options: &[&str] = if readonly { &["ro"] } else { &[] };
 
-  model::Mount::share(source.display().to_string(), destination, options)
+  Mount::share(source.display().to_string(), destination, options)
 }
 
 /// Mode `0o666`, so an unprivileged guest user can connect.
-fn socket(socket: &SocketRelay) -> model::UnixSocketConfiguration {
-  model::UnixSocketConfiguration {
+fn socket(socket: &SocketRelay) -> UnixSocketConfiguration {
+  UnixSocketConfiguration {
     permissions: Some(0o666),
-    ..model::UnixSocketConfiguration::new(socket.source.clone(), socket.target.clone())
+    ..UnixSocketConfiguration::new(socket.source.clone(), socket.target.clone())
   }
 }
 
 /// The container's limits plus a core and the guest kernel's memory, so the
 /// container gets all it was given.
-fn vm(resources: Resources) -> model::VmResources {
-  model::VmResources {
+pub fn vm(resources: Resources) -> VmResources {
+  VmResources {
     cpus: resources.cpus + 1,
-    memory_in_bytes: resources.memory_in_bytes + model::VmResources::GUEST_MEMORY_OVERHEAD,
+    memory_in_bytes: resources.memory_in_bytes + VmResources::GUEST_MEMORY_OVERHEAD,
   }
 }
 
-/// A session's container, on its own address.
-pub fn boot(spec: &RunSpec) -> framework::BootSpec {
-  let mut boot = framework::BootSpec::new(spec.name.clone(), spec.image.clone());
-  boot.vm = vm(spec.resources);
+/// A session's container, on its own address, over the configuration the
+/// manager seeded from its image.
+pub fn configure(spec: &RunSpec) -> impl FnOnce(&mut linux_container::Configuration) + Send + 'static {
+  let resources = spec.resources;
+  let arguments = spec.arguments.clone();
+  let environment = environment(&spec.env);
+  let working_directory = working_directory(spec.workdir.as_deref());
+  let interface = nat::interface(&spec.name);
+  let mounts: Vec<Mount> = spec
+    .mounts
+    .iter()
+    .map(|mount| share(&mount.source, mount.target.display().to_string(), mount.readonly))
+    .collect();
+  let sockets = spec.sockets.iter().map(socket).collect();
 
-  let configuration = &mut boot.configuration;
-  configuration.cpus = spec.resources.cpus;
-  configuration.memory_in_bytes = spec.resources.memory_in_bytes;
-  configuration.process = model::LinuxProcessConfiguration {
-    arguments: Some(spec.arguments.clone()),
-    environment_variables: environment(&spec.env),
-    working_directory: Some(working_directory(spec.workdir.as_deref())),
-    user: None,
-  };
-  configuration.interfaces = vec![nat::interface(&spec.name)];
-  configuration.dns = Some(nat::dns());
-  configuration.mounts.extend(
-    spec
-      .mounts
-      .iter()
-      .map(|mount| share(&mount.source, mount.target.display().to_string(), mount.readonly)),
-  );
-  configuration.sockets = spec.sockets.iter().map(socket).collect();
-
-  boot
-}
-
-/// A build, with the caller's keys and a builder container of its own.
-///
-/// The image every compostbin build produces is a Debian derivative, so the
-/// default `bash -euo pipefail -c` holds and nothing overrides the shell.
-pub fn build(plan: &BuildPlan, keys: Keys, name: String) -> framework::BuildPlan {
-  let interface = nat::interface(&name);
-
-  framework::BuildPlan {
-    cpus: plan.resources.cpus,
-    memory_in_bytes: plan.resources.memory_in_bytes,
-    vm: vm(plan.resources),
-    mounts: plan
-      .mounts
-      .iter()
-      .map(|mount| share(&mount.source, mount.destination.clone(), true))
-      .collect(),
-    steps: plan
-      .steps
-      .iter()
-      .zip(keys.steps)
-      .map(|(step, cache_key)| framework::BuildStep {
-        name: step.name.clone(),
-        script: step.script.clone(),
-        user: step.user.clone(),
-        cache_key,
-      })
-      .collect(),
-    environment: plan.environment.clone(),
-    labels: plan.labels.clone(),
-    user: plan.user.clone(),
-    workdir: plan.workdir.clone(),
-    cache: framework::CachePolicy {
-      restore: plan.cache,
-      ..framework::CachePolicy::default()
-    },
-    ..framework::BuildPlan::new(name, plan.base.clone(), plan.tag.clone(), interface, keys.base)
+  move |configuration| {
+    configuration.cpus = resources.cpus;
+    configuration.memory_in_bytes = resources.memory_in_bytes;
+    configuration.process.arguments = arguments;
+    // Last, so a variable the session sets beats the image's.
+    configuration
+      .process
+      .environment_variables
+      .extend(environment);
+    configuration.process.working_directory = working_directory;
+    configuration.interfaces = vec![interface];
+    configuration.dns = Some(nat::dns());
+    configuration.mounts.extend(mounts);
+    configuration.sockets = sockets;
   }
 }
 
@@ -134,7 +99,9 @@ pub fn builder_name() -> Result<String, getrandom::Error> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::Mount;
+  use crate::model::Mount as SessionMount;
+  use containerization_framework::containerization::LinuxContainer;
+  use containerization_framework::containerization::unix_socket_configuration::Direction;
   use std::path::PathBuf;
 
   #[test]
@@ -173,7 +140,7 @@ mod tests {
         value: "1".to_string(),
       }],
       image: "compostbin/base:latest".to_string(),
-      mounts: vec![Mount {
+      mounts: vec![SessionMount {
         readonly: true,
         source: PathBuf::from("/Users/user/workspace"),
         target: PathBuf::from("/workspace"),
@@ -191,89 +158,61 @@ mod tests {
     }
   }
 
-  #[test]
-  fn boots_a_session_onto_its_own_nat_address() {
-    let spec = boot(&run_spec());
+  /// What the manager seeds from an image declaring `PATH`, then the spec.
+  fn configured() -> linux_container::Configuration {
+    let mut configuration = linux_container::Configuration::default();
+    configuration.process.environment_variables = vec!["PATH=/usr/bin".to_string()];
 
-    assert_eq!(spec.id, "session-one");
-    assert_eq!(spec.configuration.interfaces, [nat::interface("session-one")]);
-    assert_eq!(spec.configuration.dns, Some(nat::dns()));
-    assert_eq!(spec.configuration.process.environment_variables, ["IS_SANDBOX=1"]);
+    configure(&run_spec())(&mut configuration);
+
+    configuration
   }
 
   #[test]
-  fn adds_declared_mounts_after_the_standard_ones() {
-    let spec = boot(&run_spec());
-    let standard = model::LinuxContainerConfiguration::default_mounts();
-    let (defaults, declared) = spec.configuration.mounts.split_at(standard.len());
+  fn boots_a_session_onto_its_own_nat_address() {
+    let configuration = configured();
 
-    assert_eq!(defaults, standard);
+    assert_eq!(configuration.interfaces, [nat::interface("session-one")]);
+    assert_eq!(configuration.dns, Some(nat::dns()));
+    assert_eq!(configuration.process.working_directory, "/workspace");
+  }
+
+  #[test]
+  fn adds_the_sessions_variables_after_the_images() {
     assert_eq!(
-      declared,
-      [model::Mount::share("/Users/user/workspace", "/workspace", &["ro"])]
+      configured().process.environment_variables,
+      ["PATH=/usr/bin", "IS_SANDBOX=1"]
     );
   }
 
   #[test]
-  fn sizes_the_vm_to_hold_the_whole_container() {
-    let spec = boot(&run_spec());
+  fn adds_declared_mounts_after_the_standard_ones() {
+    let configuration = configured();
+    let standard = LinuxContainer::default_mounts();
+    let (defaults, declared) = configuration.mounts.split_at(standard.len());
 
-    assert_eq!(spec.configuration.cpus, 4);
-    assert_eq!(spec.vm.cpus, 5);
+    assert_eq!(defaults, standard);
+    assert_eq!(declared, [Mount::share("/Users/user/workspace", "/workspace", &["ro"])]);
+  }
+
+  #[test]
+  fn sizes_the_vm_to_hold_the_whole_container() {
+    let resources = run_spec().resources;
+
+    assert_eq!(configured().cpus, 4);
+    assert_eq!(vm(resources).cpus, 5);
     assert_eq!(
-      spec.vm.memory_in_bytes,
-      (8 << 30) + model::VmResources::GUEST_MEMORY_OVERHEAD
+      vm(resources).memory_in_bytes,
+      (8 << 30) + VmResources::GUEST_MEMORY_OVERHEAD
     );
   }
 
   /// Only the guest reaches host services, never the reverse.
   #[test]
   fn relays_every_socket_into_the_guest() {
-    let spec = boot(&run_spec());
+    let configuration = configured();
 
-    assert_eq!(spec.configuration.sockets[0].direction, model::Direction::Into);
-    assert_eq!(spec.configuration.sockets[0].permissions, Some(0o666));
-  }
-
-  #[test]
-  fn gives_a_build_the_keys_compostbin_derived() {
-    let mut plan = BuildPlan::new(
-      "docker.io/library/debian:stable-slim",
-      "compostbin/base:latest",
-      Resources {
-        cpus: 4,
-        memory_in_bytes: 8 << 30,
-      },
-    );
-    plan.steps = vec![crate::model::BuildStep::root("packages", "apt-get update")];
-
-    let keys = crate::containerization::cache::keys(&plan).expect("a plan with no mount should key");
-    let built = build(&plan, keys.clone(), "cb-builder-0123abcd".to_string());
-
-    assert_eq!(built.name, "cb-builder-0123abcd");
-    assert_eq!(built.base_key, keys.base);
-    assert_eq!(built.steps[0].cache_key, keys.steps[0]);
-    assert!(built.cache.restore);
-  }
-
-  #[test]
-  fn says_when_a_build_is_not_to_read_its_cache() {
-    let mut plan = BuildPlan::new(
-      "docker.io/library/debian:stable-slim",
-      "compostbin/base:latest",
-      Resources {
-        cpus: 4,
-        memory_in_bytes: 8 << 30,
-      },
-    );
-    plan.cache = false;
-
-    let keys = crate::containerization::cache::keys(&plan).expect("a plan should key");
-
-    assert!(
-      !build(&plan, keys, "cb-builder-0123abcd".to_string())
-        .cache
-        .restore
-    );
+    assert_eq!(configuration.sockets[0].direction, Direction::Into);
+    assert_eq!(configuration.sockets[0].permissions, Some(0o666));
   }
 }

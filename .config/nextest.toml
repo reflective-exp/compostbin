@@ -1,3 +1,14 @@
+experimental = ["setup-scripts"]
+
+# Once per run, before any `compostbin-test` test: the store they all clone,
+# with the base image checked and unpacked. See `compostbin_test::prepare`.
+[scripts.setup.prepare-store]
+command = "cargo run --quiet --package compostbin-test --features integration --bin prepare-store"
+
+[[profile.default.scripts]]
+filter = 'package(compostbin-test)'
+setup = "prepare-store"
+
 # Every `compostbin-test` test boots a VM of its own, under a name and a home
 # of its own: they share no container, so this is not about isolation. It is
 # the machine — a dozen VMs at once leaves the host swapping, and a test whose
