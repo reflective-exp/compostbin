@@ -35,9 +35,11 @@ use crate::error::EngineError;
 use crate::model::{BuildPlan, ExecSpec, RunSpec};
 use containerization_framework::containerization::container::container_manager::RootfsCreateOptions;
 use containerization_framework::containerization::container::{ContainerManager, LinuxContainer};
+use containerization_framework::containerization::image::{Image, ImageStore};
 use containerization_framework::containerization::process::{LinuxProcess, LinuxProcessConfiguration};
 use containerization_framework::containerization::vm::{Kernel, SystemPlatform};
-use containerization_framework::containerization_oci::image::Platform;
+use containerization_framework::containerization_error::Code;
+use containerization_framework::containerization_oci::image::{ImageConfig, Platform};
 use std::collections::HashMap;
 use std::error::Error;
 use std::os::fd::{AsRawFd, RawFd};
@@ -189,23 +191,35 @@ fn configuration(
 /// What a process in a container of `config`'s image starts from, as
 /// Containerization seeds its first process: the image's user, environment and
 /// working directory. The default `PATH` stays when the image declares none.
-fn seed(config: &oci::ImageConfig) -> LinuxProcessConfiguration {
-  let defaults = LinuxProcessConfiguration::default();
-  let mut environment = oci::strings(config, "Env");
+fn seed(config: &ImageConfig) -> Result<LinuxProcessConfiguration, containerization_framework::Error> {
+  let mut process = LinuxProcessConfiguration::from_image_config(config)?;
 
-  if !environment
+  if !process
+    .environment_variables
     .iter()
     .any(|variable| variable.starts_with("PATH="))
   {
-    environment.extend(defaults.environment_variables.iter().cloned());
+    process
+      .environment_variables
+      .extend(LinuxProcessConfiguration::default().environment_variables);
   }
 
-  LinuxProcessConfiguration {
-    environment_variables: environment,
-    working_directory: oci::string(config, "WorkingDir").unwrap_or_else(|| defaults.working_directory.clone()),
-    user: build::user(oci::string(config, "User").as_deref()),
-    ..defaults
-  }
+  Ok(process)
+}
+
+/// `reference` from the store, without pulling: an image missing there is one
+/// `compostbin build` has yet to make.
+fn built(images: &ImageStore, reference: &str) -> Result<Image, EngineError> {
+  images.get(reference, false).map_err(|error| {
+    if error.is_code(Code::NotFound) {
+      EngineError::unavailable(
+        format!("find {reference}"),
+        "it has not been built; run `compostbin build`",
+      )
+    } else {
+      error.into()
+    }
+  })
 }
 
 pub struct FrameworkEngine {
@@ -255,6 +269,7 @@ impl FrameworkEngine {
     )?;
     let image = images.get(&spec.image, true)?;
     let platform = Platform::current()?;
+    let seed = seed(&image.config(&platform)?.config.unwrap_or_default())?;
 
     // Where the manager writes the container's boot log.
     std::fs::create_dir_all(&directory).map_err(|error| EngineError::failed(format!("boot {}", spec.name), error))?;
@@ -273,10 +288,6 @@ impl FrameworkEngine {
 
     container.create()?;
     container.start()?;
-
-    let seed = oci::image_config(&image, &platform)
-      .map(|config| seed(&config))
-      .unwrap_or_default();
 
     Ok(Booted {
       _manager: manager,
@@ -401,7 +412,7 @@ impl Engine for FrameworkEngine {
   }
 
   fn is_unpacked(&self, image: &str) -> Result<bool, EngineError> {
-    let image = self.store.images()?.get(image, false)?;
+    let image = built(&self.store.images()?, image)?;
 
     Ok(Unpacked::at(self.store.unpacked()).holds(&image))
   }
@@ -409,7 +420,7 @@ impl Engine for FrameworkEngine {
   fn missing_content(&self, image: &str) -> Result<Option<String>, EngineError> {
     let (content, images) = self.store.content()?;
 
-    for digest in images.get(image, false)?.referenced_digests()? {
+    for digest in built(&images, image)?.referenced_digests()? {
       if content.get(&digest)?.is_none() {
         return Ok(Some(format!("sha256:{digest}")));
       }
@@ -466,11 +477,14 @@ mod tests {
   }
 
   fn image_seed() -> LinuxProcessConfiguration {
-    let config: oci::ImageConfig =
-      serde_json::from_str(r#"{"User":"claude","Env":["PATH=/usr/bin","LANG=C"],"WorkingDir":"/workspace"}"#)
-        .expect("a config");
+    let config = ImageConfig {
+      user: Some("claude".to_string()),
+      env: Some(vec!["PATH=/usr/bin".to_string(), "LANG=C".to_string()]),
+      working_dir: Some("/workspace".to_string()),
+      ..ImageConfig::default()
+    };
 
-    seed(&config)
+    seed(&config).expect("a seed")
   }
 
   #[test]
@@ -484,7 +498,7 @@ mod tests {
 
   #[test]
   fn keeps_the_default_path_for_an_image_that_declares_none() {
-    let seed = seed(&oci::ImageConfig::new());
+    let seed = seed(&ImageConfig::default()).expect("a seed");
 
     assert_eq!(
       seed.environment_variables,
@@ -553,5 +567,25 @@ mod tests {
       (process.stdin, process.stdout, process.stderr),
       (None, Some(libc::STDOUT_FILENO), Some(libc::STDERR_FILENO))
     );
+  }
+
+  #[test]
+  fn tells_the_caller_to_build_an_image_the_store_lacks() {
+    let root = tempfile::tempdir().expect("a temp dir");
+    let engine = FrameworkEngine::new(root.path().join("sessions"), Store::at(root.path().join("images")));
+
+    for error in [
+      engine
+        .missing_content("compostbin/absent")
+        .expect_err("nothing is built"),
+      engine
+        .is_unpacked("compostbin/absent")
+        .expect_err("nothing is built"),
+    ] {
+      assert_eq!(
+        error.to_string(),
+        "cannot find compostbin/absent: it has not been built; run `compostbin build`"
+      );
+    }
   }
 }

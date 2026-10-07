@@ -71,7 +71,7 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
     && oci::holds(&content, &descriptor)
   {
     note(&format!("{} is already built", plan.tag));
-    retag(&images, &plan.tag, descriptor)?;
+    images.create(&image::Description::new(&plan.tag, descriptor))?;
     snapshots.evict();
 
     return Ok(());
@@ -104,7 +104,8 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
 
   let descriptor = ingest(&content, &rootfs, plan, base_config, environment, platform)?;
 
-  retag(&images, &plan.tag, descriptor.clone())?;
+  // `create` replaces the reference a rebuild already has.
+  images.create(&image::Description::new(&plan.tag, descriptor.clone()))?;
   snapshots.save_image(&descriptor, &keys.image);
 
   // Not `ContainerManager::delete`: a fully cached build has no manager, and
@@ -298,8 +299,7 @@ fn ingest(
   environment: Vec<String>,
   platform: Platform,
 ) -> Result<Descriptor, EngineError> {
-  let scratch = rootfs.parent().map(Path::to_path_buf).unwrap_or_default();
-  let layer = scratch.join("layer.tar");
+  let layer = rootfs.with_file_name("layer.tar");
   let _ = std::fs::remove_file(&layer);
 
   Ext4Reader::new(rootfs)?.export(&layer)?;
@@ -308,7 +308,6 @@ fn ingest(
     content,
     Built {
       layer: layer.clone(),
-      scratch,
       config: config(plan, base, environment),
       platform,
     },
@@ -350,17 +349,6 @@ fn config(plan: &BuildPlan, base: ImageConfig, environment: Vec<String>) -> Imag
   }
 
   config
-}
-
-/// Points a reference at what a build produced.
-///
-/// Delete first: `create` will not replace an existing reference, which a
-/// rebuild always has.
-fn retag(images: &ImageStore, reference: &str, descriptor: Descriptor) -> Result<(), EngineError> {
-  let _ = images.delete(reference, false);
-  images.create(&image::Description::new(reference, descriptor))?;
-
-  Ok(())
 }
 
 /// Deletes unreferenced blobs (chiefly the previous build's multi-gigabyte
@@ -450,8 +438,8 @@ mod tests {
 
     let config = config(&plan(), base, vec!["PATH=/bin".to_string(), "LANG=C".to_string()]);
 
-    assert_eq!(oci::string(&config, "User"), Some("claude".to_string()));
-    assert_eq!(oci::string(&config, "WorkingDir"), Some("/workspace".to_string()));
+    assert_eq!(config["User"], "claude");
+    assert_eq!(config["WorkingDir"], "/workspace");
     assert_eq!(
       oci::strings(&config, "Cmd"),
       ["bash"],
@@ -470,7 +458,7 @@ mod tests {
 
     let config = config(&plan, base, Vec::new());
 
-    assert_eq!(oci::string(&config, "User"), Some("nobody".to_string()));
+    assert_eq!(config["User"], "nobody");
     assert_eq!(config["Labels"]["dev.compostbin.built-by"], "0.12.0");
   }
 

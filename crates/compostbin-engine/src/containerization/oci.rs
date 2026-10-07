@@ -4,60 +4,28 @@
 use crate::error::EngineError;
 use containerization_framework::containerization::image::Image;
 use containerization_framework::containerization_oci::content::{ContentWriter, LocalContentStore};
-use containerization_framework::containerization_oci::image::{Descriptor, Platform};
+use containerization_framework::containerization_oci::image::{Descriptor, MediaTypes, Platform};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
-const INDEX: &str = "application/vnd.oci.image.index.v1+json";
-const DOCKER_INDEX: &str = "application/vnd.docker.distribution.manifest.list.v2+json";
-const MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
-const CONFIG: &str = "application/vnd.oci.image.config.v1+json";
 /// Uncompressed: nothing pushes these images, and an uncompressed blob's digest
 /// is also its diffID, so both are right in one pass.
-const LAYER: &str = "application/vnd.oci.image.layer.v1.tar";
+const LAYER: &str = MediaTypes::IMAGE_LAYER;
 
 /// What an image's config says a process runs as: `User`, `Env`, `Entrypoint`,
 /// `Cmd`, `WorkingDir` and `Labels`. Empty for an image that says nothing.
 pub type ImageConfig = Map<String, Value>;
 
-/// The config of `image`'s manifest for `platform`.
+/// The config of `image`'s manifest for `platform`, as written: a built image
+/// keeps the keys the framework's `ImageConfig` has no field for.
 pub fn image_config(image: &Image, platform: &Platform) -> Result<ImageConfig, EngineError> {
-  let read = |digest: &str| -> Result<Value, EngineError> {
-    let data = image.get_content(digest)?.data()?;
+  let digest = image.manifest(platform)?.config.digest;
+  let data = image.get_content(&digest)?.data()?;
+  let mut document: Value =
+    serde_json::from_slice(&data).map_err(|error| EngineError::failed(format!("read {digest}"), error))?;
 
-    serde_json::from_slice(&data).map_err(|error| EngineError::failed(format!("read {digest}"), error))
-  };
-
-  let mut document = read(&image.digest())?;
-
-  if [INDEX, DOCKER_INDEX].contains(&image.media_type().as_str()) {
-    let manifest = document["manifests"]
-      .as_array()
-      .into_iter()
-      .flatten()
-      .find(|manifest| {
-        manifest["platform"]["architecture"] == platform.architecture.as_str()
-          && manifest["platform"]["os"] == platform.os.as_str()
-      })
-      .and_then(|manifest| manifest["digest"].as_str())
-      .ok_or_else(|| {
-        EngineError::unavailable(
-          format!("read {}", image.reference()),
-          format!("no manifest for {}/{}", platform.os, platform.architecture),
-        )
-      })?
-      .to_string();
-
-    document = read(&manifest)?;
-  }
-
-  let config = document["config"]["digest"]
-    .as_str()
-    .ok_or_else(|| EngineError::failed(format!("read {}", image.reference()), "its manifest names no config"))?
-    .to_string();
-
-  Ok(match read(&config)?["config"].take() {
+  Ok(match document["config"].take() {
     Value::Object(config) => config,
     _ => Map::new(),
   })
@@ -74,17 +42,10 @@ pub fn strings(config: &ImageConfig, key: &str) -> Vec<String> {
     .collect()
 }
 
-/// `config`'s `key`, as a string.
-pub fn string(config: &ImageConfig, key: &str) -> Option<String> {
-  config.get(key).and_then(Value::as_str).map(str::to_string)
-}
-
 /// What a built image's config is written from.
 pub struct Built {
   /// The exported rootfs, as a tar.
   pub layer: PathBuf,
-  /// Where the documents describing it are written before they are stored.
-  pub scratch: PathBuf,
   pub config: ImageConfig,
   pub platform: Platform,
 }
@@ -97,17 +58,7 @@ pub fn ingest(content: &LocalContentStore, built: Built) -> Result<Descriptor, E
 
   content.ingest(move |directory| {
     let writer = ContentWriter::new(directory)?;
-    let document = |name: &str, value: Value| -> Result<(i64, String), containerization_framework::Error> {
-      let path = built.scratch.join(name);
-
-      std::fs::write(&path, value.to_string())
-        .map_err(|error| containerization_framework::Error::failed(format!("write {}", path.display()), error))?;
-
-      let stored = writer.create(&path);
-      let _ = std::fs::remove_file(&path);
-
-      stored
-    };
+    let document = |value: Value| writer.write(value.to_string().as_bytes());
 
     let (size, layer) = writer.create(&built.layer)?;
     let layer = descriptor(LAYER, layer, size);
@@ -116,22 +67,22 @@ pub fn ingest(content: &LocalContentStore, built: Built) -> Result<Descriptor, E
     let mut config = platform.clone();
     config["config"] = Value::Object(built.config);
     config["rootfs"] = json!({ "type": "layers", "diff_ids": [layer["digest"]] });
-    let (size, digest) = document("config.json", config)?;
-    let config = descriptor(CONFIG, digest, size);
+    let (size, digest) = document(config)?;
+    let config = descriptor(MediaTypes::IMAGE_CONFIG, digest, size);
 
-    let (size, digest) = document(
-      "manifest.json",
-      json!({ "schemaVersion": 2, "mediaType": MANIFEST, "config": config, "layers": [layer] }),
-    )?;
-    let mut manifest = descriptor(MANIFEST, digest, size);
+    let (size, digest) = document(json!({
+      "schemaVersion": 2,
+      "mediaType": MediaTypes::IMAGE_MANIFEST,
+      "config": config,
+      "layers": [layer],
+    }))?;
+    let mut manifest = descriptor(MediaTypes::IMAGE_MANIFEST, digest, size);
     manifest["platform"] = platform;
 
-    let (size, digest) = document(
-      "index.json",
-      json!({ "schemaVersion": 2, "mediaType": INDEX, "manifests": [manifest] }),
-    )?;
+    let (size, digest) =
+      document(json!({ "schemaVersion": 2, "mediaType": MediaTypes::INDEX, "manifests": [manifest] }))?;
 
-    *written.lock().unwrap_or_else(PoisonError::into_inner) = Some(Descriptor::new(INDEX, digest, size));
+    *written.lock().unwrap_or_else(PoisonError::into_inner) = Some(Descriptor::new(MediaTypes::INDEX, digest, size));
 
     Ok(())
   })?;
@@ -240,7 +191,7 @@ mod tests {
 
   #[test]
   fn keeps_a_descriptor_as_it_wrote_it() {
-    let descriptor = Descriptor::new(INDEX, "sha256:aa", 42);
+    let descriptor = Descriptor::new(MediaTypes::INDEX, "sha256:aa", 42);
 
     assert_eq!(from_json(&to_json(&descriptor)), Some(descriptor));
     assert_eq!(from_json("{\"truncated"), None);
@@ -252,7 +203,6 @@ mod tests {
 
     assert_eq!(strings(&config, "Env"), ["PATH=/bin"]);
     assert_eq!(strings(&config, "Cmd"), Vec::<String>::new());
-    assert_eq!(string(&config, "User"), Some("claude".to_string()));
-    assert_eq!(string(&config, "WorkingDir"), None);
+    assert_eq!(strings(&config, "User"), Vec::<String>::new());
   }
 }

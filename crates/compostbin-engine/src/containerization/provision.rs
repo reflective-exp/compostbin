@@ -17,6 +17,7 @@ use super::store::{INITFS_REFERENCE, KERNEL_IN_ARCHIVE, KERNEL_URL, Store};
 use crate::error::EngineError;
 use containerization_framework::containerization::container::Mount;
 use containerization_framework::containerization::vm::SystemPlatform;
+use containerization_framework::containerization_error::Code;
 use std::path::Path;
 use std::process::Command;
 
@@ -129,8 +130,10 @@ fn initfs(store: &Store) -> Result<(), EngineError> {
 
   let images = store.images()?;
 
-  if images.get(INITFS_REFERENCE, false).is_err() {
-    note(&format!("pulling {INITFS_REFERENCE}"));
+  match images.get(INITFS_REFERENCE, false) {
+    Err(error) if error.is_code(Code::NotFound) => note(&format!("pulling {INITFS_REFERENCE}")),
+    Err(error) => return Err(error.into()),
+    Ok(_) => {}
   }
 
   let image = images.get_init_image(INITFS_REFERENCE, None, None)?;
