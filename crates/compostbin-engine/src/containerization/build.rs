@@ -12,6 +12,7 @@
 
 use super::cache::Keys;
 use super::oci::{self, Built, ImageConfig};
+use super::progress::Meter;
 use super::provision::initfs_mount;
 use super::snapshots::{Salted, Snapshots};
 use super::store::Store;
@@ -23,9 +24,11 @@ use containerization_framework::containerization::container::container_manager::
 use containerization_framework::containerization::container::{
   ContainerManager, FilesystemOperation, LinuxContainer, linux_container,
 };
+use containerization_framework::containerization::image::image_store::PullOptions;
 use containerization_framework::containerization::image::{self, Ext4Unpacker, Image, ImageStore};
 use containerization_framework::containerization::process::LinuxProcessConfiguration;
 use containerization_framework::containerization::vm::{Kernel, SystemPlatform};
+use containerization_framework::containerization_error::Code;
 use containerization_framework::containerization_ext4::ext4::Ext4Reader;
 use containerization_framework::containerization_oci::content::LocalContentStore;
 use containerization_framework::containerization_oci::image::{Descriptor, Platform};
@@ -54,7 +57,7 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
 
   // Pulled up front: the finished image inherits the base's config, and its
   // digest salts every cache key.
-  let base = images.get(&plan.base, true)?;
+  let base = pulled(&images, &plan.base)?;
   let base_config = oci::image_config(&base, &platform)?;
   let environment = oci::merge(oci::strings(&base_config, "Env"), &plan.environment);
 
@@ -155,10 +158,31 @@ fn prepare(
     }
   }
 
+  note(&format!("unpacking {}", plan.base));
   Ext4Unpacker::new(ROOTFS_SIZE_IN_BYTES, None).unpack(base, platform, rootfs, None)?;
   snapshots.save_rootfs(rootfs, &keys.base);
 
   Ok(0)
+}
+
+/// `reference` from the store, pulled first if missing.
+///
+/// Not `get(_, pull: true)`, which pulls without progress or a word, so the
+/// slowest part of a first build would look like a hang.
+fn pulled(images: &ImageStore, reference: &str) -> Result<Image, EngineError> {
+  match images.get(reference, false) {
+    Err(error) if error.is_code(Code::NotFound) => {
+      note(&format!("pulling {reference}"));
+      let meter = Meter::new();
+      let options = PullOptions {
+        progress: meter.handler(),
+        ..Default::default()
+      };
+
+      Ok(images.pull(reference, options)?)
+    }
+    image => Ok(image?),
+  }
 }
 
 /// What every step's container is made from.

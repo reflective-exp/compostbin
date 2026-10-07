@@ -13,6 +13,7 @@
 
 use super::files::partial;
 use super::note;
+use super::progress::Meter;
 use super::store::{INITFS_REFERENCE, KERNEL_IN_ARCHIVE, KERNEL_URL, Store};
 use crate::error::EngineError;
 use containerization_framework::containerization::container::Mount;
@@ -136,7 +137,9 @@ fn initfs(store: &Store) -> Result<(), EngineError> {
     Ok(_) => {}
   }
 
-  let image = images.get_init_image(INITFS_REFERENCE, None, None)?;
+  let meter = Meter::new();
+  let image = images.get_init_image(INITFS_REFERENCE, None, meter.handler())?;
+  drop(meter);
   // Unpacked aside and moved into place: no half-written file, no sharing
   // between concurrent first builds.
   let scratch = partial(directory).map_err(failed)?;

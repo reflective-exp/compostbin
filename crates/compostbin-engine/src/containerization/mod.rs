@@ -21,6 +21,7 @@ mod control;
 mod files;
 mod nat;
 mod oci;
+mod progress;
 mod provision;
 mod snapshots;
 mod spec;
