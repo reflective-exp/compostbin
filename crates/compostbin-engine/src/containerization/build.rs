@@ -20,7 +20,9 @@ use super::{nat, note, spec};
 use crate::error::EngineError;
 use crate::model::{BuildPlan, BuildStep};
 use containerization_framework::containerization::container::container_manager::RootfsCreateOptions;
-use containerization_framework::containerization::container::{ContainerManager, LinuxContainer, linux_container};
+use containerization_framework::containerization::container::{
+  ContainerManager, FilesystemOperation, LinuxContainer, linux_container,
+};
 use containerization_framework::containerization::image::{self, Ext4Unpacker, Image, ImageStore};
 use containerization_framework::containerization::process::LinuxProcessConfiguration;
 use containerization_framework::containerization::vm::{Kernel, SystemPlatform};
@@ -171,40 +173,39 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-  /// Runs the steps from `start`, snapshotting the rootfs after each.
-  ///
-  /// One container per step: the block is only consistent once `stop` has
-  /// unmounted it in the guest, so each snapshot costs a boot.
+  /// Runs the steps from `start` in one container, snapshotting the rootfs
+  /// after each.
   fn run(&self, start: usize, keys: &Salted, snapshots: &Snapshots) -> Result<(), EngineError> {
     let kernel = Kernel::new(self.store.kernel(), SystemPlatform::LINUX_ARM);
     let mut manager = ContainerManager::new(&kernel, &initfs_mount(self.store), self.images, Default::default())?;
+    let options = RootfsCreateOptions {
+      networking: false,
+      vm: spec::vm(self.plan.resources),
+      ..Default::default()
+    };
+    let container = manager.create_with_rootfs(
+      self.name,
+      self.base,
+      ext4_root(self.rootfs),
+      options,
+      self.configuration()?,
+    )?;
 
-    for index in start..self.plan.steps.len() {
-      let options = RootfsCreateOptions {
-        networking: false,
-        vm: spec::vm(self.plan.resources),
-        ..Default::default()
-      };
-      let container = manager.create_with_rootfs(
-        self.name,
-        self.base,
-        ext4_root(self.rootfs),
-        options,
-        self.configuration()?,
-      )?;
+    container.create()?;
+    container.start()?;
 
-      container.create()?;
-      container.start()?;
+    let ran = (start..self.plan.steps.len()).try_for_each(|index| {
+      self.step(&container, index)?;
+      snapshot(&container, self.rootfs, snapshots, &keys.steps[index])
+    });
 
-      if let Err(error) = self.step(&container, index) {
-        // Left for inspection, not cached; the next build sweeps it.
-        let _ = container.stop();
-        return Err(error);
-      }
-
-      container.stop()?;
-      snapshots.save_rootfs(self.rootfs, &keys.steps[index]);
+    if ran.is_err() {
+      // Left for inspection, not cached; the next build sweeps it.
+      let _ = container.stop();
+      return ran;
     }
+
+    container.stop()?;
 
     Ok(())
   }
@@ -274,6 +275,30 @@ impl Builder<'_> {
 
     Ok(())
   }
+}
+
+/// Saves `rootfs` under `key` while `container` runs on it.
+///
+/// Freezing flushes the guest's writes to the image file and holds new ones,
+/// so the clone is as consistent as after a `stop`. Trimming first keeps
+/// blocks the guest freed out of the clone. A failed trim costs only disk, a
+/// failed freeze only the cache entry; neither fails the build.
+fn snapshot(container: &LinuxContainer, rootfs: &Path, snapshots: &Snapshots, key: &str) -> Result<(), EngineError> {
+  // A device without discard support refuses this; nothing is lost.
+  let _ = container.filesystem_operation(FilesystemOperation::Trim, "/");
+
+  if let Err(error) = container.filesystem_operation(FilesystemOperation::Freeze, "/") {
+    note(&format!(
+      "could not cache the rootfs for {}: {error}",
+      &key[..12.min(key.len())]
+    ));
+    return Ok(());
+  }
+
+  snapshots.save_rootfs(rootfs, key);
+  container.filesystem_operation(FilesystemOperation::Thaw, "/")?;
+
+  Ok(())
 }
 
 /// The guest user named, as the image's `/etc/passwd` resolves it. `None` is
