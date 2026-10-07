@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+
+cargo nextest run \
+  --color always \
+  --features integration \
+  -E 'package(compostbin-test)'
