@@ -15,7 +15,8 @@ use super::files::partial;
 use super::note;
 use super::store::{INITFS_REFERENCE, KERNEL_IN_ARCHIVE, KERNEL_URL, Store};
 use crate::error::EngineError;
-use containerization_framework::containerization::{Mount, SystemPlatform};
+use containerization_framework::containerization::container::Mount;
+use containerization_framework::containerization::vm::SystemPlatform;
 use std::path::Path;
 use std::process::Command;
 
@@ -28,7 +29,7 @@ pub fn provision(store: &Store) -> Result<(), EngineError> {
 
 /// The init image, read-only, as `ContainerManager(initfs:)` boots it.
 pub fn initfs_mount(store: &Store) -> Mount {
-  Mount::block("ext4", store.initfs().display().to_string(), "/", &["ro"])
+  Mount::block("ext4", store.initfs().display().to_string(), "/", &["ro"], &[])
 }
 
 /// Downloads and unpacks the kernel, unless it is already there.
@@ -132,7 +133,7 @@ fn initfs(store: &Store) -> Result<(), EngineError> {
     note(&format!("pulling {INITFS_REFERENCE}"));
   }
 
-  let image = images.get_init_image(INITFS_REFERENCE)?;
+  let image = images.get_init_image(INITFS_REFERENCE, None, None)?;
   // Unpacked aside and moved into place: no half-written file, no sharing
   // between concurrent first builds.
   let scratch = partial(directory).map_err(failed)?;

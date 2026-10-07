@@ -8,8 +8,9 @@
 
 use super::files::{self, clone, partial};
 use crate::error::EngineError;
-use containerization_framework::containerization::{Ext4Unpacker, Image, Mount};
-use containerization_framework::containerization_oci::Platform;
+use containerization_framework::containerization::container::Mount;
+use containerization_framework::containerization::image::{Ext4Unpacker, Image};
+use containerization_framework::containerization_oci::image::Platform;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -26,7 +27,7 @@ const ABANDONED_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// An ext4 image file as the guest's root filesystem.
 pub fn ext4_root(rootfs: &Path) -> Mount {
-  Mount::block("ext4", rootfs.display().to_string(), "/", &[])
+  Mount::block("ext4", rootfs.display().to_string(), "/", &[], &[])
 }
 
 pub struct Unpacked {

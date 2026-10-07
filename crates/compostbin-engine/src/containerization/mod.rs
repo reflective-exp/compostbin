@@ -33,11 +33,11 @@ use crate::builder::Builder;
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::model::{BuildPlan, ExecSpec, RunSpec};
-use containerization_framework::containerization::container_manager::RootfsCreateOptions;
-use containerization_framework::containerization::{
-  ContainerManager, Kernel, LinuxContainer, LinuxProcess, LinuxProcessConfiguration, SystemPlatform,
-};
-use containerization_framework::containerization_oci::Platform;
+use containerization_framework::containerization::container::container_manager::RootfsCreateOptions;
+use containerization_framework::containerization::container::{ContainerManager, LinuxContainer};
+use containerization_framework::containerization::process::{LinuxProcess, LinuxProcessConfiguration};
+use containerization_framework::containerization::vm::{Kernel, SystemPlatform};
+use containerization_framework::containerization_oci::image::Platform;
 use std::collections::HashMap;
 use std::error::Error;
 use std::os::fd::{AsRawFd, RawFd};
@@ -247,7 +247,12 @@ impl FrameworkEngine {
 
     let images = self.store.images()?;
     let kernel = Kernel::new(self.store.kernel(), SystemPlatform::LINUX_ARM);
-    let mut manager = ContainerManager::new(&kernel, &provision::initfs_mount(&self.store), &images, false, false)?;
+    let mut manager = ContainerManager::new(
+      &kernel,
+      &provision::initfs_mount(&self.store),
+      &images,
+      Default::default(),
+    )?;
     let image = images.get(&spec.image, true)?;
     let platform = Platform::current()?;
 
@@ -264,7 +269,7 @@ impl FrameworkEngine {
       vm: spec::vm(spec.resources),
       ..Default::default()
     };
-    let container = manager.create_with_rootfs(&spec.name, &image, rootfs, options, spec::configure(spec))?;
+    let container = manager.create_with_rootfs(&spec.name, &image, rootfs, options, spec::configure(spec)?)?;
 
     container.create()?;
     container.start()?;

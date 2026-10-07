@@ -291,18 +291,18 @@ in an image whose config names `claude`.
 So the image config is kept from boot, and every attach seeds itself from it
 before applying the session's arguments and environment.
 
-The Swift side lives in `crates/containerization-framework/swift`, bridged to
-the crate around it with
+Compostbin reaches Containerization through
+[`containerization-framework`](https://github.com/synchronal/containerization-framework),
+a Rust binding of its Swift API, bridged with
 [swift-bridge](https://github.com/chinedufn/swift-bridge). It needs Xcode 26
-and macOS 26; `cargo build` stages the package into `<target>/<profile>` and runs
-`swift build` there from that crate's `build.rs`.
+and macOS 26; `cargo build` stages the Swift package into `<target>/<profile>`
+and runs `swift build` there from that crate's `build.rs`.
 
-`containerization-framework` is a general binding, published on its own and
-holding nothing of compostbin's: it takes a container to boot and an image to
-build, and everything it would otherwise have to decide — where a guest sits on
-the NAT network, what a builder is called, what shell runs a build step, what
-invalidates a cached step — arrives from the caller.
-`compostbin-engine::containerization` is where compostbin decides those.
+The binding holds nothing of compostbin's: it mirrors Containerization's types,
+so everything Containerization leaves to the caller — where a guest sits on the
+NAT network, which kernel and init image boot, how an image is built, what a
+builder is called, what invalidates a cached step — is decided in
+`compostbin-engine::containerization`.
 
 Two non-obvious requirements:
 
@@ -325,10 +325,10 @@ Two non-obvious requirements:
   `compostbin build` provisions whatever is missing, so nothing in it must be
   kept and `clean` never touches it.
 
-The `vminit` reference pinned in
-`crates/containerization-framework/src/store.rs` and the package version pinned
-in that crate's `swift/Package.swift` are two ends of one protocol (guest agent
-and library) and must move together.
+The `vminit` version pinned in `crates/compostbin-engine/src/containerization/store.rs`
+and the Containerization release `containerization-framework` pins in its
+`swift/Package.swift` are two ends of one protocol (guest agent and library)
+and must move together.
 
 ## Development
 

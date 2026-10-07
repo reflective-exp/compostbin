@@ -2,8 +2,9 @@
 //! writing a built rootfs into the store as an image of one layer.
 
 use crate::error::EngineError;
-use containerization_framework::containerization::Image;
-use containerization_framework::containerization_oci::{ContentWriter, Descriptor, LocalContentStore, Platform};
+use containerization_framework::containerization::image::Image;
+use containerization_framework::containerization_oci::content::{ContentWriter, LocalContentStore};
+use containerization_framework::containerization_oci::image::{Descriptor, Platform};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};

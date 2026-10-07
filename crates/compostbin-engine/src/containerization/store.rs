@@ -11,8 +11,8 @@
 //! Everything is re-creatable by `provision` and `build`, hence `~/.cache`.
 
 use crate::error::EngineError;
-use containerization_framework::containerization::{Image, ImageStore};
-use containerization_framework::containerization_oci::LocalContentStore;
+use containerization_framework::containerization::image::{Image, ImageStore};
+use containerization_framework::containerization_oci::content::LocalContentStore;
 use std::fmt;
 use std::path::{Path, PathBuf};
 

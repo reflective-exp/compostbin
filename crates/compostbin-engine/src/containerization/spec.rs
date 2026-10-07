@@ -6,7 +6,8 @@
 
 use super::nat;
 use crate::model::{EnvVar, Resources, RunSpec, SocketRelay};
-use containerization_framework::containerization::{Mount, UnixSocketConfiguration, VmResources, linux_container};
+use containerization_framework::containerization::container::{Mount, UnixSocketConfiguration, linux_container};
+use containerization_framework::containerization::vm::VmResources;
 use std::path::Path;
 
 /// `NAME=VALUE`.
@@ -35,7 +36,7 @@ pub fn working_directory(workdir: Option<&Path>) -> String {
 pub fn share(source: &Path, destination: impl Into<String>, readonly: bool) -> Mount {
   let options: &[&str] = if readonly { &["ro"] } else { &[] };
 
-  Mount::share(source.display().to_string(), destination, options)
+  Mount::share(source.display().to_string(), destination, options, &[])
 }
 
 /// Mode `0o666`, so an unprivileged guest user can connect.
@@ -57,12 +58,14 @@ pub fn vm(resources: Resources) -> VmResources {
 
 /// A session's container, on its own address, over the configuration the
 /// manager seeded from its image.
-pub fn configure(spec: &RunSpec) -> impl FnOnce(&mut linux_container::Configuration) + Send + 'static {
+pub fn configure(
+  spec: &RunSpec,
+) -> Result<impl FnOnce(&mut linux_container::Configuration) + Send + 'static, containerization_framework::Error> {
   let resources = spec.resources;
   let arguments = spec.arguments.clone();
   let environment = environment(&spec.env);
   let working_directory = working_directory(spec.workdir.as_deref());
-  let interface = nat::interface(&spec.name);
+  let interface = nat::interface(&spec.name)?;
   let mounts: Vec<Mount> = spec
     .mounts
     .iter()
@@ -70,7 +73,7 @@ pub fn configure(spec: &RunSpec) -> impl FnOnce(&mut linux_container::Configurat
     .collect();
   let sockets = spec.sockets.iter().map(socket).collect();
 
-  move |configuration| {
+  Ok(move |configuration: &mut linux_container::Configuration| {
     configuration.cpus = resources.cpus;
     configuration.memory_in_bytes = resources.memory_in_bytes;
     configuration.process.arguments = arguments;
@@ -84,7 +87,7 @@ pub fn configure(spec: &RunSpec) -> impl FnOnce(&mut linux_container::Configurat
     configuration.dns = Some(nat::dns());
     configuration.mounts.extend(mounts);
     configuration.sockets = sockets;
-  }
+  })
 }
 
 /// The builder container's id (and store directory). Random, so concurrent
@@ -100,8 +103,8 @@ pub fn builder_name() -> Result<String, getrandom::Error> {
 mod tests {
   use super::*;
   use crate::model::Mount as SessionMount;
-  use containerization_framework::containerization::LinuxContainer;
-  use containerization_framework::containerization::unix_socket_configuration::Direction;
+  use containerization_framework::containerization::container::LinuxContainer;
+  use containerization_framework::containerization::container::unix_socket_configuration::Direction;
   use std::path::PathBuf;
 
   #[test]
@@ -163,7 +166,7 @@ mod tests {
     let mut configuration = linux_container::Configuration::default();
     configuration.process.environment_variables = vec!["PATH=/usr/bin".to_string()];
 
-    configure(&run_spec())(&mut configuration);
+    configure(&run_spec()).unwrap()(&mut configuration);
 
     configuration
   }
@@ -172,7 +175,7 @@ mod tests {
   fn boots_a_session_onto_its_own_nat_address() {
     let configuration = configured();
 
-    assert_eq!(configuration.interfaces, [nat::interface("session-one")]);
+    assert_eq!(configuration.interfaces, [nat::interface("session-one").unwrap()]);
     assert_eq!(configuration.dns, Some(nat::dns()));
     assert_eq!(configuration.process.working_directory, "/workspace");
   }
@@ -192,7 +195,10 @@ mod tests {
     let (defaults, declared) = configuration.mounts.split_at(standard.len());
 
     assert_eq!(defaults, standard);
-    assert_eq!(declared, [Mount::share("/Users/user/workspace", "/workspace", &["ro"])]);
+    assert_eq!(
+      declared,
+      [Mount::share("/Users/user/workspace", "/workspace", &["ro"], &[])]
+    );
   }
 
   #[test]

@@ -12,7 +12,7 @@
 use super::cache::Keys;
 use super::files::{clone, partial};
 use super::{note, oci};
-use containerization_framework::containerization_oci::Descriptor;
+use containerization_framework::containerization_oci::image::Descriptor;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};

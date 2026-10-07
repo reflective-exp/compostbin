@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Update containerization-framework to v0.4.0.
+
 ## v0.13.0
 
 - Update containerization-framework to v0.3.0.

@@ -4,7 +4,8 @@
 //! agent sets its address directly — so something has to allocate, and that is
 //! compostbin's choice rather than the framework's.
 
-use containerization_framework::containerization::{Dns, NatInterface};
+use containerization_framework::containerization::network::{Dns, Interface, NatInterface};
+use containerization_framework::containerization_extras::address::{CIDRv4, IPv4Address};
 
 /// Gateway of Virtualization.framework's built-in NAT (macOS shared networking).
 ///
@@ -22,8 +23,11 @@ const LAST_HOST: u32 = 250;
 /// session name: stable per session, distinct between concurrent sessions.
 ///
 /// Collisions with other hosts on the shared network go undetected.
-pub fn interface(name: &str) -> NatInterface {
-  NatInterface::new(address(name), GATEWAY)
+pub fn interface(name: &str) -> Result<Interface, containerization_framework::Error> {
+  Ok(Interface::Nat(NatInterface::new(
+    CIDRv4::parse(&address(name))?,
+    Some(IPv4Address::parse(GATEWAY)?),
+  )))
 }
 
 /// Names resolve through the gateway, which forwards to the host's resolver.
@@ -57,17 +61,17 @@ mod tests {
 
   #[test]
   fn gives_a_session_a_stable_address_on_the_nat_network() {
-    let first = interface("session-one");
+    let first = interface("session-one").unwrap();
 
-    assert_eq!(interface("session-one"), first);
-    assert_ne!(interface("session-two"), first);
-    assert_eq!(first.ipv4_gateway.as_deref(), Some(GATEWAY));
+    assert_eq!(interface("session-one").unwrap(), first);
+    assert_ne!(interface("session-two").unwrap(), first);
+    assert_eq!(first.ipv4_gateway(), Some(IPv4Address::parse(GATEWAY).unwrap()));
   }
 
   #[test]
   fn keeps_every_address_inside_the_gateways_subnet() {
     for name in ["a", "session-one", "session-two", "", "-"] {
-      let address = interface(name).ipv4_address;
+      let address = address(name);
       let host: u32 = address
         .strip_prefix("192.168.64.")
         .and_then(|rest| rest.strip_suffix("/24"))

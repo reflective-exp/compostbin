@@ -42,7 +42,7 @@ impl Error for EngineError {}
 impl From<containerization_framework::Error> for EngineError {
   fn from(error: containerization_framework::Error) -> Self {
     match error {
-      containerization_framework::Error::Failed { action, message } => Self::Failed { action, message },
+      containerization_framework::Error::Failed { action, message, .. } => Self::Failed { action, message },
       containerization_framework::Error::Unavailable { action, message } => Self::Unavailable { action, message },
     }
   }

@@ -19,13 +19,15 @@ use super::unpacked::{ROOTFS_SIZE_IN_BYTES, Unpacked, ext4_root};
 use super::{nat, note, spec};
 use crate::error::EngineError;
 use crate::model::{BuildPlan, BuildStep};
-use containerization_framework::containerization::container_manager::RootfsCreateOptions;
-use containerization_framework::containerization::{
-  ContainerManager, Ext4Unpacker, Image, ImageStore, Kernel, LinuxContainer, LinuxProcessConfiguration, SystemPlatform,
-  image,
-};
+use containerization_framework::containerization::container::container_manager::RootfsCreateOptions;
+use containerization_framework::containerization::container::{ContainerManager, LinuxContainer, linux_container};
+use containerization_framework::containerization::image::{self, Ext4Unpacker, Image, ImageStore};
+use containerization_framework::containerization::process::LinuxProcessConfiguration;
+use containerization_framework::containerization::vm::{Kernel, SystemPlatform};
 use containerization_framework::containerization_ext4::ext4::Ext4Reader;
-use containerization_framework::containerization_oci::{Descriptor, LocalContentStore, Platform, User};
+use containerization_framework::containerization_oci::content::LocalContentStore;
+use containerization_framework::containerization_oci::image::{Descriptor, Platform};
+use containerization_framework::containerization_oci::runtime::User;
 use serde_json::Value;
 use std::path::Path;
 
@@ -174,7 +176,7 @@ impl Builder<'_> {
   /// unmounted it in the guest, so each snapshot costs a boot.
   fn run(&self, start: usize, keys: &Salted, snapshots: &Snapshots) -> Result<(), EngineError> {
     let kernel = Kernel::new(self.store.kernel(), SystemPlatform::LINUX_ARM);
-    let mut manager = ContainerManager::new(&kernel, &initfs_mount(self.store), self.images, false, false)?;
+    let mut manager = ContainerManager::new(&kernel, &initfs_mount(self.store), self.images, Default::default())?;
 
     for index in start..self.plan.steps.len() {
       let options = RootfsCreateOptions {
@@ -187,7 +189,7 @@ impl Builder<'_> {
         self.base,
         ext4_root(self.rootfs),
         options,
-        self.configuration(),
+        self.configuration()?,
       )?;
 
       container.create()?;
@@ -210,8 +212,7 @@ impl Builder<'_> {
   /// network (steps that install anything need it), with the plan's mounts.
   fn configuration(
     &self,
-  ) -> impl FnOnce(&mut containerization_framework::containerization::linux_container::Configuration) + Send + 'static
-  {
+  ) -> Result<impl FnOnce(&mut linux_container::Configuration) + Send + 'static, containerization_framework::Error> {
     let resources = self.plan.resources;
     let environment = self.environment.to_vec();
     let mounts: Vec<_> = self
@@ -220,9 +221,9 @@ impl Builder<'_> {
       .iter()
       .map(|mount| spec::share(&mount.source, mount.destination.clone(), true))
       .collect();
-    let interface = nat::interface(self.name);
+    let interface = nat::interface(self.name)?;
 
-    move |configuration| {
+    Ok(move |configuration: &mut linux_container::Configuration| {
       configuration.cpus = resources.cpus;
       configuration.memory_in_bytes = resources.memory_in_bytes;
       configuration.process.arguments = KEEPALIVE.map(String::from).to_vec();
@@ -232,7 +233,7 @@ impl Builder<'_> {
       configuration.mounts.extend(mounts);
       configuration.interfaces = vec![interface];
       configuration.dns = Some(nat::dns());
-    }
+    })
   }
 
   /// Runs one step to completion, its output on this process's stderr,
