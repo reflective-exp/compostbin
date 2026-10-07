@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.14.0
+
 - Update containerization-framework to v0.4.0.
 - Show progress on a terminal while `build` pulls its base or the init image.
 
