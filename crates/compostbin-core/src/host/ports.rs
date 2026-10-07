@@ -1,20 +1,17 @@
-//! Relaying declared host ports to the guest, one unix socket per port (D11).
+//! Relaying declared host ports to the guest, one vsock port per port (D11).
 //!
-//! The guest's own relay turns `localhost:<port>` into a connection to
-//! `/run/compostbin/ports/<port>.sock`; this is the other half, accepting there
-//! and connecting to the host's `127.0.0.1:<port>`. The socket itself is relayed
-//! into the guest over vsock rather than mounted there, so nothing listens on a
-//! network address and no other container can reach a forwarded port.
+//! The guest's own relay turns `localhost:<port>` into a vsock connection to
+//! the host; this is the other half, accepting there and connecting to the
+//! host's `127.0.0.1:<port>`. Vsock reaches only the VM that dialed it, so
+//! nothing listens on a network address and no other container can reach a
+//! forwarded port.
 
-use crate::host::GUEST_PORTS_TARGET;
 use crate::host::agent::POLL_INTERVAL;
-use std::fs;
+use compostbin_engine::engine::{Engine, Listener};
+use compostbin_engine::error::EngineError;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -22,26 +19,21 @@ use std::time::Duration;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const BUFFER_SIZE: usize = 16 * 1024;
 
-/// The guest end of the relay is `root:root` with this mode copied, and the
-/// session runs as `claude`, so anything narrower is refused inside the
-/// container. The session directory confines these, not the socket mode.
-const SOCKET_MODE: u32 = 0o666;
-const SOCKET_SUFFIX: &str = ".sock";
+/// Added to a forwarded port to give its vsock port, well clear of the low
+/// ports Containerization's own guest agent uses.
+const VSOCK_PORT_BASE: u32 = 0x7000_0000;
 
-/// One declared port: the socket the guest reaches through, and the host
-/// service behind it.
+/// One declared port: the vsock port the guest reaches it through, and the
+/// host service behind it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Forward {
-  pub listen: PathBuf,
   pub upstream: SocketAddr,
 }
 
 impl Forward {
-  /// The same port on both sides, which is all the manifest can say. The socket
-  /// is named after the port so the guest can find it without being told.
-  pub fn to_loopback(directory: &Path, port: u16) -> Self {
+  /// The same port on both sides, which is all the manifest can say.
+  pub fn to_loopback(port: u16) -> Self {
     Self {
-      listen: directory.join(socket_name(port)),
       upstream: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
     }
   }
@@ -50,31 +42,29 @@ impl Forward {
     self.upstream.port()
   }
 
-  /// Where the guest's relay looks for this port's socket.
-  pub fn guest_target(&self) -> PathBuf {
-    Path::new(GUEST_PORTS_TARGET).join(socket_name(self.port()))
+  /// Derived from the port, so neither side has to be told the other's.
+  pub fn vsock_port(&self) -> u32 {
+    VSOCK_PORT_BASE + u32::from(self.port())
+  }
+
+  /// `<port>:<vsock port>`, as the guest's relay takes each one.
+  pub fn guest_argument(&self) -> String {
+    format!("{}:{}", self.port(), self.vsock_port())
   }
 }
 
-fn socket_name(port: u16) -> String {
-  format!("{port}{SOCKET_SUFFIX}")
-}
-
-/// A bound listener. It must outlive the container created with it: the relay
-/// is attached to the inode that existed at creation, so a socket unlinked and
-/// rebound at the same path leaves the guest with a dead socket that only
-/// recreating the container heals.
-#[derive(Debug)]
+/// A forward the engine is listening for. It lives as long as the VM, which
+/// dies with the process holding it.
 pub struct Bound {
   forward: Forward,
-  listener: UnixListener,
+  listener: Box<dyn Listener>,
 }
 
 /// What the relay has to say, left to the caller to print: core does not own
 /// the terminal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PortEvent {
-  /// Bound, and so ready to be mounted into a container.
+  /// Listening, and so ready for the guest to connect.
   Listening(Forward),
   /// Nothing answers upstream. Once per run of failures, since a client
   /// retrying against a server that is not up yet would flood the terminal.
@@ -96,98 +86,61 @@ impl std::fmt::Display for PortEvent {
   }
 }
 
-/// Binds every forward, reporting each as it comes up. All or nothing: a
-/// container started with some sockets missing forwards only some ports until
-/// it is recreated.
-pub fn bind_all(forwards: &[Forward], report: &(dyn Fn(PortEvent) + Sync)) -> io::Result<Vec<Bound>> {
+/// Listens for every forward into the running container `name`, reporting each
+/// as it comes up. All or nothing, so a session never forwards only some of
+/// what it declared.
+pub fn listen_all(
+  engine: &impl Engine,
+  name: &str,
+  forwards: &[Forward],
+  report: &(dyn Fn(PortEvent) + Sync),
+) -> Result<Vec<Bound>, EngineError> {
   let mut bound = Vec::with_capacity(forwards.len());
 
   for forward in forwards {
-    bound.push(bind(forward)?);
+    bound.push(Bound {
+      forward: forward.clone(),
+      listener: engine.listen(name, forward.vsock_port())?,
+    });
     report(PortEvent::Listening(forward.clone()));
   }
 
   Ok(bound)
 }
 
-/// Binds one forward, replacing whatever sits at the path first — a socket left
-/// by a session that died, or a symlink where the mount source belongs, which
-/// would take the container down at start rather than degrade.
-fn bind(forward: &Forward) -> io::Result<Bound> {
-  if let Some(parent) = forward.listen.parent() {
-    fs::create_dir_all(parent)?;
-  }
-
-  match fs::remove_file(&forward.listen) {
-    Ok(()) => {}
-    Err(error) if error.kind() == ErrorKind::NotFound => {}
-    Err(error) => return Err(error),
-  }
-
-  let listener = UnixListener::bind(&forward.listen)?;
-  listener.set_nonblocking(true)?;
-  fs::set_permissions(&forward.listen, fs::Permissions::from_mode(SOCKET_MODE))?;
-
-  Ok(Bound {
-    forward: forward.clone(),
-    listener,
-  })
-}
-
-/// Relays every bound socket until `stop` is set, then returns once every
+/// Relays every bound forward until `stop` is set, then returns once every
 /// connection has closed.
 pub fn relay(bound: &[Bound], stop: &AtomicBool, report: &(dyn Fn(PortEvent) + Sync)) {
-  // Outside the scope, so connection threads can borrow them.
-  let refused: Vec<AtomicBool> = bound.iter().map(|_| AtomicBool::new(false)).collect();
-  // Built once: `poll` overwrites `revents` and leaves the rest alone.
-  let mut waiting: Vec<libc::pollfd> = bound
-    .iter()
-    .map(|bound| libc::pollfd {
-      fd: bound.listener.as_raw_fd(),
-      events: libc::POLLIN,
-      revents: 0,
-    })
-    .collect();
-
   std::thread::scope(|scope| {
-    while !stop.load(Ordering::Relaxed) {
-      // Woken by a connection, so accepting never waits out `POLL_INTERVAL`.
-      if !ready_to_accept(&mut waiting, POLL_INTERVAL) {
-        continue;
-      }
+    for bound in bound {
+      scope.spawn(move || accept(bound, stop, report));
+    }
 
-      for (bound, refused) in bound.iter().zip(&refused) {
-        // Every connection waiting, not one per wake.
-        while let Ok((guest, _)) = bound.listener.accept() {
-          let forward = &bound.forward;
-          scope.spawn(move || connect(guest, forward, refused, stop, report));
-        }
-      }
+    while !stop.load(Ordering::Relaxed) {
+      std::thread::sleep(POLL_INTERVAL);
+    }
+
+    // An `accept` watches no flag; finishing is what ends it.
+    for bound in bound {
+      bound.listener.finish();
     }
   });
 }
 
-/// Waits for a connection on any listener. `false` means the deadline passed,
-/// so the caller can re-check `stop`; a blocking `accept` watches one socket and
-/// never times out.
-fn ready_to_accept(waiting: &mut [libc::pollfd], timeout: Duration) -> bool {
-  // SAFETY: `waiting` is a live slice of the length passed, and each descriptor
-  // belongs to a listener the caller holds across the call.
-  let ready = unsafe {
-    libc::poll(
-      waiting.as_mut_ptr(),
-      waiting.len() as libc::nfds_t,
-      timeout.as_millis() as libc::c_int,
-    )
-  };
+/// Every connection to one forward, each on a thread of its own, until its
+/// listener finishes.
+fn accept(bound: &Bound, stop: &AtomicBool, report: &(dyn Fn(PortEvent) + Sync)) {
+  let refused = AtomicBool::new(false);
 
-  // Retrying handles any error (likely `EINTR`), but returning at once would
-  // spin, so wait out the interval `poll` did not.
-  if ready < 0 {
-    std::thread::sleep(timeout);
-  }
-
-  ready > 0
+  std::thread::scope(|scope| {
+    while let Some(guest) = bound.listener.accept() {
+      // A vsock socket, not a unix one, but this uses only what every stream
+      // socket answers alike: reads, writes, shutdown and timeouts.
+      let guest = UnixStream::from(guest);
+      let refused = &refused;
+      scope.spawn(move || connect(guest, &bound.forward, refused, stop, report));
+    }
+  });
 }
 
 /// One guest connection, relayed until both directions have ended.
@@ -226,8 +179,8 @@ fn connect(
   });
 }
 
-/// The two ends of a relayed connection: a unix socket to the guest, a TCP
-/// stream to the service.
+/// The two ends of a relayed connection: a socket to the guest, a TCP stream to
+/// the service.
 ///
 /// `read_some` and `write_some` restate `Read` and `Write` for `&Self`. A
 /// `for<'a> &'a Self: Read + Write` bound instead would not carry to `splice`
@@ -238,8 +191,9 @@ trait Stream: Sync {
   fn write_some(&self, data: &[u8]) -> io::Result<usize>;
   fn shutdown_write(&self) -> io::Result<()>;
 
-  /// Blocking, since accepted sockets inherit the listener's non-blocking mode
-  /// on macOS, but never for longer than a poll: every wait re-checks `stop`.
+  /// Blocking, since an accepted socket may inherit its listener's
+  /// non-blocking mode, but never for longer than a poll: every wait re-checks
+  /// `stop`.
   fn configure(&self) -> io::Result<()>;
 }
 
@@ -337,13 +291,13 @@ fn waiting(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use compostbin_engine::containerization::served;
+  use compostbin_engine::fake::{Call, RecordingEngine};
   use std::net::TcpListener;
   use std::sync::Mutex;
   use std::time::Instant;
-  use tempfile::TempDir;
 
   const DEADLINE: Duration = Duration::from_secs(5);
+  const NAME: &str = "cb-ports";
 
   /// A port nothing is listening on, found by binding and letting go.
   fn free_port() -> SocketAddr {
@@ -386,11 +340,11 @@ mod tests {
     }
   }
 
-  /// An upstream listener and the address a forward reaches it at.
-  fn upstream_listener() -> (TcpListener, SocketAddr) {
+  /// An upstream listener and the forward that reaches it.
+  fn upstream_listener() -> (TcpListener, Forward) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
-    let address = listener.local_addr().expect("upstream address");
-    (listener, address)
+    let upstream = listener.local_addr().expect("upstream address");
+    (listener, Forward { upstream })
   }
 
   /// Reads everything the guest sends, then echoes it back — so a reply at all
@@ -417,8 +371,10 @@ mod tests {
     }
   }
 
-  fn round_trip(socket: &Path, message: &str) -> String {
-    let mut guest = UnixStream::connect(socket).expect("connect to the relay");
+  fn round_trip(engine: &RecordingEngine, forward: &Forward, message: &str) -> String {
+    let mut guest = engine
+      .connect(forward.vsock_port())
+      .expect("connect to the relay");
     guest.write_all(message.as_bytes()).expect("send");
     guest.shutdown(Shutdown::Write).expect("half-close");
     let mut reply = String::new();
@@ -426,116 +382,75 @@ mod tests {
     reply
   }
 
-  /// A forward whose socket lives in `directory` and whose upstream is a real
-  /// address, so only the guest side is under test.
-  fn forward(directory: &TempDir, upstream: SocketAddr) -> Forward {
-    Forward {
-      listen: directory.path().join(format!("{}.sock", upstream.port())),
-      upstream,
-    }
-  }
-
   fn record(events: &Mutex<Vec<PortEvent>>) -> impl Fn(PortEvent) + Sync {
     |event| events.lock().expect("events").push(event)
   }
 
-  #[test]
-  fn names_a_socket_after_its_port() {
-    let forward = Forward::to_loopback(Path::new("/state/ports"), 7001);
+  fn listening(engine: &RecordingEngine, forward: &Forward, events: &Mutex<Vec<PortEvent>>) -> Vec<Bound> {
+    listen_all(engine, NAME, std::slice::from_ref(forward), &record(events)).expect("listen")
+  }
 
-    assert_eq!(forward.listen, PathBuf::from("/state/ports/7001.sock"));
+  #[test]
+  fn derives_a_vsock_port_from_the_forwarded_one() {
+    let forward = Forward::to_loopback(7001);
+
     assert_eq!(
       forward.upstream,
       "127.0.0.1:7001".parse::<SocketAddr>().expect("an address")
     );
     assert_eq!(forward.port(), 7001);
-    assert_eq!(forward.guest_target(), PathBuf::from("/run/compostbin/ports/7001.sock"));
+    assert_eq!(forward.vsock_port(), 0x7000_0000 + 7001);
+    assert_eq!(forward.guest_argument(), format!("7001:{}", 0x7000_0000 + 7001));
   }
 
-  /// The guest end is root-owned with this mode copied, and the session is not
-  /// root: anything narrower is unreachable from inside the container.
   #[test]
-  fn binds_world_accessible() {
-    let directory = TempDir::new().expect("temp dir");
-    let forward = forward(&directory, free_port());
+  fn listens_on_each_forwards_vsock_port() {
+    let engine = RecordingEngine::new();
+    let forwards = [Forward::to_loopback(7001), Forward::to_loopback(7002)];
     let events = Mutex::new(Vec::new());
 
-    let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
+    let bound = listen_all(&engine, NAME, &forwards, &record(&events)).expect("listen");
 
-    let mode = fs::metadata(&forward.listen)
-      .expect("the socket")
-      .permissions()
-      .mode();
-    assert_eq!(mode & 0o777, SOCKET_MODE, "{mode:o}");
-    assert_eq!(bound.len(), 1);
-    assert_eq!(events.into_inner().expect("events"), [PortEvent::Listening(forward)]);
-  }
-
-  /// A session that died leaves its socket behind; the next one owns the path.
-  #[test]
-  fn binding_replaces_a_stale_socket() {
-    let directory = TempDir::new().expect("temp dir");
-    let forward = forward(&directory, free_port());
-    let events = Mutex::new(Vec::new());
-
-    let stale = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
-    drop(stale);
-    assert!(forward.listen.exists(), "the path outlives the listener");
-    assert!(!served(&forward.listen), "nothing is accepting on it");
-
-    // Bound, not dropped: the listener is what makes the socket answer.
-    let _rebound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("rebind");
-    assert!(served(&forward.listen));
-  }
-
-  /// Keeps a second `run` from unbinding the session's live relay.
-  #[test]
-  fn served_is_true_only_while_something_accepts() {
-    let directory = TempDir::new().expect("temp dir");
-    let forward = forward(&directory, free_port());
-    let events = Mutex::new(Vec::new());
-
-    assert!(!served(&forward.listen), "nothing is bound yet");
-
-    let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
-    assert!(served(&forward.listen));
-
-    drop(bound);
-    assert!(!served(&forward.listen));
+    assert_eq!(bound.len(), 2);
+    assert_eq!(
+      engine.calls(),
+      forwards
+        .each_ref()
+        .map(|forward| Call::Listen(NAME.to_string(), forward.vsock_port()))
+    );
+    assert_eq!(events.into_inner().expect("events"), forwards.map(PortEvent::Listening));
   }
 
   #[test]
   fn relays_after_half_close() {
-    let directory = TempDir::new().expect("temp dir");
-    let (upstream, address) = upstream_listener();
-    let forward = forward(&directory, address);
+    let engine = RecordingEngine::new();
+    let (upstream, forward) = upstream_listener();
     let stop = AtomicBool::new(false);
     let events = Mutex::new(Vec::new());
-    let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
+    let bound = listening(&engine, &forward, &events);
 
     std::thread::scope(|scope| {
       let _stop = StopOnDrop(&stop);
       scope.spawn(|| relay(&bound, &stop, &record(&events)));
       scope.spawn(|| serve_echo(&upstream));
 
-      assert_eq!(round_trip(&forward.listen, "hello"), "hello");
+      assert_eq!(round_trip(&engine, &forward, "hello"), "hello");
 
       stop.store(true, Ordering::Relaxed);
     });
   }
 
-  /// Accepting must not wait for a `POLL_INTERVAL` sweep. Timed because prompt
-  /// and eventual differ only in duration; the budget is a quarter interval each.
+  /// Accepting must not wait out a `POLL_INTERVAL`. Timed because prompt and
+  /// eventual differ only in duration; the budget is a quarter interval each.
   #[test]
-  fn accepts_without_waiting_for_a_sweep() {
+  fn accepts_without_waiting_for_a_poll() {
     const CONNECTIONS: u32 = 10;
 
-    let directory = TempDir::new().expect("temp dir");
-    let (upstream, address) = upstream_listener();
-    let forward = forward(&directory, address);
+    let engine = RecordingEngine::new();
+    let (upstream, forward) = upstream_listener();
     let stop = AtomicBool::new(false);
     let events = Mutex::new(Vec::new());
-    let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
+    let bound = listening(&engine, &forward, &events);
 
     std::thread::scope(|scope| {
       let _stop = StopOnDrop(&stop);
@@ -544,7 +459,7 @@ mod tests {
 
       let started = Instant::now();
       for _ in 0..CONNECTIONS {
-        assert_eq!(round_trip(&forward.listen, "hello"), "hello");
+        assert_eq!(round_trip(&engine, &forward, "hello"), "hello");
       }
       let elapsed = started.elapsed();
 
@@ -552,18 +467,18 @@ mod tests {
 
       assert!(
         elapsed < POLL_INTERVAL * CONNECTIONS / 4,
-        "{CONNECTIONS} round trips took {elapsed:?}, so each waited for a sweep rather than waking one"
+        "{CONNECTIONS} round trips took {elapsed:?}, so each waited for a poll"
       );
     });
   }
 
   #[test]
   fn refused_upstream_reports_once() {
-    let directory = TempDir::new().expect("temp dir");
-    let forward = forward(&directory, free_port());
+    let engine = RecordingEngine::new();
+    let forward = Forward { upstream: free_port() };
     let stop = AtomicBool::new(false);
     let events = Mutex::new(Vec::new());
-    let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
+    let bound = listening(&engine, &forward, &events);
 
     std::thread::scope(|scope| {
       let _stop = StopOnDrop(&stop);
@@ -571,7 +486,7 @@ mod tests {
 
       for _ in 0..2 {
         assert_eq!(
-          round_trip(&forward.listen, "hello"),
+          round_trip(&engine, &forward, "hello"),
           "",
           "a refused upstream closes the guest"
         );
@@ -589,21 +504,23 @@ mod tests {
     assert_eq!(refusals, 1);
   }
 
-  /// An idle connection must not keep the session's exit waiting.
+  /// An idle connection must not keep the session's exit waiting, and the guest
+  /// is refused from then on.
   #[test]
   fn stops_with_a_connection_open() {
-    let directory = TempDir::new().expect("temp dir");
-    let (upstream, address) = upstream_listener();
-    let forward = forward(&directory, address);
+    let engine = RecordingEngine::new();
+    let (upstream, forward) = upstream_listener();
     let stop = AtomicBool::new(false);
     let events = Mutex::new(Vec::new());
-    let bound = bind_all(std::slice::from_ref(&forward), &record(&events)).expect("bind");
+    let bound = listening(&engine, &forward, &events);
 
     std::thread::scope(|scope| {
       let _stop = StopOnDrop(&stop);
       let relaying = scope.spawn(|| relay(&bound, &stop, &record(&events)));
 
-      let _guest = UnixStream::connect(&forward.listen).expect("connect to the relay");
+      let _guest = engine
+        .connect(forward.vsock_port())
+        .expect("connect to the relay");
       let _held = accept_within(&upstream);
 
       stop.store(true, Ordering::Relaxed);
@@ -615,32 +532,10 @@ mod tests {
         stopped.elapsed()
       );
     });
-  }
 
-  /// Every socket or none: a container created with half its ports bound would
-  /// forward half of them until it was recreated.
-  #[test]
-  fn binding_fails_whole() {
-    let directory = TempDir::new().expect("temp dir");
-    let good = forward(&directory, free_port());
-    let unbindable = Forward {
-      listen: directory
-        .path()
-        .join("missing")
-        .join("nested")
-        .join("7002.sock"),
-      upstream: free_port(),
-    };
-    fs::write(directory.path().join("missing"), "not a directory").expect("a file in the way");
-    let events = Mutex::new(Vec::new());
-
-    let error = bind_all(&[good.clone(), unbindable], &record(&events)).expect_err("should fail");
-
-    assert!(!matches!(error.kind(), ErrorKind::NotFound), "{error}");
-    assert_eq!(
-      events.into_inner().expect("events"),
-      [PortEvent::Listening(good)],
-      "the forwards before the failure were reported, and the caller gives up"
+    assert!(
+      engine.connect(forward.vsock_port()).is_err(),
+      "a stopped relay finishes its listeners"
     );
   }
 }

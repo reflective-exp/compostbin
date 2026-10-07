@@ -49,7 +49,7 @@ pub fn diagnose(
     mounts::root_breadth(session),
     host::credentials(session, credentials, api_key_present),
     host::allowlist(session),
-    host::ports(session, running),
+    host::ports(session),
   ]
 }
 
@@ -454,7 +454,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");
     let mut session = session(&home, &quoted(&base, "workspace"));
-    Record::of(&session.mounts(), &session.sockets())
+    Record::of(&session.mounts(), &session.manifest.host.ports)
       .save(&session.mount_record())
       .expect("recording the started container should succeed");
 
@@ -490,7 +490,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");
     let session = session(&home, &quoted(&base, "workspace"));
-    Record::of(&session.mounts(), &session.sockets())
+    Record::of(&session.mounts(), &session.manifest.host.ports)
       .save(&session.mount_record())
       .expect("recording the started container should succeed");
 

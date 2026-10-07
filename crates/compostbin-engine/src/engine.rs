@@ -2,6 +2,7 @@
 
 use crate::error::EngineError;
 use crate::model::{ExecSpec, RunSpec};
+use std::os::fd::OwnedFd;
 
 pub trait Engine {
   /// Runs a command in a live container, attached to the real terminal.
@@ -12,6 +13,10 @@ pub trait Engine {
 
   /// Starts a container named `spec.name`.
   fn run(&self, spec: &RunSpec) -> Result<(), EngineError>;
+
+  /// Takes the connections the guest of `name` opens to vsock `port` on the
+  /// host. Only the process that ran the container can: the VM is its.
+  fn listen(&self, name: &str, port: u32) -> Result<Box<dyn Listener>, EngineError>;
 
   /// Whether this container is running, and so ready for `exec`. A stopped
   /// container doesn't exist: it dies with the process that started it.
@@ -27,4 +32,14 @@ pub trait Engine {
 
   /// The engine and its version.
   fn version(&self) -> String;
+}
+
+/// One vsock port the guest connects out to.
+pub trait Listener: Send + Sync {
+  /// Waits for the guest's next connection, a stream socket. `None` once
+  /// `finish` has been called.
+  fn accept(&self) -> Option<OwnedFd>;
+
+  /// Ends every `accept`, waiting or to come. Calling it again does nothing.
+  fn finish(&self);
 }

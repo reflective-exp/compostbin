@@ -31,19 +31,19 @@ mod terminal;
 mod unpacked;
 
 use crate::builder::Builder;
-use crate::engine::Engine;
+use crate::engine::{Engine, Listener};
 use crate::error::EngineError;
 use crate::model::{BuildPlan, ExecSpec, RunSpec};
 use containerization_framework::containerization::container::container_manager::RootfsCreateOptions;
 use containerization_framework::containerization::container::{ContainerManager, LinuxContainer};
 use containerization_framework::containerization::image::{Image, ImageStore};
 use containerization_framework::containerization::process::{LinuxProcess, LinuxProcessConfiguration};
-use containerization_framework::containerization::vm::{Kernel, SystemPlatform};
+use containerization_framework::containerization::vm::{Kernel, SystemPlatform, VsockListener};
 use containerization_framework::containerization_error::Code;
 use containerization_framework::containerization_oci::image::{ImageConfig, Platform};
 use std::collections::HashMap;
 use std::error::Error;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use stdio::{Stdio, attached, is_tty};
@@ -406,6 +406,18 @@ impl Engine for FrameworkEngine {
     self.serve_control_socket(spec.name.clone())
   }
 
+  fn listen(&self, name: &str, port: u32) -> Result<Box<dyn Listener>, EngineError> {
+    let booted = self
+      .running
+      .booted(name)
+      .ok_or_else(|| EngineError::unavailable(format!("listen for {name}"), "this process is not running it"))?;
+    let listener = booted
+      .container
+      .with_virtual_machine_instance(|instance| instance.listen(port))?;
+
+    Ok(Box::new(listener))
+  }
+
   fn is_running(&self, name: &str) -> bool {
     // A socket file with nothing answering is a container that died with its
     // owner. Not `Running`, which answers for this process alone.
@@ -438,6 +450,18 @@ impl Engine for FrameworkEngine {
       store::INITFS_VERSION,
       store::KERNEL_VERSION
     )
+  }
+}
+
+impl Listener for VsockListener {
+  fn accept(&self) -> Option<OwnedFd> {
+    self.into_iter().next()
+  }
+
+  /// A listener that cannot stop keeps waiting on a guest that dies with this
+  /// process anyway, so there is nothing better to do with the error.
+  fn finish(&self) {
+    let _ = VsockListener::finish(self);
   }
 }
 

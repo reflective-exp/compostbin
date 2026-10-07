@@ -8,7 +8,7 @@
 //! not every engine can say what a running container was created with.
 
 use crate::manifest::TomlFile;
-use compostbin_engine::model::{Mount, SocketRelay};
+use compostbin_engine::model::Mount;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -35,19 +35,6 @@ impl From<&Mount> for RecordedMount {
   }
 }
 
-/// Recorded beside the mounts, in the same shape: a relayed socket is not a
-/// mount, but it is fixed at creation in the same way; `doctor` warns when a
-/// port is declared after the container started.
-impl From<&SocketRelay> for RecordedMount {
-  fn from(socket: &SocketRelay) -> Self {
-    Self {
-      readonly: false,
-      source: socket.source.display().to_string(),
-      target: socket.target.display().to_string(),
-    }
-  }
-}
-
 /// How `doctor` names a mount to the user: source, target, and whether the
 /// kernel is holding it read-only.
 impl fmt::Display for RecordedMount {
@@ -66,6 +53,9 @@ impl fmt::Display for RecordedMount {
 #[serde(default, deny_unknown_fields)]
 pub struct Record {
   pub mounts: Vec<RecordedMount>,
+  /// Not mounts, but fixed at creation in the same way: the guest's relay is
+  /// the container's own process, started with them.
+  pub ports: Vec<u16>,
 }
 
 /// A missing record is not an error: a state directory cleaned mid-session
@@ -73,23 +63,35 @@ pub struct Record {
 impl TomlFile for Record {}
 
 impl Record {
-  pub fn of(mounts: &[Mount], sockets: &[SocketRelay]) -> Self {
+  pub fn of(mounts: &[Mount], ports: &[u16]) -> Self {
     Self {
-      mounts: mounts
-        .iter()
-        .map(RecordedMount::from)
-        .chain(sockets.iter().map(RecordedMount::from))
-        .collect(),
+      mounts: mounts.iter().map(RecordedMount::from).collect(),
+      ports: ports.to_vec(),
     }
   }
 
-  /// How the manifest's mounts differ from the ones the container really has.
+  /// How the manifest's mounts and ports differ from the ones the container
+  /// really has.
   ///
-  /// Matched by guest path, since that is what a session reaches for: a mount
-  /// whose source moved is a *changed* mount rather than a removal and an add.
-  pub fn drift(&self, wanted: &[Mount], sockets: &[SocketRelay]) -> Drift {
-    let wanted = Self::of(wanted, sockets).mounts;
-    let mut drift = Drift::default();
+  /// Mounts are matched by guest path, since that is what a session reaches
+  /// for: a mount whose source moved is a *changed* mount rather than a
+  /// removal and an add.
+  pub fn drift(&self, wanted: &[Mount], ports: &[u16]) -> Drift {
+    let mut drift = Drift {
+      added_ports: ports
+        .iter()
+        .filter(|port| !self.ports.contains(port))
+        .copied()
+        .collect(),
+      removed_ports: self
+        .ports
+        .iter()
+        .filter(|port| !ports.contains(port))
+        .copied()
+        .collect(),
+      ..Drift::default()
+    };
+    let wanted = Self::of(wanted, ports).mounts;
 
     for mount in &wanted {
       match self
@@ -123,30 +125,51 @@ pub struct Drift {
   pub added: Vec<String>,
   pub changed: Vec<String>,
   pub removed: Vec<String>,
+  pub added_ports: Vec<u16>,
+  pub removed_ports: Vec<u16>,
 }
 
 impl Drift {
   pub fn is_empty(&self) -> bool {
-    self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty()
+    self.added.is_empty()
+      && self.changed.is_empty()
+      && self.removed.is_empty()
+      && self.added_ports.is_empty()
+      && self.removed_ports.is_empty()
   }
 
-  /// One line per disagreeing mount, phrased by what the user would otherwise
-  /// see happen. A line each, because a mount is already two paths wide.
+  /// One line per disagreeing mount or port, phrased by what the user would
+  /// otherwise see happen. A line each, because a mount is already two paths
+  /// wide.
   pub fn lines(&self) -> Vec<String> {
-    let groups = [
+    let mounts = [
       ("declared but not mounted, so invisible in the session", &self.added),
       ("mounted but no longer declared, so still exposed", &self.removed),
       ("mounted differently", &self.changed),
     ];
+    let ports = [
+      (
+        "declared but not forwarded, so refused in the session",
+        &self.added_ports,
+      ),
+      (
+        "forwarded but no longer declared, so still reachable",
+        &self.removed_ports,
+      ),
+    ];
 
-    groups
-      .iter()
-      .flat_map(|(reason, mounts)| {
-        mounts
-          .iter()
-          .map(move |mount| format!("{mount} — {reason}"))
-      })
-      .collect()
+    let mounts = mounts.into_iter().flat_map(|(reason, mounts)| {
+      mounts
+        .iter()
+        .map(move |mount| format!("{mount} — {reason}"))
+    });
+    let ports = ports.into_iter().flat_map(|(reason, ports)| {
+      ports
+        .iter()
+        .map(move |port| format!("localhost:{port} — {reason}"))
+    });
+
+    mounts.chain(ports).collect()
   }
 }
 
@@ -167,33 +190,30 @@ mod tests {
     Record::of(mounts, &[])
   }
 
-  fn socket(source: &str, target: &str) -> SocketRelay {
-    SocketRelay {
-      source: source.into(),
-      target: target.into(),
-    }
-  }
-
-  /// A port declared after the container started is exactly as invisible as a
-  /// mount added after it started, and has the same fix.
+  /// A port declared after the container started is exactly as unreachable as
+  /// a mount added after it started is invisible, and has the same fix.
   #[test]
   fn a_port_declared_since_the_container_started_has_drifted() {
-    let started = Record::of(&[], &[]);
-    let wanted = [socket("/state/ports/7001.sock", "/run/compostbin/ports/7001.sock")];
+    let drift = Record::of(&[], &[7001]).drift(&[], &[7001, 7002]);
 
-    let drift = started.drift(&[], &wanted);
-
+    assert_eq!(drift.added_ports, [7002]);
     assert_eq!(
-      drift.added,
-      ["/state/ports/7001.sock -> /run/compostbin/ports/7001.sock"]
+      drift.lines(),
+      ["localhost:7002 — declared but not forwarded, so refused in the session"]
     );
   }
 
   #[test]
-  fn a_recorded_port_that_is_still_declared_has_not_drifted() {
-    let sockets = [socket("/state/ports/7001.sock", "/run/compostbin/ports/7001.sock")];
+  fn a_port_dropped_from_the_manifest_is_still_reachable() {
+    let drift = Record::of(&[], &[7001]).drift(&[], &[]);
 
-    assert!(Record::of(&[], &sockets).drift(&[], &sockets).is_empty());
+    assert_eq!(drift.removed_ports, [7001]);
+    assert!(drift.lines()[0].contains("still reachable"), "{drift:?}");
+  }
+
+  #[test]
+  fn a_recorded_port_that_is_still_declared_has_not_drifted() {
+    assert!(Record::of(&[], &[7001]).drift(&[], &[7001]).is_empty());
   }
 
   #[test]

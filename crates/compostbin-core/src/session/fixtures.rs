@@ -41,12 +41,7 @@ pub fn session() -> Session {
 ///
 /// Returns the `TempDir` too: dropping it deletes the home.
 pub fn temp_session(manifest: &str, project: &str) -> (TempDir, Session) {
-  session_in(TempDir::new().expect("temp dir"), manifest, project)
-}
-
-/// The same, in a temp directory the caller chose — `/tmp` for tests whose
-/// socket paths must stay under the length limit.
-pub fn session_in(temp: TempDir, manifest: &str, project: &str) -> (TempDir, Session) {
+  let temp = TempDir::new().expect("temp dir");
   let session = session_at(&temp.path().canonicalize().expect("canonical temp"), manifest, project);
   (temp, session)
 }

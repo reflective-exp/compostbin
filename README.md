@@ -269,15 +269,17 @@ additions from manifest fields.
 The export reads the inodes and writes pax with `schily` xattrs, carrying uids,
 modes, symlinks, hardlinks and extended attributes into the layer.
 
-### Host ports are relayed, not mounted
+### Host ports are relayed over vsock
 
-`[host] ports` puts one unix socket per port in the session directory and gives
-the guest the other end. Containerization configures this as a
-`UnixSocketConfiguration` (with its own direction and mode), not a filesystem.
+For each of `[host] ports`, the process that booted the VM listens on a vsock
+port derived from it (`VZVirtualMachineInstance.listen`), and the guest's
+`compostbin-ports` runs `socat` from its loopback to that vsock port. Vsock
+connects one VM to its own host process, so nothing is bound on a network
+address or in the filesystem.
 
-So `RunSpec` keeps them apart: `mounts` for filesystems, `sockets` for relays,
-which go in `config.sockets` so a socket can't be mounted as a filesystem by
-accident.
+The guest dials and the host listens, not the reverse (`dialVsock`): the
+connections begin in the guest, and only the VM's owner can listen, so the
+relay is `run`'s, not a joining `shell`'s.
 
 ### Attached processes are seeded from the image
 

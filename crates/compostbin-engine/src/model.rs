@@ -133,14 +133,6 @@ impl fmt::Display for Mount {
   }
 }
 
-/// A host unix socket relayed into the guest. Not a `Mount`: mounting a socket
-/// relays nothing.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SocketRelay {
-  pub source: PathBuf,
-  pub target: PathBuf,
-}
-
 /// A container to create and start. Mounts keep declared order, which matters
 /// for nested paths.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -151,8 +143,6 @@ pub struct RunSpec {
   pub mounts: Vec<Mount>,
   pub name: String,
   pub resources: Resources,
-  /// Relayed after the mounts; nothing nests in a socket, so that's safe.
-  pub sockets: Vec<SocketRelay>,
   pub workdir: Option<PathBuf>,
 }
 

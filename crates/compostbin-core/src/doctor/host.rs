@@ -5,7 +5,6 @@ use super::{Check, Status, check, listed};
 use crate::host::served_commands;
 use crate::session::Session;
 use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialSource, KEYCHAIN_SERVICE};
-use compostbin_engine::containerization::served;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
@@ -48,27 +47,13 @@ pub fn allowlist(session: &Session) -> Check {
 ///
 /// Each port is relayed into this container alone, so there is no wider reach
 /// to report.
-pub fn ports(session: &Session, running: bool) -> Check {
+pub fn ports(session: &Session) -> Check {
   if !session.manifest.host.has_ports() {
     return check("host ports", Status::Ok, "no [host] ports: nothing is forwarded");
   }
 
-  // The container is up and mounted correctly, but the relay holding its
-  // sockets has died. The record cannot show this, and rebinding cannot fix it.
-  let forwards = session.forwards();
-
-  if running && !forwards.iter().all(|forward| served(&forward.listen)) {
-    return check(
-      "host ports",
-      Status::Warn,
-      format!(
-        "{} is running, but the relay holding its port sockets is gone; exit it and `compostbin run` again",
-        session.container_name()
-      ),
-    );
-  }
-
-  let probed: Vec<(u16, bool)> = forwards
+  let probed: Vec<(u16, bool)> = session
+    .forwards()
     .iter()
     .map(|forward| (forward.port(), answering(forward.upstream)))
     .collect();

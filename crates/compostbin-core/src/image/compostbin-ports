@@ -1,24 +1,21 @@
 #!/bin/sh
 # The guest half of host port forwarding, and the container's own process when
 # the manifest declares [host] ports: each port on this guest's localhost is
-# relayed to a unix socket where compostbin listens on the host's behalf.
+# relayed over vsock to the host, where compostbin listens on its behalf.
 # A shell script for the same reason as compostbin-host.
 #
-# The sockets are not mounted files: `container` turns a socket passed as
-# --volume into its own relay, and these are the ends it created at start. No
-# network address is involved, and no other container can reach them.
+# Each argument is <port>:<vsock port>. Vsock reaches only the host of this VM:
+# no network address is involved, and no other container can reach them.
 set -eu
 
-sockets=/run/compostbin/ports
+# The host's context ID, the same in every VM.
+host=2
 
-for port in "$@"; do
-  socket="$sockets/$port.sock"
+for forward in "$@"; do
+  port=${forward%%:*}
+  vsock=${forward#*:}
 
-  if [ -S "$socket" ]; then
-    socat "TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr" "UNIX-CONNECT:$socket" &
-  else
-    echo "compostbin-ports: no socket at $socket; port $port is not forwarded" >&2
-  fi
+  socat "TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr" "VSOCK-CONNECT:$host:$vsock" &
 done
 
 # The container lives as long as this does, whether or not a relay survives.

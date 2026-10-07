@@ -94,7 +94,7 @@ impl Session {
     }
 
     engine.run(&spec)?;
-    Record::of(&spec.mounts, &spec.sockets)
+    Record::of(&spec.mounts, &self.manifest.host.ports)
       .save(&self.mount_record())
       .map_err(SessionError::Record)?;
 
@@ -102,8 +102,8 @@ impl Session {
   }
 
   /// Whether the container is up, and so whether `run` will attach rather than
-  /// create. Anything whose work belongs to creation (binding the port sockets,
-  /// above all) must ask first.
+  /// create. Anything whose work belongs to creation (relaying the ports, above
+  /// all) must ask first.
   pub fn is_running(&self, engine: &impl Engine) -> bool {
     engine.is_running(&self.container_name())
   }
@@ -113,9 +113,9 @@ impl Session {
   ///
   /// A second `run` joins the session rather than replacing it, and does
   /// nothing else: the host command agent, the port relay, and the cleanup on
-  /// exit belong to the process that created the container. A joiner binding
-  /// the sockets again would take them from the relay the container is using,
-  /// and one cleaning up as it left would empty a spool still being served.
+  /// exit belong to the process that created the container. Only that process
+  /// holds the VM the guest's ports connect to, and a joiner cleaning up as it
+  /// left would empty a spool still being served.
   ///
   /// The creator owns the container, Claude or not: when it exits, so does
   /// everything that joined.
@@ -177,14 +177,12 @@ impl Session {
 
   /// Creates the container and serves it until `process` exits.
   ///
-  /// The port sockets are bound first: each has to already be a socket when the
-  /// container's relays are set up, and they are set up at creation. The agent
-  /// and the relay then run beside the attach, and the flag stops them as soon
-  /// as it returns.
+  /// The ports are listened for as soon as the VM is up, before setup or the
+  /// attach can use them. The agent and the relay then run beside the attach,
+  /// and the flag stops them as soon as it returns.
   ///
-  /// Threads rather than a process of their own: the container dies with this
-  /// process, so anything holding its ports afterwards would be holding them for
-  /// nobody.
+  /// Threads rather than a process of their own: the VM the guest connects to
+  /// is this process's, and dies with it.
   fn launch(
     &self,
     engine: &impl Engine,
@@ -192,10 +190,11 @@ impl Session {
     notify: &(dyn Fn(Notice) + Sync),
   ) -> Result<i32, SessionError> {
     self.prepare_host_spool()?;
-
-    let bound = host::bind_all(&self.forwards(), &|event| notify(Notice::Port(event))).at(self.port_sockets())?;
-
     self.create(engine, notify)?;
+
+    let bound = host::listen_all(engine, &self.container_name(), &self.forwards(), &|event| {
+      notify(Notice::Port(event))
+    })?;
 
     let stop = AtomicBool::new(false);
     let spool = self.spool();
@@ -275,7 +274,6 @@ mod tests {
   use crate::session::credentials::FakeSource;
   use crate::session::fixtures::{self, MANIFEST, PROJECT};
   use compostbin_engine::fake::{Call, RecordingEngine};
-  use std::os::unix::fs::FileTypeExt;
 
   fn quiet(_: Notice) {}
 
@@ -517,39 +515,43 @@ mod tests {
     );
   }
 
-  /// Declared ports are bound before the container is created, since each has
-  /// to already be a socket when its relay is set up.
+  /// Declared ports are listened for once the container exists, and before
+  /// anything is attached that could use them.
   #[test]
-  fn run_binds_the_port_sockets_before_creating_the_container() {
-    // Under `/tmp` because macOS's own temp directory is deep enough to push a
-    // socket in the session directory past the length a socket path may have.
-    let temp = tempfile::Builder::new()
-      .tempdir_in("/tmp")
-      .expect("temp dir");
-    let (_temp, mut session) = fixtures::session_in(temp, MANIFEST, PROJECT);
+  fn run_listens_for_the_ports_before_attaching() {
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
     session.manifest.host.ports = vec![7001];
     let engine = RecordingEngine::new();
 
     run(&session, &engine);
 
-    assert!(
-      std::fs::symlink_metadata(&session.forwards()[0].listen)
-        .expect("the socket should have been bound")
-        .file_type()
-        .is_socket()
-    );
+    let calls = engine.calls();
+    let position = |wanted: &Call| calls.iter().position(|call| call == wanted);
+    let listened = position(&Call::Listen(
+      session.container_name(),
+      session.forwards()[0].vsock_port(),
+    ))
+    .expect("the port should have been listened for");
+
+    assert!(position(&Call::Run(session.run_spec())) < Some(listened));
+    assert!(Some(listened) < position(&claude(&session)));
   }
 
-  /// Binding again would take the sockets from the relay the running container
-  /// is using.
+  /// Only the creator holds the VM, so only it can listen.
   #[test]
-  fn joining_a_running_session_binds_nothing() {
+  fn joining_a_running_session_listens_for_nothing() {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
     session.manifest.host.ports = vec![7001];
+    let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
-    run(&session, &RecordingEngine::with_running(&["compostbin-cb"]));
+    run(&session, &engine);
 
-    assert!(!session.port_sockets().exists());
+    assert!(
+      !engine
+        .calls()
+        .iter()
+        .any(|call| matches!(call, Call::Listen(..)))
+    );
   }
 
   #[test]
@@ -603,7 +605,7 @@ mod tests {
     let recorded = Record::load_if_present(&session.mount_record())
       .expect("load should succeed")
       .expect("run must have written a record");
-    assert_eq!(recorded, Record::of(&session.mounts(), &session.sockets()));
+    assert_eq!(recorded, Record::of(&session.mounts(), &session.manifest.host.ports));
 
     // The container still has the mounts it was created with.
     session.manifest.paths.push(PathEntry {
@@ -615,7 +617,7 @@ mod tests {
 
     assert!(
       !recorded
-        .drift(&session.mounts(), &session.sockets())
+        .drift(&session.mounts(), &session.manifest.host.ports)
         .is_empty(),
       "a path added mid-session is not mounted until the container is recreated"
     );
@@ -668,7 +670,7 @@ mod tests {
 
     assert!(
       recorded
-        .drift(&session.mounts(), &session.sockets())
+        .drift(&session.mounts(), &session.manifest.host.ports)
         .is_empty(),
       "the record must describe the container that is running now: {recorded:?}"
     );

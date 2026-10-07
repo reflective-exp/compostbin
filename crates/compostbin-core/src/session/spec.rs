@@ -5,7 +5,7 @@ use crate::host::{Forward, GUEST_SPOOL_TARGET};
 use crate::image::GUEST_PORTS_NAME;
 use crate::session::briefing::MANAGED_SETTINGS_TARGET;
 use crate::session::{Process, Session};
-use compostbin_engine::model::{EnvVar, ExecSpec, Mount, Resources, RunSpec, SocketRelay};
+use compostbin_engine::model::{EnvVar, ExecSpec, Mount, Resources, RunSpec};
 use std::path::PathBuf;
 
 /// Where Claude's home is mounted inside the container, which runs as `claude`.
@@ -57,22 +57,6 @@ impl Session {
     mounts
   }
 
-  /// One socket per declared port, relayed into the guest rather than mounted,
-  /// and named after the port so the guest's relay finds it unprompted.
-  ///
-  /// Each must be a live socket when the container is created, which is why
-  /// `run` binds them first.
-  pub fn sockets(&self) -> Vec<SocketRelay> {
-    self
-      .forwards()
-      .into_iter()
-      .map(|forward| SocketRelay {
-        target: forward.guest_target(),
-        source: forward.listen,
-      })
-      .collect()
-  }
-
   /// Where the session lands inside the container. The `/workspace` fallback
   /// keeps a misconfigured manifest from starting in an unmounted directory.
   pub fn workdir(&self) -> PathBuf {
@@ -96,15 +80,15 @@ impl Session {
     }
   }
 
-  /// Each declared port, as a socket in this session's directory relayed to the
-  /// host's loopback.
+  /// Each declared port, relayed to the host's loopback.
   pub fn forwards(&self) -> Vec<Forward> {
     self
       .manifest
       .host
       .ports
       .iter()
-      .map(|&port| Forward::to_loopback(&self.port_sockets(), port))
+      .copied()
+      .map(Forward::to_loopback)
       .collect()
   }
 
@@ -121,7 +105,7 @@ impl Session {
     }
 
     std::iter::once(GUEST_PORTS_NAME.to_string())
-      .chain(self.manifest.host.ports.iter().map(u16::to_string))
+      .chain(self.forwards().iter().map(Forward::guest_argument))
       .collect()
   }
 
@@ -147,7 +131,6 @@ impl Session {
         cpus: self.manifest.container.cpus,
         memory_in_bytes: self.manifest.container.memory.bytes(),
       },
-      sockets: self.sockets(),
       workdir: Some(self.workdir()),
     }
   }
@@ -402,7 +385,6 @@ mod tests {
           cpus: 4,
           memory_in_bytes: 8 << 30,
         },
-        sockets: Vec::new(),
         workdir: Some(PathBuf::from("/workspace/workspace/compostbin")),
       }
     );
@@ -451,75 +433,23 @@ mod tests {
 
     assert_eq!(
       session.run_spec().arguments,
-      [GUEST_PORTS_NAME, "7001", "7002"],
+      [
+        GUEST_PORTS_NAME.to_string(),
+        Forward::to_loopback(7001).guest_argument(),
+        Forward::to_loopback(7002).guest_argument(),
+      ],
       "the relay is the container's own process"
     );
   }
 
   #[test]
-  fn forwards_through_a_socket_in_the_session_directory() {
-    let mut session = session();
-    session.manifest.host.ports = vec![7001];
-
-    assert_eq!(
-      session.forwards(),
-      [Forward::to_loopback(&session.port_sockets(), 7001)]
-    );
-    assert_eq!(
-      session.forwards()[0].listen,
-      session.state_dir().join("ports").join("7001.sock")
-    );
-  }
-
-  /// Relayed rather than mounted, and named after the port, since the guest's
-  /// relay finds it by name.
-  #[test]
-  fn relays_a_socket_per_declared_port() {
+  fn forwards_each_declared_port_to_the_hosts_loopback() {
     let mut session = session();
     session.manifest.host.ports = vec![7001, 7002];
 
-    let sockets = session.sockets();
-
-    for port in [7001, 7002] {
-      let source = session
-        .state_dir()
-        .join("ports")
-        .join(format!("{port}.sock"));
-      let socket = sockets
-        .iter()
-        .find(|socket| socket.source == source)
-        .unwrap_or_else(|| panic!("port {port} should be relayed: {sockets:?}"));
-
-      assert_eq!(
-        socket.target,
-        PathBuf::from(format!("/run/compostbin/ports/{port}.sock"))
-      );
-    }
-  }
-
-  /// A socket mounted as a filesystem is not a relay, and the framework engine
-  /// would attempt exactly that mount.
-  #[test]
-  fn mounts_no_socket_for_a_declared_port() {
-    let mut session = session();
-    session.manifest.host.ports = vec![7001];
-
-    assert!(
-      !session
-        .mounts()
-        .iter()
-        .any(|mount| mount.source.starts_with(session.port_sockets())),
-      "a declared port is relayed, never mounted"
-    );
-  }
-
-  #[test]
-  fn relays_no_sockets_without_ports() {
-    let session = session();
-
-    assert!(
-      session.sockets().is_empty(),
-      "a session declaring no ports relays nothing"
+    assert_eq!(
+      session.forwards(),
+      [Forward::to_loopback(7001), Forward::to_loopback(7002)]
     );
   }
 }

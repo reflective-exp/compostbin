@@ -5,6 +5,12 @@
 - Update containerization-framework to v0.4.0.
 - Show progress on a terminal while `build` pulls its base or the init image.
 
+### Breaking
+
+- Relay `[host] ports` over vsock instead of a unix socket per port in the
+  session directory. The guest half is in the image, so run `compostbin build`
+  again before using ports.
+
 ## v0.13.0
 
 - Update containerization-framework to v0.3.0.

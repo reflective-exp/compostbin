@@ -72,9 +72,9 @@ Write-only: the host clipboard never reaches the guest. A declared
 ## Ports
 
 Host services on fixed ports, such as MCP servers, answer at the same address
-in the guest. Each port is relayed through a unix socket in the session
-directory, carried into this container only: nothing listens on a network
-address, and no other container on the Mac can reach a forwarded port.
+in the guest. Each port is relayed over vsock between this container's VM and
+the `compostbin run` that started it: nothing listens on a network address, and
+no other container on the Mac can reach a forwarded port.
 
 A port with no service behind it yet (one started later through
 `compostbin-host`, say) is normal: once Claude is attached, the relay logs to

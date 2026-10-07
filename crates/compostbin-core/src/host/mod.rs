@@ -5,7 +5,7 @@
 //! script), the spool, and the agent. `request` is what may run, `spool` is
 //! where the files go, `agent` runs them, `pty` is the terminal a command can
 //! ask for. `ports` is the one path that is not files: each declared port is
-//! relayed through a unix socket carried into the guest.
+//! relayed over vsock.
 
 mod agent;
 mod ports;
@@ -17,7 +17,7 @@ mod spool;
 mod fixtures;
 
 pub use crate::host::agent::serve;
-pub use crate::host::ports::{Bound, Forward, PortEvent, bind_all, relay};
+pub use crate::host::ports::{Bound, Forward, PortEvent, listen_all, relay};
 pub use crate::host::spool::Spool;
 
 use crate::manifest::{HostCommand, HostConfig};
@@ -32,8 +32,6 @@ const CLIPBOARD_ARGV: &[&str] = &["pbcopy"];
 /// Fixed, not configurable: the guest client is a shell script and cannot read
 /// the manifest.
 pub const GUEST_SPOOL_TARGET: &str = "/run/compostbin/host";
-/// Where each `<port>.sock` is relayed to; fixed for the same reason.
-const GUEST_PORTS_TARGET: &str = "/run/compostbin/ports";
 
 /// Requests land here, one file per request.
 const REQUESTS_DIR: &str = "requests";

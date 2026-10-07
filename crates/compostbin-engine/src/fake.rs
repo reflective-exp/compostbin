@@ -2,10 +2,16 @@
 //! an engine.
 
 use crate::builder::Builder;
-use crate::engine::Engine;
+use crate::engine::{Engine, Listener};
 use crate::error::EngineError;
 use crate::model::{BuildPlan, ExecSpec, RunSpec};
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::io;
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// What a posed engine reports as its version.
 pub const VERSION: &str = "fake engine 1.0";
@@ -18,6 +24,7 @@ pub enum Call {
   Images,
   IsRunning(String),
   IsUnpacked(String),
+  Listen(String, u32),
   MissingContent(String),
   Run(RunSpec),
   Version,
@@ -52,6 +59,8 @@ impl<C: Clone> Calls<C> {
 #[derive(Debug, Default)]
 pub struct RecordingEngine {
   calls: Calls<Call>,
+  /// Each port `listen` was asked for, until its listener finishes.
+  listening: RefCell<HashMap<u32, Arc<Doorway>>>,
   /// The containers posed as running, plus every one `run` has started.
   running: RefCell<Vec<String>>,
   /// The images posed as unpacked, plus every one `run` has unpacked.
@@ -111,6 +120,51 @@ impl RecordingEngine {
   pub fn calls(&self) -> Vec<Call> {
     self.calls.all()
   }
+
+  /// Connects to `port` as the guest would, handing the other end to whoever
+  /// listens there. Refused when nothing does, as a real guest would be.
+  pub fn connect(&self, port: u32) -> io::Result<UnixStream> {
+    let refused = || io::Error::from(io::ErrorKind::ConnectionRefused);
+    let doorway = self
+      .listening
+      .borrow()
+      .get(&port)
+      .cloned()
+      .ok_or_else(refused)?;
+    let (guest, host) = UnixStream::pair()?;
+
+    match &*lock(&doorway.sender) {
+      Some(sender) if sender.send(host.into()).is_ok() => Ok(guest),
+      _ => Err(refused()),
+    }
+  }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+  mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// One posed port: [`RecordingEngine::connect`] sends through it, and a
+/// [`ChannelListener`] receives. Finishing drops the only sender, which ends the
+/// wait on the other side.
+#[derive(Debug)]
+struct Doorway {
+  sender: Mutex<Option<Sender<OwnedFd>>>,
+}
+
+struct ChannelListener {
+  doorway: Arc<Doorway>,
+  receiver: Mutex<Receiver<OwnedFd>>,
+}
+
+impl Listener for ChannelListener {
+  fn accept(&self) -> Option<OwnedFd> {
+    lock(&self.receiver).recv().ok()
+  }
+
+  fn finish(&self) {
+    lock(&self.doorway.sender).take();
+  }
 }
 
 impl Engine for RecordingEngine {
@@ -133,6 +187,24 @@ impl Engine for RecordingEngine {
     self.running.borrow_mut().push(spec.name.clone());
     self.unpacked.borrow_mut().push(spec.image.clone());
     Ok(())
+  }
+
+  fn listen(&self, name: &str, port: u32) -> Result<Box<dyn Listener>, EngineError> {
+    self.calls.record(Call::Listen(name.to_string(), port));
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let doorway = Arc::new(Doorway {
+      sender: Mutex::new(Some(sender)),
+    });
+    self
+      .listening
+      .borrow_mut()
+      .insert(port, Arc::clone(&doorway));
+
+    Ok(Box::new(ChannelListener {
+      doorway,
+      receiver: Mutex::new(receiver),
+    }))
   }
 
   fn is_running(&self, name: &str) -> bool {

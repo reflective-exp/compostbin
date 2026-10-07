@@ -2,23 +2,17 @@
 //! `[host] ports`: a host service on a fixed port answering at the guest's own
 //! `localhost`.
 //!
-//! Each port is relayed through a unix socket carried into one container, so
-//! nothing listens on a network address and no other container can reach it.
-//! Both halves of that are worth a session: that the relay carries a request
-//! and its answer, and that a port nobody declared is not reachable.
+//! Each port is relayed over vsock into one VM, so nothing listens on a network
+//! address and no other container can reach it. Both halves of that are worth
+//! a session: that the relay carries a request and its answer, and that a port
+//! nobody declared is not reachable.
 
-use compostbin_core::host::Forward;
-use compostbin_test::{Project, poll_until, stderr, stdout, unused_port};
+use compostbin_test::{Project, stderr, stdout, unused_port};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::os::unix::fs::FileTypeExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
-
-/// How long the creating process is given to bind a port's socket.
-const BIND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A host service on loopback that answers each line with what it was given.
 /// Bound before the manifest is written, since the manifest has to name the
@@ -117,44 +111,8 @@ ports = [{}]
   );
 }
 
-/// The socket is the relay, and it lives in the session directory: nothing is
-/// bound on a network address, so no other container can reach it.
-#[test]
-fn port_is_relayed_through_a_socket() {
-  let service = Service::start();
-  // Short, because the socket beneath it must fit the 104 bytes a unix socket
-  // path may have.
-  let project = Project::new("cbt-ports-sock");
-  project.manifest(&format!(
-    r#"
-[host]
-ports = [{}]
-"#,
-    service.port
-  ));
-
-  // The sockets belong to whichever process created the container, and are
-  // bound for exactly as long as it runs — so one has to be running to look.
-  // Dropping the guard kills it, and the container with it.
-  let running = project.guest_in_background("sleep 60");
-  let socket = Forward::to_loopback(&project.session().port_sockets(), service.port).listen;
-
-  let kind = poll_until(BIND_TIMEOUT, &format!("a socket bound at {}", socket.display()), || {
-    std::fs::symlink_metadata(&socket).ok()
-  })
-  .file_type();
-
-  assert!(
-    kind.is_socket(),
-    "{} is not a socket, so it would be carried into the guest as a filesystem",
-    socket.display()
-  );
-
-  drop(running);
-}
-
-/// Each declared port is a socket and a relay of its own: two services do not
-/// share one, and neither answers for the other.
+/// Each declared port is a relay of its own: two services do not share one,
+/// and neither answers for the other.
 #[test]
 fn each_declared_port_reaches_its_own_service() {
   let first = Service::answering("the first");

@@ -16,9 +16,6 @@ const CLAUDE_HOME_DIR: &str = "claude-home";
 /// Under the session state directory: requests in flight. `clean` empties it
 /// rather than removing it, because the container mounts it.
 const SPOOL_DIR: &str = "host";
-/// Under the session state directory: one bound socket per declared port,
-/// owned by the `run` that created the container and living exactly as long.
-const PORTS_DIR: &str = "ports";
 /// Where the relay says what it could not, while a session is attached.
 const PORTS_LOG: &str = "ports.log";
 
@@ -67,12 +64,7 @@ impl Session {
   /// What `clean` may delete: state meaningless once the container is gone. Not
   /// Claude's home, which holds the conversation `--continue` reattaches to.
   fn transient_state(&self) -> Vec<PathBuf> {
-    vec![
-      self.host_spool(),
-      self.port_sockets(),
-      self.ports_log(),
-      self.managed_settings(),
-    ]
+    vec![self.host_spool(), self.ports_log(), self.managed_settings()]
   }
 
   /// Empties this session's transient state, and with `everything` removes the
@@ -117,7 +109,7 @@ impl Session {
   ///
   /// Emptied rather than removed: until this process exits the container still
   /// holds that mount (§`clear`). The rest is left for the next create, which
-  /// rebinds the sockets and rewrites the managed settings anyway.
+  /// rewrites the managed settings anyway.
   pub(super) fn clean_after_exit(&self) -> Result<(), PathError> {
     let spool = self.host_spool();
     if !spool.exists() {
@@ -150,13 +142,6 @@ impl Session {
       Some(spool) => spool.create(),
       None => Ok(()),
     }
-  }
-
-  /// Where this session's port sockets are bound. Inside the session directory
-  /// because the directory is what confines them: socket mode cannot (the guest
-  /// end is root-owned, the session is not).
-  pub fn port_sockets(&self) -> PathBuf {
-    self.state_dir().join(PORTS_DIR)
   }
 
   /// Where the relay writes once Claude is attached.

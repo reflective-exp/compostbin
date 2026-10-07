@@ -5,8 +5,8 @@
 //! and what a builder container is called.
 
 use super::nat;
-use crate::model::{EnvVar, Resources, RunSpec, SocketRelay};
-use containerization_framework::containerization::container::{Mount, UnixSocketConfiguration, linux_container};
+use crate::model::{EnvVar, Resources, RunSpec};
+use containerization_framework::containerization::container::{Mount, linux_container};
 use containerization_framework::containerization::vm::VmResources;
 use std::path::Path;
 
@@ -39,14 +39,6 @@ pub fn share(source: &Path, destination: impl Into<String>, readonly: bool) -> M
   Mount::share(source.display().to_string(), destination, options, &[])
 }
 
-/// Mode `0o666`, so an unprivileged guest user can connect.
-fn socket(socket: &SocketRelay) -> UnixSocketConfiguration {
-  UnixSocketConfiguration {
-    permissions: Some(0o666),
-    ..UnixSocketConfiguration::new(socket.source.clone(), socket.target.clone())
-  }
-}
-
 /// The container's limits plus a core and the guest kernel's memory, so the
 /// container gets all it was given.
 pub fn vm(resources: Resources) -> VmResources {
@@ -71,7 +63,6 @@ pub fn configure(
     .iter()
     .map(|mount| share(&mount.source, mount.target.display().to_string(), mount.readonly))
     .collect();
-  let sockets = spec.sockets.iter().map(socket).collect();
 
   Ok(move |configuration: &mut linux_container::Configuration| {
     configuration.cpus = resources.cpus;
@@ -86,7 +77,6 @@ pub fn configure(
     configuration.interfaces = vec![interface];
     configuration.dns = Some(nat::dns());
     configuration.mounts.extend(mounts);
-    configuration.sockets = sockets;
   })
 }
 
@@ -104,7 +94,6 @@ mod tests {
   use super::*;
   use crate::model::Mount as SessionMount;
   use containerization_framework::containerization::container::LinuxContainer;
-  use containerization_framework::containerization::container::unix_socket_configuration::Direction;
   use std::path::PathBuf;
 
   #[test]
@@ -153,10 +142,6 @@ mod tests {
         cpus: 4,
         memory_in_bytes: 8 << 30,
       },
-      sockets: vec![SocketRelay {
-        source: PathBuf::from("/state/ports/7001.sock"),
-        target: PathBuf::from("/run/session/ports/7001.sock"),
-      }],
       workdir: Some(PathBuf::from("/workspace")),
     }
   }
@@ -211,14 +196,5 @@ mod tests {
       vm(resources).memory_in_bytes,
       (8 << 30) + VmResources::GUEST_MEMORY_OVERHEAD
     );
-  }
-
-  /// Only the guest reaches host services, never the reverse.
-  #[test]
-  fn relays_every_socket_into_the_guest() {
-    let configuration = configured();
-
-    assert_eq!(configuration.sockets[0].direction, Direction::Into);
-    assert_eq!(configuration.sockets[0].permissions, Some(0o666));
   }
 }
