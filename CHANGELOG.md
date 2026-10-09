@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Update containerization-framework to v0.6.0.
+- Boot the Containerization 0.49.0 init image.
+
 ## v0.14.0
 
 - Update containerization-framework to v0.4.0.

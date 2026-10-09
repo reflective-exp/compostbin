@@ -34,7 +34,7 @@ use crate::builder::Builder;
 use crate::engine::{Engine, Listener};
 use crate::error::EngineError;
 use crate::model::{BuildPlan, ExecSpec, RunSpec};
-use containerization_framework::containerization::container::container_manager::RootfsCreateOptions;
+use containerization_framework::containerization::container::container_manager::CreateWithRootfsOptions;
 use containerization_framework::containerization::container::{ContainerManager, LinuxContainer};
 use containerization_framework::containerization::image::{Image, ImageStore};
 use containerization_framework::containerization::process::{LinuxProcess, LinuxProcessConfiguration};
@@ -280,12 +280,12 @@ impl FrameworkEngine {
     // No networking from the manager, which has no `Network` to allocate from:
     // the interfaces are ours, on Virtualization's NAT, which an unprivileged
     // process can use.
-    let options = RootfsCreateOptions {
+    let options = CreateWithRootfsOptions {
       networking: false,
       vm: spec::vm(spec.resources),
       ..Default::default()
     };
-    let container = manager.create_with_rootfs(&spec.name, &image, rootfs, options, spec::configure(spec)?)?;
+    let container = manager.create_with_rootfs(&spec.name, &image, rootfs, options, spec::configure(spec))?;
 
     container.create()?;
     container.start()?;

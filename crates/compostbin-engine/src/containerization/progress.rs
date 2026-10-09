@@ -3,7 +3,7 @@
 //! Only on a terminal: anything else reading stderr gets the build log's lines
 //! and no redraws.
 //!
-//! Not an unpack's: asked for progress, `Ext4Unpacker` decompresses every
+//! Not an unpack's: asked for progress, `EXT4Unpacker` decompresses every
 //! layer an extra time to total it.
 
 use super::stdio::is_tty;

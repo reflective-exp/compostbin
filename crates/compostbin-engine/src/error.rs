@@ -44,6 +44,10 @@ impl From<containerization_framework::Error> for EngineError {
     match error {
       containerization_framework::Error::Failed { action, message, .. } => Self::Failed { action, message },
       containerization_framework::Error::Unavailable { action, message } => Self::Unavailable { action, message },
+      other => Self::Failed {
+        action: other.action().to_string(),
+        message: other.to_string(),
+      },
     }
   }
 }
@@ -68,7 +72,10 @@ mod tests {
   /// would say it twice.
   #[test]
   fn takes_a_framework_error_as_its_own() {
-    let error = EngineError::from(containerization_framework::Error::unavailable("boot cb", "no kernel"));
+    let error = EngineError::from(containerization_framework::Error::Unavailable {
+      action: "boot cb".to_string(),
+      message: "no kernel".to_string(),
+    });
 
     assert!(matches!(error, EngineError::Unavailable { .. }));
     assert_eq!(error.to_string(), "cannot boot cb: no kernel");

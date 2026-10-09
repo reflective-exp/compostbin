@@ -4,7 +4,7 @@
 //! agent sets its address directly — so something has to allocate, and that is
 //! compostbin's choice rather than the framework's.
 
-use containerization_framework::containerization::network::{Dns, Interface, NatInterface};
+use containerization_framework::containerization::network::{DNS, Interface, NATInterface};
 use containerization_framework::containerization_extras::address::{CIDRv4, IPv4Address};
 
 /// Gateway of Virtualization.framework's built-in NAT (macOS shared networking).
@@ -24,17 +24,17 @@ const LAST_HOST: u32 = 250;
 ///
 /// Collisions with other hosts on the shared network go undetected.
 pub fn interface(name: &str) -> Result<Interface, containerization_framework::Error> {
-  Ok(Interface::Nat(NatInterface::new(
+  Ok(Interface::Nat(NATInterface::new(
     CIDRv4::parse(&address(name))?,
     Some(IPv4Address::parse(GATEWAY)?),
   )))
 }
 
 /// Names resolve through the gateway, which forwards to the host's resolver.
-pub fn dns() -> Dns {
-  Dns {
+pub fn dns() -> DNS {
+  DNS {
     nameservers: vec![GATEWAY.to_string()],
-    ..Dns::default()
+    ..DNS::default()
   }
 }
 

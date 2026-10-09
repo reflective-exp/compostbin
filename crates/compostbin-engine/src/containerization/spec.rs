@@ -7,7 +7,7 @@
 use super::nat;
 use crate::model::{EnvVar, Resources, RunSpec};
 use containerization_framework::containerization::container::{Mount, linux_container};
-use containerization_framework::containerization::vm::VmResources;
+use containerization_framework::containerization::vm::VMResources;
 use std::path::Path;
 
 /// `NAME=VALUE`.
@@ -41,10 +41,10 @@ pub fn share(source: &Path, destination: impl Into<String>, readonly: bool) -> M
 
 /// The container's limits plus a core and the guest kernel's memory, so the
 /// container gets all it was given.
-pub fn vm(resources: Resources) -> VmResources {
-  VmResources {
+pub fn vm(resources: Resources) -> VMResources {
+  VMResources {
     cpus: resources.cpus + 1,
-    memory_in_bytes: resources.memory_in_bytes + VmResources::GUEST_MEMORY_OVERHEAD,
+    memory_in_bytes: resources.memory_in_bytes + VMResources::GUEST_MEMORY_OVERHEAD,
   }
 }
 
@@ -52,19 +52,20 @@ pub fn vm(resources: Resources) -> VmResources {
 /// manager seeded from its image.
 pub fn configure(
   spec: &RunSpec,
-) -> Result<impl FnOnce(&mut linux_container::Configuration) + Send + 'static, containerization_framework::Error> {
+) -> impl FnOnce(&mut linux_container::Configuration) -> Result<(), containerization_framework::Error> + Send + 'static
+{
+  let name = spec.name.clone();
   let resources = spec.resources;
   let arguments = spec.arguments.clone();
   let environment = environment(&spec.env);
   let working_directory = working_directory(spec.workdir.as_deref());
-  let interface = nat::interface(&spec.name)?;
   let mounts: Vec<Mount> = spec
     .mounts
     .iter()
     .map(|mount| share(&mount.source, mount.target.display().to_string(), mount.readonly))
     .collect();
 
-  Ok(move |configuration: &mut linux_container::Configuration| {
+  move |configuration: &mut linux_container::Configuration| {
     configuration.cpus = resources.cpus;
     configuration.memory_in_bytes = resources.memory_in_bytes;
     configuration.process.arguments = arguments;
@@ -74,10 +75,11 @@ pub fn configure(
       .environment_variables
       .extend(environment);
     configuration.process.working_directory = working_directory;
-    configuration.interfaces = vec![interface];
+    configuration.interfaces = vec![nat::interface(&name)?];
     configuration.dns = Some(nat::dns());
     configuration.mounts.extend(mounts);
-  })
+    Ok(())
+  }
 }
 
 /// The builder container's id (and store directory). Random, so concurrent
@@ -151,7 +153,7 @@ mod tests {
     let mut configuration = linux_container::Configuration::default();
     configuration.process.environment_variables = vec!["PATH=/usr/bin".to_string()];
 
-    configure(&run_spec()).unwrap()(&mut configuration);
+    configure(&run_spec())(&mut configuration).unwrap();
 
     configuration
   }
@@ -194,7 +196,7 @@ mod tests {
     assert_eq!(vm(resources).cpus, 5);
     assert_eq!(
       vm(resources).memory_in_bytes,
-      (8 << 30) + VmResources::GUEST_MEMORY_OVERHEAD
+      (8 << 30) + VMResources::GUEST_MEMORY_OVERHEAD
     );
   }
 }

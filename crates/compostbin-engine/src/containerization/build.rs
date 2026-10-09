@@ -20,16 +20,16 @@ use super::unpacked::{ROOTFS_SIZE_IN_BYTES, Unpacked, ext4_root};
 use super::{nat, note, spec};
 use crate::error::EngineError;
 use crate::model::{BuildPlan, BuildStep};
-use containerization_framework::containerization::container::container_manager::RootfsCreateOptions;
+use containerization_framework::containerization::container::container_manager::CreateWithRootfsOptions;
 use containerization_framework::containerization::container::{
   ContainerManager, FilesystemOperation, LinuxContainer, linux_container,
 };
 use containerization_framework::containerization::image::image_store::PullOptions;
-use containerization_framework::containerization::image::{self, Ext4Unpacker, Image, ImageStore};
+use containerization_framework::containerization::image::{self, EXT4Unpacker, Image, ImageStore};
 use containerization_framework::containerization::process::LinuxProcessConfiguration;
 use containerization_framework::containerization::vm::{Kernel, SystemPlatform};
 use containerization_framework::containerization_error::Code;
-use containerization_framework::containerization_ext4::ext4::Ext4Reader;
+use containerization_framework::containerization_ext4::ext4::EXT4Reader;
 use containerization_framework::containerization_oci::content::LocalContentStore;
 use containerization_framework::containerization_oci::image::{Descriptor, Platform};
 use containerization_framework::containerization_oci::runtime::User;
@@ -159,7 +159,7 @@ fn prepare(
   }
 
   note(&format!("unpacking {}", plan.base));
-  Ext4Unpacker::new(ROOTFS_SIZE_IN_BYTES, None).unpack(base, platform, rootfs, None)?;
+  EXT4Unpacker::new(ROOTFS_SIZE_IN_BYTES, None).unpack(base, platform, rootfs, None)?;
   snapshots.save_rootfs(rootfs, &keys.base);
 
   Ok(0)
@@ -202,7 +202,7 @@ impl Builder<'_> {
   fn run(&self, start: usize, keys: &Salted, snapshots: &Snapshots) -> Result<(), EngineError> {
     let kernel = Kernel::new(self.store.kernel(), SystemPlatform::LINUX_ARM);
     let mut manager = ContainerManager::new(&kernel, &initfs_mount(self.store), self.images, Default::default())?;
-    let options = RootfsCreateOptions {
+    let options = CreateWithRootfsOptions {
       networking: false,
       vm: spec::vm(self.plan.resources),
       ..Default::default()
@@ -212,7 +212,7 @@ impl Builder<'_> {
       self.base,
       ext4_root(self.rootfs),
       options,
-      self.configuration()?,
+      self.configuration(),
     )?;
 
     container.create()?;
@@ -238,7 +238,9 @@ impl Builder<'_> {
   /// network (steps that install anything need it), with the plan's mounts.
   fn configuration(
     &self,
-  ) -> Result<impl FnOnce(&mut linux_container::Configuration) + Send + 'static, containerization_framework::Error> {
+  ) -> impl FnOnce(&mut linux_container::Configuration) -> Result<(), containerization_framework::Error> + Send + 'static
+  {
+    let name = self.name.to_string();
     let resources = self.plan.resources;
     let environment = self.environment.to_vec();
     let mounts: Vec<_> = self
@@ -247,9 +249,8 @@ impl Builder<'_> {
       .iter()
       .map(|mount| spec::share(&mount.source, mount.destination.clone(), true))
       .collect();
-    let interface = nat::interface(self.name)?;
 
-    Ok(move |configuration: &mut linux_container::Configuration| {
+    move |configuration: &mut linux_container::Configuration| {
       configuration.cpus = resources.cpus;
       configuration.memory_in_bytes = resources.memory_in_bytes;
       configuration.process.arguments = KEEPALIVE.map(String::from).to_vec();
@@ -257,9 +258,10 @@ impl Builder<'_> {
       configuration.process.working_directory = "/".to_string();
       configuration.process.environment_variables = environment;
       configuration.mounts.extend(mounts);
-      configuration.interfaces = vec![interface];
+      configuration.interfaces = vec![nat::interface(&name)?];
       configuration.dns = Some(nat::dns());
-    })
+      Ok(())
+    }
   }
 
   /// Runs one step to completion, its output on this process's stderr,
@@ -351,7 +353,7 @@ fn ingest(
   let layer = rootfs.with_file_name("layer.tar");
   let _ = std::fs::remove_file(&layer);
 
-  Ext4Reader::new(rootfs)?.export(&layer)?;
+  EXT4Reader::new(rootfs)?.export(&layer)?;
 
   let stored = oci::ingest(
     content,

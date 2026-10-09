@@ -9,7 +9,7 @@
 use super::files::{self, clone, partial};
 use crate::error::EngineError;
 use containerization_framework::containerization::container::Mount;
-use containerization_framework::containerization::image::{Ext4Unpacker, Image};
+use containerization_framework::containerization::image::{EXT4Unpacker, Image};
 use containerization_framework::containerization_oci::image::Platform;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -70,7 +70,7 @@ impl Unpacked {
     std::fs::create_dir_all(&self.root).map_err(failed)?;
 
     let scratch = partial(&self.root).map_err(failed)?;
-    let unpacked = Ext4Unpacker::new(ROOTFS_SIZE_IN_BYTES, None).unpack(image, platform, &scratch, None);
+    let unpacked = EXT4Unpacker::new(ROOTFS_SIZE_IN_BYTES, None).unpack(image, platform, &scratch, None);
     let moved = unpacked
       .map_err(EngineError::from)
       .and_then(|_| match std::fs::rename(&scratch, destination) {
