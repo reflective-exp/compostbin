@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// they share a protocol, and a mismatch fails at runtime, not build time.
 macro_rules! initfs_version {
   () => {
-    "0.49.0"
+    "0.51.0"
   };
 }
 
