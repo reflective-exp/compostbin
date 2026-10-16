@@ -14,11 +14,12 @@
 use super::files::partial;
 use super::note;
 use super::progress::Meter;
-use super::store::{INITFS_REFERENCE, KERNEL_IN_ARCHIVE, KERNEL_URL, Store};
+use super::store::Store;
 use crate::error::EngineError;
 use containerization_framework::containerization::container::Mount;
 use containerization_framework::containerization::vm::SystemPlatform;
 use containerization_framework::containerization_error::Code;
+use containerization_framework::versions::{INIT_IMAGE, KERNEL_ARCHIVE_URL, KERNEL_IN_ARCHIVE};
 use std::path::Path;
 use std::process::Command;
 
@@ -59,7 +60,7 @@ fn kernel(store: &Store) -> Result<(), EngineError> {
   fetched
 }
 
-/// Downloads [`KERNEL_URL`] into `scratch` and returns where its kernel landed.
+/// Downloads [`KERNEL_ARCHIVE_URL`] into `scratch` and returns where its kernel landed.
 ///
 /// To a file, not a pipe: the archive is hundreds of megabytes and `tar` reads
 /// only the kernels out of it. In Kata's release [`KERNEL_IN_ARCHIVE`] links to
@@ -68,12 +69,12 @@ fn kernel(store: &Store) -> Result<(), EngineError> {
 fn fetch_kernel(scratch: &Path) -> Result<std::path::PathBuf, EngineError> {
   let archive = scratch.join("kernel.tar.xz");
 
-  note(&format!("downloading a kernel from {KERNEL_URL}"));
+  note(&format!("downloading a kernel from {KERNEL_ARCHIVE_URL}"));
   run(
     Command::new("curl")
       .args(["--fail", "--silent", "--show-error", "--location", "--output"])
       .arg(&archive)
-      .arg(KERNEL_URL),
+      .arg(KERNEL_ARCHIVE_URL),
   )?;
 
   let link = Path::new(KERNEL_IN_ARCHIVE);
@@ -96,7 +97,12 @@ fn fetch_kernel(scratch: &Path) -> Result<std::path::PathBuf, EngineError> {
     .canonicalize()
     .ok()
     .filter(|kernel| kernel.is_file())
-    .ok_or_else(|| EngineError::failed("fetch a kernel", format!("{KERNEL_URL} holds no {KERNEL_IN_ARCHIVE}")))
+    .ok_or_else(|| {
+      EngineError::failed(
+        "fetch a kernel",
+        format!("{KERNEL_ARCHIVE_URL} holds no {KERNEL_IN_ARCHIVE}"),
+      )
+    })
 }
 
 fn run(command: &mut Command) -> Result<(), EngineError> {
@@ -123,7 +129,7 @@ fn initfs(store: &Store) -> Result<(), EngineError> {
     return Ok(());
   }
 
-  let failed = |error: std::io::Error| EngineError::failed(format!("unpack {INITFS_REFERENCE}"), error);
+  let failed = |error: std::io::Error| EngineError::failed(format!("unpack {INIT_IMAGE}"), error);
   let directory = destination
     .parent()
     .expect("the init image is inside the store");
@@ -131,14 +137,14 @@ fn initfs(store: &Store) -> Result<(), EngineError> {
 
   let images = store.images()?;
 
-  match images.get(INITFS_REFERENCE, false) {
-    Err(error) if error.is_code(Code::NotFound) => note(&format!("pulling {INITFS_REFERENCE}")),
+  match images.get(INIT_IMAGE, false) {
+    Err(error) if error.is_code(Code::NotFound) => note(&format!("pulling {INIT_IMAGE}")),
     Err(error) => return Err(error.into()),
     Ok(_) => {}
   }
 
   let meter = Meter::new();
-  let image = images.get_init_image(INITFS_REFERENCE, None, meter.handler())?;
+  let image = images.get_init_image(INIT_IMAGE, None, meter.handler())?;
   drop(meter);
   // Unpacked aside and moved into place: no half-written file, no sharing
   // between concurrent first builds.

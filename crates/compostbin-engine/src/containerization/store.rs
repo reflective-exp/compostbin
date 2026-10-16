@@ -13,45 +13,25 @@
 use crate::error::EngineError;
 use containerization_framework::containerization::image::{Image, ImageStore};
 use containerization_framework::containerization_oci::content::LocalContentStore;
+use containerization_framework::versions::{INIT_IMAGE, KERNEL_ARCHIVE_URL};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// The init image release booted: the initfs carrying `vminitd`, the agent
-/// Containerization talks to over vsock.
-///
-/// Must match the Containerization release `containerization-framework` builds:
-/// they share a protocol, and a mismatch fails at runtime, not build time.
-macro_rules! initfs_version {
-  () => {
-    "0.51.0"
-  };
+/// The Containerization release of [`INIT_IMAGE`]: its tag.
+pub fn initfs_version() -> &'static str {
+  INIT_IMAGE
+    .rsplit_once(':')
+    .map_or(INIT_IMAGE, |(_, tag)| tag)
 }
 
-macro_rules! kernel_version {
-  () => {
-    "3.17.0"
-  };
+/// The Kata Containers release of [`KERNEL_ARCHIVE_URL`]: the directory it is
+/// published under.
+pub fn kernel_version() -> &'static str {
+  KERNEL_ARCHIVE_URL
+    .rsplit('/')
+    .nth(1)
+    .unwrap_or(KERNEL_ARCHIVE_URL)
 }
-
-pub const INITFS_VERSION: &str = initfs_version!();
-pub const INITFS_REFERENCE: &str = concat!("ghcr.io/apple/containerization/vminit:", initfs_version!());
-
-/// Kata Containers' static build, the release Containerization's Makefile pins.
-/// Downloaded, since no one publishes a kernel as an image.
-pub const KERNEL_VERSION: &str = kernel_version!();
-
-/// The archive [`KERNEL_VERSION`] is published in.
-pub const KERNEL_URL: &str = concat!(
-  "https://github.com/kata-containers/kata-containers/releases/download/",
-  kernel_version!(),
-  "/kata-static-",
-  kernel_version!(),
-  "-arm64.tar.xz"
-);
-
-/// The kernel's path inside [`KERNEL_URL`]'s archive. A symlink to the
-/// versioned kernel beside it.
-pub const KERNEL_IN_ARCHIVE: &str = "opt/kata/share/kata-containers/vmlinux.container";
 
 const CONTAINERS: &str = "containers";
 const CONTENT: &str = "content";
@@ -98,14 +78,16 @@ impl Store {
   /// pin finds nothing at the new path and provisioning fetches it, rather
   /// than booting what an older release left behind.
   pub fn kernel(&self) -> PathBuf {
-    self.root.join(format!("kernels/vmlinux-{KERNEL_VERSION}"))
+    self
+      .root
+      .join(format!("kernels/vmlinux-{}", kernel_version()))
   }
 
-  /// Where [`INITFS_REFERENCE`] is unpacked, and booted from.
+  /// Where [`INIT_IMAGE`] is unpacked, and booted from.
   pub fn initfs(&self) -> PathBuf {
     self
       .root
-      .join(format!("initfs/vminit-{INITFS_VERSION}.ext4"))
+      .join(format!("initfs/vminit-{}.ext4", initfs_version()))
   }
 
   /// One directory per container, builders' and sessions' alike.
@@ -192,13 +174,29 @@ mod tests {
 
     assert_eq!(
       store.kernel(),
-      Path::new(&format!("/images/kernels/vmlinux-{KERNEL_VERSION}"))
+      Path::new(&format!("/images/kernels/vmlinux-{}", kernel_version()))
     );
     assert_eq!(
       store.initfs(),
-      Path::new(&format!("/images/initfs/vminit-{INITFS_VERSION}.ext4"))
+      Path::new(&format!("/images/initfs/vminit-{}.ext4", initfs_version()))
     );
-    assert!(INITFS_REFERENCE.ends_with(INITFS_VERSION));
+  }
+
+  /// Versions are parsed from the framework's constants, so a release that
+  /// changes their shape fails here instead of naming a file after a URL.
+  #[test]
+  fn reads_each_version_off_the_framework_pins() {
+    for version in [initfs_version(), kernel_version()] {
+      assert!(
+        version
+          .split('.')
+          .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())),
+        "{version} should be a dotted release number"
+      );
+    }
+
+    assert!(INIT_IMAGE.ends_with(&format!(":{}", initfs_version())));
+    assert!(KERNEL_ARCHIVE_URL.ends_with(&format!("/kata-static-{}-arm64.tar.xz", kernel_version())));
   }
 
   #[test]

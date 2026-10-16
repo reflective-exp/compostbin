@@ -447,8 +447,8 @@ impl Engine for FrameworkEngine {
   fn version(&self) -> String {
     format!(
       "Containerization {}, kernel {}",
-      store::INITFS_VERSION,
-      store::KERNEL_VERSION
+      store::initfs_version(),
+      store::kernel_version()
     )
   }
 }

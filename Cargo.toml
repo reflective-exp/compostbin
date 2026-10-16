@@ -18,7 +18,7 @@ version = "0.15.0"
 compostbin-engine = { path = "crates/compostbin-engine" }
 clap = { version = "4", features = ["derive"] }
 compostbin-core = { path = "crates/compostbin-core" }
-containerization-framework = "0.8"
+containerization-framework = "0.9"
 getrandom = "0.4"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
