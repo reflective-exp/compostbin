@@ -1,10 +1,4 @@
 #![cfg(feature = "integration")]
-//! What a session can see, and where.
-//!
-//! The mount table is built on the host and asserted on there by unit tests;
-//! what those cannot say is whether the guest really ends up with the tree they
-//! describe — that a read-only mount refuses a write, that an edit lands on the
-//! host rather than in the container, that nothing undeclared is reachable.
 
 use compostbin_core::session::CLAUDE_HOME_TARGET;
 use compostbin_test::{Project, stderr};
@@ -21,8 +15,7 @@ fn project_is_the_workdir_and_writes_reach_the_host() {
   );
 
   assert_eq!(
-    seen,
-    format!("/workspace/{}\nwritten on the host", "cbt-project-dir"),
+    seen, "/workspace/cbt-project-dir\nwritten on the host",
     "the session starts in the project, which is mounted under its own name"
   );
   assert_eq!(
@@ -73,9 +66,6 @@ fn readonly_path_refuses_writes() {
   );
 }
 
-/// `target` is for the rare thing that has to appear at a fixed location.
-/// Everything else lands under `/workspace/<basename>`, which is what keeps the
-/// host's layout out of the container.
 #[test]
 fn a_declared_target_is_where_the_path_lands() {
   let project = Project::new("cbt-target");
@@ -102,9 +92,6 @@ target = "/opt/vendor"
   );
 }
 
-/// The uncommitted overlay is part of the mount table like any other entry:
-/// `add --local` writes it, and a session that loads the manifest mounts what
-/// it names, with the flags it named.
 #[test]
 fn the_local_manifest_mounts_too() {
   let project = Project::new("cbt-local");
@@ -143,12 +130,10 @@ source = "{}"
   );
 }
 
-/// A project inside a `[workspace] roots` tree is not mounted twice: it is
-/// reached through the root, which is what `add` says when it records nothing.
 #[test]
 fn project_inside_a_root_mounts_once() {
   let project = Project::new("cbt-in-root");
-  let root = project.home().to_path_buf();
+  let root = project.home();
   project.manifest(&format!(
     r#"
 [workspace]
@@ -170,7 +155,6 @@ roots = ["{}"]
   );
 }
 
-/// The conversation `--continue` resumes lives in the home, not the container.
 #[test]
 fn claude_home_outlives_the_container() {
   let project = Project::new("cbt-claude-home");
@@ -182,8 +166,7 @@ fn claude_home_outlives_the_container() {
     "remembered\n",
     "the guest's Claude home is a directory on the host that the container only borrows"
   );
-  // A second `exec` is a second container: the first died with the process that
-  // created it.
+  // A second `exec` creates a second container.
   assert_eq!(
     project.guest_output(&format!("cat {CLAUDE_HOME_TARGET}/marker")),
     "remembered",

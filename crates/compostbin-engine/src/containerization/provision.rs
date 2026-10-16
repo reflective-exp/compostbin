@@ -1,17 +1,7 @@
-//! Putting a kernel and an init image in the store.
-//!
-//! A VM needs a kernel to boot and an init image to boot into. Both are fetched:
-//!
-//! - the init image is an OCI image, pulled through `ImageStore` and unpacked
-//!   to a block of its own;
-//! - the kernel is not published as an image, so it comes from Kata Containers'
-//!   static release, as in Containerization's Makefile, through `curl` and
-//!   `tar`.
-//!
-//! Idempotent and cheap when there is nothing to do, so `build` calls it every
-//! time.
+//! The kernel is not published as an OCI image, so it comes from Kata
+//! Containers' static release via `curl` and `tar`.
 
-use super::files::partial;
+use super::files::{partial, settle};
 use super::note;
 use super::progress::Meter;
 use super::store::Store;
@@ -20,7 +10,7 @@ use containerization_framework::containerization::container::Mount;
 use containerization_framework::containerization::vm::SystemPlatform;
 use containerization_framework::containerization_error::Code;
 use containerization_framework::versions::{INIT_IMAGE, KERNEL_ARCHIVE_URL, KERNEL_IN_ARCHIVE};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub fn provision(store: &Store) -> Result<(), EngineError> {
@@ -30,12 +20,10 @@ pub fn provision(store: &Store) -> Result<(), EngineError> {
   initfs(store)
 }
 
-/// The init image, read-only, as `ContainerManager(initfs:)` boots it.
 pub fn initfs_mount(store: &Store) -> Mount {
   Mount::block("ext4", store.initfs().display().to_string(), "/", &["ro"], &[])
 }
 
-/// Downloads and unpacks the kernel, unless it is already there.
 fn kernel(store: &Store) -> Result<(), EngineError> {
   let destination = store.kernel();
 
@@ -49,8 +37,7 @@ fn kernel(store: &Store) -> Result<(), EngineError> {
     .expect("the kernel is inside the store");
   std::fs::create_dir_all(directory).map_err(|error| failed(&error))?;
 
-  // Unpacked aside and moved, so an interrupted provision never leaves a
-  // half-written kernel that looks complete.
+  // Unpacked aside and moved, so an interrupted provision never leaves a partial kernel.
   let scratch = partial(directory).map_err(|error| failed(&error))?;
   std::fs::create_dir(&scratch).map_err(|error| failed(&error))?;
   let fetched =
@@ -60,13 +47,8 @@ fn kernel(store: &Store) -> Result<(), EngineError> {
   fetched
 }
 
-/// Downloads [`KERNEL_ARCHIVE_URL`] into `scratch` and returns where its kernel landed.
-///
-/// To a file, not a pipe: the archive is hundreds of megabytes and `tar` reads
-/// only the kernels out of it. In Kata's release [`KERNEL_IN_ARCHIVE`] links to
-/// the versioned kernel beside it, so every kernel there is unpacked and the
-/// link followed.
-fn fetch_kernel(scratch: &Path) -> Result<std::path::PathBuf, EngineError> {
+/// [`KERNEL_IN_ARCHIVE`] is a symlink to a versioned kernel beside it, so every kernel is unpacked and the link followed.
+fn fetch_kernel(scratch: &Path) -> Result<PathBuf, EngineError> {
   let archive = scratch.join("kernel.tar.xz");
 
   note(&format!("downloading a kernel from {KERNEL_ARCHIVE_URL}"));
@@ -91,9 +73,8 @@ fn fetch_kernel(scratch: &Path) -> Result<std::path::PathBuf, EngineError> {
       .arg(format!("*{}/vmlinux*", kernels.display())),
   )?;
 
-  let unpacked = scratch.join(link);
-
-  unpacked
+  scratch
+    .join(link)
     .canonicalize()
     .ok()
     .filter(|kernel| kernel.is_file())
@@ -118,10 +99,7 @@ fn run(command: &mut Command) -> Result<(), EngineError> {
   Ok(())
 }
 
-/// Pulls and unpacks the init image, unless it is already there.
-///
-/// `get_init_image` pulls on its own; checking first lets it announce the pull,
-/// the slow part of a first build, which would otherwise look like a hang.
+/// Checks the store first only to announce the pull, which `get_init_image` does silently.
 fn initfs(store: &Store) -> Result<(), EngineError> {
   let destination = store.initfs();
 
@@ -146,17 +124,12 @@ fn initfs(store: &Store) -> Result<(), EngineError> {
   let meter = Meter::new();
   let image = images.get_init_image(INIT_IMAGE, None, meter.handler())?;
   drop(meter);
-  // Unpacked aside and moved into place: no half-written file, no sharing
-  // between concurrent first builds.
+  // Unpacked aside so concurrent first builds never share a partial file.
   let scratch = partial(directory).map_err(failed)?;
-  let unpacked = image.init_block(&scratch, SystemPlatform::LINUX_ARM);
-  let moved = unpacked.map_err(EngineError::from).and_then(|_| {
-    match std::fs::rename(&scratch, &destination) {
-      // Another build unpacked it first; its copy is equivalent.
-      Err(_) if destination.is_file() => Ok(()),
-      moved => moved.map_err(failed),
-    }
-  });
+  let moved = image
+    .init_block(&scratch, SystemPlatform::LINUX_ARM)
+    .map_err(EngineError::from)
+    .and_then(|_| settle(&scratch, &destination).map_err(failed));
   let _ = std::fs::remove_file(&scratch);
 
   moved

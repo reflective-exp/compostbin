@@ -1,25 +1,15 @@
-//! Building an image.
-//!
-//! Pull the base, unpack it to a writable ext4 block, boot it, run each step as
-//! an exec, export the block to a tar, and store that as a single-layer image.
-//! All in-process through Containerization, with no daemon.
-//!
-//! The image is one layer regardless of step count. The cache is block
-//! snapshots, not layers: a rebuild resumes from the deepest matching one. See
-//! [`super::snapshots`].
-//!
-//! A build also removes stale builder rootfs and unreferenced blobs.
+//! The built image is always one layer; the cache is rootfs block snapshots, not layers.
 
 use super::cache::Keys;
 use super::oci::{self, Built, ImageConfig};
 use super::progress::Meter;
 use super::provision::initfs_mount;
-use super::snapshots::{Salted, Snapshots};
+use super::snapshots::{Salted, Snapshots, short};
 use super::store::Store;
 use super::unpacked::{ROOTFS_SIZE_IN_BYTES, Unpacked, ext4_root};
 use super::{nat, note, spec};
 use crate::error::EngineError;
-use crate::model::{BuildPlan, BuildStep};
+use crate::model::BuildPlan;
 use containerization_framework::containerization::container::container_manager::CreateWithRootfsOptions;
 use containerization_framework::containerization::container::{
   ContainerManager, FilesystemOperation, LinuxContainer, linux_container,
@@ -36,27 +26,20 @@ use containerization_framework::containerization_oci::runtime::User;
 use serde_json::Value;
 use std::path::Path;
 
-/// What runs a step's script, with the script appended. Not `sh -c`: a silent
-/// mid-step failure would be baked into the image. Every compostbin image is a
-/// Debian derivative, so bash is there.
+/// Not `sh -c`, so a failing command fails the step.
 const SHELL: [&str; 4] = ["/bin/bash", "-euo", "pipefail", "-c"];
 
-/// The builder's first process, which must outlive every step. The base's own
-/// `Cmd` would exit and take the container with it.
+/// Must outlive every step; the base's own `Cmd` could exit and stop the container.
 const KEEPALIVE: [&str; 3] = ["/bin/sh", "-c", "while :; do sleep 86400; done"];
 
-/// Marks a `containers` directory as a builder's, not a session's. Holds the
-/// owning build's pid.
+/// Marks a builder's directory in `containers`; holds the owning build's pid.
 const BUILDER_MARKER: &str = ".builder";
 
-/// Builds `plan` as the builder container `name`, resuming from the snapshots
-/// `keys` name.
 pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<(), EngineError> {
   let (content, images) = store.content()?;
   let platform = Platform::current()?;
 
-  // Pulled up front: the finished image inherits the base's config, and its
-  // digest salts every cache key.
+  // Pulled first because its digest salts every cache key.
   let base = pulled(&images, &plan.base)?;
   let base_config = oci::image_config(&base, &platform)?;
   let environment = oci::merge(oci::strings(&base_config, "Env"), &plan.environment);
@@ -70,7 +53,6 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
     plan.workdir.as_deref(),
   );
 
-  // Nothing changed: re-tag, skipping the export.
   if plan.cache
     && let Some(descriptor) = snapshots.image(&keys.image)
     && oci::holds(&content, &descriptor)
@@ -109,12 +91,10 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
 
   let descriptor = ingest(&content, &rootfs, plan, base_config, environment, platform)?;
 
-  // `create` replaces the reference a rebuild already has.
   images.create(&image::Description::new(&plan.tag, descriptor.clone()))?;
   snapshots.save_image(&descriptor, &keys.image);
 
-  // Not `ContainerManager::delete`: a fully cached build has no manager, and
-  // its only extra work is releasing a network interface, which there isn't.
+  // Not `ContainerManager::delete`: a fully cached build has no manager.
   let _ = std::fs::remove_dir_all(&directory);
 
   reclaim(store, &images);
@@ -123,9 +103,7 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
   Ok(())
 }
 
-/// Puts a rootfs at `rootfs` and returns the index of the first step to run:
-/// from the deepest cached step, else the cached unpacked base, else a fresh
-/// unpack.
+/// Returns the index of the first step to run.
 fn prepare(
   rootfs: &Path,
   plan: &BuildPlan,
@@ -165,10 +143,7 @@ fn prepare(
   Ok(0)
 }
 
-/// `reference` from the store, pulled first if missing.
-///
-/// Not `get(_, pull: true)`, which pulls without progress or a word, so the
-/// slowest part of a first build would look like a hang.
+/// Not `get(_, true)`, which pulls without reporting progress.
 fn pulled(images: &ImageStore, reference: &str) -> Result<Image, EngineError> {
   match images.get(reference, false) {
     Err(error) if error.is_code(Code::NotFound) => {
@@ -185,7 +160,6 @@ fn pulled(images: &ImageStore, reference: &str) -> Result<Image, EngineError> {
   }
 }
 
-/// What every step's container is made from.
 struct Builder<'a> {
   store: &'a Store,
   images: &'a ImageStore,
@@ -197,8 +171,6 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-  /// Runs the steps from `start` in one container, snapshotting the rootfs
-  /// after each.
   fn run(&self, start: usize, keys: &Salted, snapshots: &Snapshots) -> Result<(), EngineError> {
     let kernel = Kernel::new(self.store.kernel(), SystemPlatform::LINUX_ARM);
     let mut manager = ContainerManager::new(&kernel, &initfs_mount(self.store), self.images, Default::default())?;
@@ -224,7 +196,7 @@ impl Builder<'_> {
     });
 
     if ran.is_err() {
-      // Left for inspection, not cached; the next build sweeps it.
+      // Left for inspection; the next build sweeps it.
       let _ = container.stop();
       return ran;
     }
@@ -234,8 +206,6 @@ impl Builder<'_> {
     Ok(())
   }
 
-  /// A step's container: held open by the keepalive, as root in `/`, on the
-  /// network (steps that install anything need it), with the plan's mounts.
   fn configuration(
     &self,
   ) -> impl FnOnce(&mut linux_container::Configuration) -> Result<(), containerization_framework::Error> + Send + 'static
@@ -264,10 +234,8 @@ impl Builder<'_> {
     }
   }
 
-  /// Runs one step to completion, its output on this process's stderr,
-  /// failing when it does.
   fn step(&self, container: &LinuxContainer, index: usize) -> Result<(), EngineError> {
-    let step: &BuildStep = &self.plan.steps[index];
+    let step = &self.plan.steps[index];
 
     note(&format!("--> {}", step.name));
 
@@ -303,21 +271,12 @@ impl Builder<'_> {
   }
 }
 
-/// Saves `rootfs` under `key` while `container` runs on it.
-///
-/// Freezing flushes the guest's writes to the image file and holds new ones,
-/// so the clone is as consistent as after a `stop`. Trimming first keeps
-/// blocks the guest freed out of the clone. A failed trim costs only disk, a
-/// failed freeze only the cache entry; neither fails the build.
+/// Freezing flushes guest writes so the clone is consistent; trimming first keeps freed blocks out of it.
 fn snapshot(container: &LinuxContainer, rootfs: &Path, snapshots: &Snapshots, key: &str) -> Result<(), EngineError> {
-  // A device without discard support refuses this; nothing is lost.
   let _ = container.filesystem_operation(FilesystemOperation::Trim, "/");
 
   if let Err(error) = container.filesystem_operation(FilesystemOperation::Freeze, "/") {
-    note(&format!(
-      "could not cache the rootfs for {}: {error}",
-      &key[..12.min(key.len())]
-    ));
+    note(&format!("could not cache the rootfs for {}: {error}", short(key)));
     return Ok(());
   }
 
@@ -327,8 +286,7 @@ fn snapshot(container: &LinuxContainer, rootfs: &Path, snapshots: &Snapshots, ke
   Ok(())
 }
 
-/// The guest user named, as the image's `/etc/passwd` resolves it. `None` is
-/// root.
+/// `None` is root.
 pub fn user(name: Option<&str>) -> User {
   User {
     username: name.unwrap_or_default().to_string(),
@@ -336,12 +294,6 @@ pub fn user(name: Option<&str>) -> User {
   }
 }
 
-/// Exports the built rootfs and stores it as an image of one layer, returning
-/// the index descriptor its reference points at.
-///
-/// The fragile step: users, modes, symlinks, hardlinks and extended attributes
-/// must survive the export. Only a session on the built image verifies they
-/// did.
 fn ingest(
   content: &LocalContentStore,
   rootfs: &Path,
@@ -368,11 +320,7 @@ fn ingest(
   stored
 }
 
-/// The built image's config: the base's, with the plan's environment, user,
-/// working directory and labels over it.
-fn config(plan: &BuildPlan, base: ImageConfig, environment: Vec<String>) -> ImageConfig {
-  let mut config = base;
-
+fn config(plan: &BuildPlan, mut config: ImageConfig, environment: Vec<String>) -> ImageConfig {
   config.insert("Env".to_string(), environment.into());
 
   if let Some(user) = &plan.user {
@@ -383,11 +331,7 @@ fn config(plan: &BuildPlan, base: ImageConfig, environment: Vec<String>) -> Imag
     config.insert("WorkingDir".to_string(), workdir.display().to_string().into());
   }
 
-  // The base's labels carry over, as `LABEL` does; the plan's win on a key
-  // both set.
-  let labels = config
-    .entry("Labels")
-    .or_insert_with(|| Value::Object(Default::default()));
+  let labels = config.entry("Labels").or_insert(Value::Null);
 
   if !labels.is_object() {
     *labels = Value::Object(Default::default());
@@ -402,11 +346,7 @@ fn config(plan: &BuildPlan, base: ImageConfig, environment: Vec<String>) -> Imag
   config
 }
 
-/// Deletes unreferenced blobs (chiefly the previous build's multi-gigabyte
-/// layer, orphaned by the re-tag) and the unpacked rootfs of removed images.
-///
-/// Only after the re-tag: until then this build's own blobs are unreferenced.
-/// Failure is noted, not returned; the image is already usable.
+/// Must run after the re-tag, since until then this build's own blobs are unreferenced.
 fn reclaim(store: &Store, images: &ImageStore) {
   if let Ok(listed) = images.list() {
     Unpacked::at(store.unpacked()).evict(listed.iter().map(Image::digest));
@@ -424,10 +364,7 @@ fn reclaim(store: &Store, images: &ImageStore) {
   }
 }
 
-/// Removes rootfs left by failed builds.
-///
-/// Only marked directories (sessions share `containers`), and only when the
-/// owning pid is gone (builds in other projects share this store).
+/// Only removes marked directories whose owning pid is gone; sessions and other builds share `containers`.
 fn sweep_builders(store: &Store, current: &str) {
   let Ok(directories) = std::fs::read_dir(store.containers()) else {
     return;
@@ -442,7 +379,7 @@ fn sweep_builders(store: &Store, current: &str) {
       continue;
     };
 
-    // SAFETY: signal 0 delivers nothing; it only asks whether the pid exists.
+    // SAFETY: signal 0 only checks whether the pid exists.
     if let Ok(pid) = owner.trim().parse::<libc::pid_t>()
       && unsafe { libc::kill(pid, 0) } == 0
     {
@@ -519,7 +456,6 @@ mod tests {
     assert_eq!(user(Some("claude")).username, "claude");
   }
 
-  /// Sessions share `containers`, and a live build in another project does too.
   #[test]
   fn sweeps_only_builders_whose_build_has_gone() {
     let root = tempfile::tempdir().expect("a temp dir");

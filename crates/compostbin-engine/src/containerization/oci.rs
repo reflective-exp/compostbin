@@ -1,24 +1,18 @@
-//! The OCI documents an image is made of: reading an image's config, and
-//! writing a built rootfs into the store as an image of one layer.
-
+use super::lock;
 use crate::error::EngineError;
 use containerization_framework::containerization::image::Image;
 use containerization_framework::containerization_oci::content::{ContentWriter, LocalContentStore};
 use containerization_framework::containerization_oci::image::{Descriptor, MediaTypes, Platform};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
-/// Uncompressed: nothing pushes these images, and an uncompressed blob's digest
-/// is also its diffID, so both are right in one pass.
+/// Uncompressed, so a blob's digest is also its diffID.
 const LAYER: &str = MediaTypes::IMAGE_LAYER;
 
-/// What an image's config says a process runs as: `User`, `Env`, `Entrypoint`,
-/// `Cmd`, `WorkingDir` and `Labels`. Empty for an image that says nothing.
 pub type ImageConfig = Map<String, Value>;
 
-/// The config of `image`'s manifest for `platform`, as written: a built image
-/// keeps the keys the framework's `ImageConfig` has no field for.
+/// Raw JSON, keeping keys the framework's `ImageConfig` has no field for.
 pub fn image_config(image: &Image, platform: &Platform) -> Result<ImageConfig, EngineError> {
   let digest = image.manifest(platform)?.config.digest;
   let data = image.get_content(&digest)?.data()?;
@@ -31,7 +25,6 @@ pub fn image_config(image: &Image, platform: &Platform) -> Result<ImageConfig, E
   })
 }
 
-/// `config`'s `key`, as strings. Empty when it has none.
 pub fn strings(config: &ImageConfig, key: &str) -> Vec<String> {
   config
     .get(key)
@@ -42,16 +35,12 @@ pub fn strings(config: &ImageConfig, key: &str) -> Vec<String> {
     .collect()
 }
 
-/// What a built image's config is written from.
 pub struct Built {
-  /// The exported rootfs, as a tar.
   pub layer: PathBuf,
   pub config: ImageConfig,
   pub platform: Platform,
 }
 
-/// Stores `built` as an image of one layer, returning the descriptor of the
-/// index a reference is to point at.
 pub fn ingest(content: &LocalContentStore, built: Built) -> Result<Descriptor, EngineError> {
   let index = Arc::new(Mutex::new(None));
   let written = Arc::clone(&index);
@@ -61,14 +50,14 @@ pub fn ingest(content: &LocalContentStore, built: Built) -> Result<Descriptor, E
     let document = |value: Value| writer.write(value.to_string().as_bytes());
 
     let (size, layer) = writer.create(&built.layer)?;
-    let layer = descriptor(LAYER, layer, size);
+    let layer = descriptor(LAYER, &layer, size);
     let platform = platform(&built.platform);
 
     let mut config = platform.clone();
     config["config"] = Value::Object(built.config);
     config["rootfs"] = json!({ "type": "layers", "diff_ids": [layer["digest"]] });
     let (size, digest) = document(config)?;
-    let config = descriptor(MediaTypes::IMAGE_CONFIG, digest, size);
+    let config = descriptor(MediaTypes::IMAGE_CONFIG, &digest, size);
 
     let (size, digest) = document(json!({
       "schemaVersion": 2,
@@ -76,23 +65,23 @@ pub fn ingest(content: &LocalContentStore, built: Built) -> Result<Descriptor, E
       "config": config,
       "layers": [layer],
     }))?;
-    let mut manifest = descriptor(MediaTypes::IMAGE_MANIFEST, digest, size);
+    let mut manifest = descriptor(MediaTypes::IMAGE_MANIFEST, &digest, size);
     manifest["platform"] = platform;
 
     let (size, digest) =
       document(json!({ "schemaVersion": 2, "mediaType": MediaTypes::INDEX, "manifests": [manifest] }))?;
 
-    *written.lock().unwrap_or_else(PoisonError::into_inner) = Some(Descriptor::new(MediaTypes::INDEX, digest, size));
+    *lock(&written) = Some(Descriptor::new(MediaTypes::INDEX, digest, size));
 
     Ok(())
   })?;
 
-  let stored = index.lock().unwrap_or_else(PoisonError::into_inner).take();
-
-  stored.ok_or_else(|| EngineError::failed("store the built image", "nothing was written"))
+  lock(&index)
+    .take()
+    .ok_or_else(|| EngineError::failed("store the built image", "nothing was written"))
 }
 
-fn descriptor(media_type: &str, digest: String, size: i64) -> Value {
+fn descriptor(media_type: &str, digest: &str, size: i64) -> Value {
   json!({ "mediaType": media_type, "digest": digest, "size": size })
 }
 
@@ -106,8 +95,7 @@ fn platform(platform: &Platform) -> Value {
   value
 }
 
-/// Whether every blob under the index `descriptor` names is still stored: a
-/// build's blobs go once nothing refers to them.
+/// Blobs are reclaimed once unreferenced, so a cached descriptor may name missing ones.
 pub fn holds(content: &LocalContentStore, descriptor: &Descriptor) -> bool {
   let read = |digest: &str| -> Option<Value> {
     let data = content.get(digest).ok()??.data().ok()?;
@@ -141,12 +129,10 @@ pub fn holds(content: &LocalContentStore, descriptor: &Descriptor) -> bool {
     })
 }
 
-/// A descriptor as the build cache keeps it.
 pub fn to_json(stored: &Descriptor) -> String {
-  descriptor(&stored.media_type, stored.digest.clone(), stored.size).to_string()
+  descriptor(&stored.media_type, &stored.digest, stored.size).to_string()
 }
 
-/// The descriptor [`to_json`] wrote.
 pub fn from_json(text: &str) -> Option<Descriptor> {
   let value: Value = serde_json::from_str(text).ok()?;
 
@@ -157,11 +143,13 @@ pub fn from_json(text: &str) -> Option<Descriptor> {
   ))
 }
 
-/// `ENV` semantics: `additions` override the base's variables of the same
-/// name, and everything else the base declares is kept, in the base's order.
+/// `ENV` semantics: `additions` replace same-named base variables; the rest keep their order.
 pub fn merge(base: Vec<String>, additions: &[String]) -> Vec<String> {
-  let name = |variable: &str| variable.split('=').next().unwrap_or_default().to_string();
-  let overridden: Vec<String> = additions.iter().map(|variable| name(variable)).collect();
+  fn name(variable: &str) -> &str {
+    variable.split_once('=').map_or(variable, |(name, _)| name)
+  }
+
+  let overridden: Vec<&str> = additions.iter().map(|variable| name(variable)).collect();
 
   base
     .into_iter()

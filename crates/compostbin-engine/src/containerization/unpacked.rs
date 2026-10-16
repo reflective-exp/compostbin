@@ -1,12 +1,4 @@
-//! Images unpacked once, under `unpacked` in the image store.
-//!
-//! Each container needs its own writable ext4 rootfs, and unpacking rewrites
-//! gigabytes. So each image is unpacked once, keyed by digest, and a container
-//! gets a clone of it: free on APFS, costing only the blocks it changes.
-//!
-//! A build evicts an entry once no image in the store has its digest.
-
-use super::files::{self, clone, partial};
+use super::files::{self, clone, partial, settle};
 use crate::error::EngineError;
 use containerization_framework::containerization::container::Mount;
 use containerization_framework::containerization::image::{EXT4Unpacker, Image};
@@ -15,17 +7,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-/// Ceiling for an unpack: sparse, so a ceiling, not a cost, but nothing in a
-/// container may outgrow it. `ContainerManager`'s own default.
-///
-/// Not part of an entry's key: an image unpacked once is reused whatever
-/// ceiling the next container asks for.
+/// A sparse ceiling no container may outgrow; not part of an entry's key.
 pub const ROOTFS_SIZE_IN_BYTES: u64 = 8 << 30;
 
-/// An unpack takes minutes at most; an older partial was abandoned.
 const ABANDONED_AFTER: Duration = Duration::from_secs(60 * 60);
 
-/// An ext4 image file as the guest's root filesystem.
 pub fn ext4_root(rootfs: &Path) -> Mount {
   Mount::block("ext4", rootfs.display().to_string(), "/", &[], &[])
 }
@@ -43,14 +29,10 @@ impl Unpacked {
     self.root.join(format!("{}.ext4", digest.replace(':', "-")))
   }
 
-  /// Whether the image is already unpacked, so a first boot can say it is
-  /// about to unpack it.
   pub fn holds(&self, image: &Image) -> bool {
     self.path(&image.digest()).is_file()
   }
 
-  /// Clones the image's unpacked rootfs to `destination`, unpacking it first on
-  /// the image's first boot.
   pub fn rootfs(&self, image: &Image, platform: &Platform, destination: &Path) -> Result<Mount, EngineError> {
     let source = self.path(&image.digest());
 
@@ -70,21 +52,16 @@ impl Unpacked {
     std::fs::create_dir_all(&self.root).map_err(failed)?;
 
     let scratch = partial(&self.root).map_err(failed)?;
-    let unpacked = EXT4Unpacker::new(ROOTFS_SIZE_IN_BYTES, None).unpack(image, platform, &scratch, None);
-    let moved = unpacked
+    let moved = EXT4Unpacker::new(ROOTFS_SIZE_IN_BYTES, None)
+      .unpack(image, platform, &scratch, None)
       .map_err(EngineError::from)
-      .and_then(|_| match std::fs::rename(&scratch, destination) {
-        // Another container unpacked it first; its copy is equivalent.
-        Err(_) if destination.is_file() => Ok(()),
-        moved => moved.map_err(failed),
-      });
+      .and_then(|_| settle(&scratch, destination).map_err(failed));
     let _ = std::fs::remove_file(&scratch);
 
     moved
   }
 
-  /// Removes entries no stored image has the digest of, and abandoned partials.
-  /// Running containers hold clones, never entries, so nothing in use is lost.
+  /// Safe while containers run, since they hold clones, never entries.
   pub fn evict(&self, keeping: impl IntoIterator<Item = String>) {
     let kept: BTreeSet<PathBuf> = keeping
       .into_iter()

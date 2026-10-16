@@ -1,12 +1,6 @@
 #!/bin/sh
-# Ask the host to run an allowlisted command and behave as though this shell had
-# run it: stdin goes to it, stdout and stderr come back on ours, we exit with its
-# status. A shell script because the container is Linux and compostbin a macOS
-# binary; it speaks the spool protocol in `host`.
-#
-# Output arrives as numbered chunks, not a stream we watch grow: a file observed
-# here while the host appends to it stays stale forever. Each chunk is renamed
-# into place, so it is complete before we open it.
+# Runs an allowlisted command on the host via the spool, forwarding stdio and exit status.
+# Output arrives as renamed chunk files because a file the host appends to stays stale here.
 set -eu
 
 spool=/run/compostbin/host
@@ -21,9 +15,7 @@ if [ "$#" -lt 1 ]; then
   exit 64
 fi
 
-# The request is one field per line, so a newline would split an argument in
-# two, and once written the host cannot tell. Refused here, with the status a
-# host refusal has.
+# Requests are one field per line.
 newline='
 '
 for argument in "$@"; do
@@ -35,17 +27,14 @@ for argument in "$@"; do
   esac
 done
 
-# Timestamp first, so ids sort into arrival order and are served in it. The
-# random suffix is for concurrency: subagents call this script independently,
-# and two must not pick the same id.
+# Timestamp first so ids sort in arrival order; the random suffix keeps concurrent callers apart.
 id="$(date +%s)-$$-$(od -An -N2 -tu2 < /dev/urandom | tr -d ' ')"
 responses="$spool/responses"
 input="$responses/$id.in"
 status="$responses/$id.status"
 tty="$responses/$id.tty"
 
-# Emits one stream's chunks in sequence order, removing each once written. The
-# glob sorts lexicographically, hence fixed-width sequence numbers.
+# Relies on fixed-width sequence numbers for glob order.
 drain() {
   for chunk in "$responses/$id.$1."*; do
     [ -e "$chunk" ] || continue
@@ -57,31 +46,21 @@ drain() {
   done
 }
 
-# Input first, so anything piped in is waiting when the command starts. A file
-# has no EOF of its own, so the marker says input has ended; if our stdin never
-# closes it never appears, and the host stops pumping at exit.
+# The .eof marker tells the host input has ended.
 : > "$input"
-# Duplicated onto another descriptor: a background job in a non-interactive shell
-# gets stdin from /dev/null, so a plain `cat &` would forward nothing.
+# A background job in a non-interactive shell gets stdin from /dev/null.
 exec 3<&0
 ( cat <&3 >> "$input" 2>/dev/null || true; : > "$input.eof" ) &
 forwarder=$!
 
-# A `tty = true` command gets a terminal only if we have one to show it on;
-# output captured by a pipe or a file gets plain pipes instead.
 if [ -t 1 ]; then
   : > "$tty"
 fi
 
-# One field per line, command first. Nothing quotes or escapes, so there is no
-# quoting bug to have; a newline in an argument was refused above.
 printf '%s\n' "$@" > "$spool/requests/$id.partial"
-# Rename, so the agent never sees a half-written request.
 mv "$spool/requests/$id.partial" "$spool/requests/$id.request"
 
-# Status is published last, so checking it *before* draining means the drain that
-# follows sees every chunk. Polled quickly at first, so a short command returns
-# promptly, then backing off to 0.1s.
+# Status is written last, so checking it before draining guarantees the final drain sees every chunk.
 delay=0.01
 while :; do
   finished=0

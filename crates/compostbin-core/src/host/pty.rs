@@ -1,21 +1,14 @@
-//! A pseudo-terminal for host commands declared `tty = true`.
-//!
-//! This wires up descriptors; it never changes what is executed. The usual
-//! shortcuts — wrapping the command in `script -c` or `sh -c` — would reintroduce
-//! shell parsing, and with it the injection the allowlist exists to prevent.
+//! Never wrap the command in `script -c` or `sh -c`: that reintroduces the shell
+//! injection the allowlist prevents.
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
-/// Nothing tells us the guest's real size, and a plausible one formats better
-/// than the 0x0 a fresh pty reports.
 const COLUMNS: u16 = 120;
 const ROWS: u16 = 40;
 
-/// The slave becomes the command's three standard descriptors; its output comes
-/// back on the master.
 pub struct Pty {
   master: OwnedFd,
   slave: OwnedFd,
@@ -58,8 +51,7 @@ impl Pty {
     })
   }
 
-  /// Points the command's three descriptors at the slave and makes it their
-  /// controlling terminal, so `isatty` is true and signals reach the command.
+  /// Also makes the slave the controlling terminal, so signals reach the command.
   pub fn attach(&self, command: &mut Command) -> io::Result<()> {
     command
       .stdin(self.slave_stdio()?)
@@ -92,8 +84,7 @@ impl Pty {
     Ok(Stdio::from(self.slave.try_clone()?))
   }
 
-  /// Dropping the slave here matters: while any copy stays open on our side,
-  /// master reads block forever instead of ending when the command exits.
+  /// Drops the slave; while any copy stays open here, master reads never end.
   pub fn into_master(self) -> OwnedFd {
     self.master
   }

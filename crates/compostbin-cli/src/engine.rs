@@ -1,12 +1,9 @@
-//! Containerization.framework: building images and selecting the engine.
-
 use compostbin_core::image;
 use compostbin_core::session::Session;
 use compostbin_engine::containerization::{FrameworkBuilder, FrameworkEngine, Store, StoreError};
 use std::error::Error;
 use std::fmt;
 
-/// Says what a build is about to do, and builds it.
 pub fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn Error>> {
   let store = image::store(session.resolver());
 
@@ -21,7 +18,6 @@ pub fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn E
   Ok(0)
 }
 
-/// A store no session can boot from, and what to do about it.
 #[derive(Debug)]
 pub struct Unready(StoreError);
 
@@ -37,8 +33,6 @@ impl Error for Unready {
   }
 }
 
-/// The engine a session runs on: Containerization.framework, in-process.
-/// Nothing else provides images, so the store must be ready first.
 pub fn select(session: &Session) -> Result<FrameworkEngine, Unready> {
   let store = Store::at(image::store(session.resolver()));
 

@@ -1,7 +1,3 @@
-//! What `install` puts on the host: Claude skills, into `~/.claude/skills`, and
-//! the directory profiles are written in. Sessions see the skills through their
-//! bind mounts.
-
 use crate::error::{At, PathError};
 use crate::manifest::PROFILES_DIR;
 use crate::session::settings::HOST_CLAUDE_HOME;
@@ -12,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 struct Skill {
   name: &'static str,
-  /// Paths relative to the skill's directory, and their contents.
   files: &'static [(&'static str, &'static str)],
 }
 
@@ -39,18 +34,14 @@ const SKILLS: &[Skill] = &[Skill {
   ],
 }];
 
-/// What to do to one path, carrying the contents to write when there are any.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
   Create(&'static str),
-  /// An empty directory, for the user to fill.
   CreateDirectory,
   Update(&'static str),
-  /// In a skill's directory but no longer shipped.
   Remove,
 }
 
-/// The verb, as a plan is shown before it is applied.
 impl fmt::Display for Action {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     formatter.write_str(match self {
@@ -67,7 +58,6 @@ pub struct Change {
   pub path: PathBuf,
 }
 
-/// The verb and the path, a directory marked by its trailing `/`.
 impl fmt::Display for Change {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     let slash = if self.action == Action::CreateDirectory {
@@ -79,9 +69,7 @@ impl fmt::Display for Change {
   }
 }
 
-/// What installing would change: the profiles directory when there is none
-/// yet, then the skills. Files already current are left out, so an empty plan
-/// means up to date.
+/// Omits files already current, so an empty plan means up to date.
 pub fn plan(resolver: &PathResolver) -> Result<Vec<Change>, PathError> {
   let mut changes = Vec::new();
   let profiles = resolver.resolve(PROFILES_DIR);
@@ -98,7 +86,6 @@ pub fn plan(resolver: &PathResolver) -> Result<Vec<Change>, PathError> {
   Ok(changes)
 }
 
-/// What installing into `skills_dir` would change.
 fn plan_skills(skills_dir: &Path) -> Result<Vec<Change>, PathError> {
   let mut changes = Vec::new();
 
@@ -147,7 +134,6 @@ pub fn apply(changes: &[Change]) -> Result<(), PathError> {
   Ok(())
 }
 
-/// Every file below `dir`, sorted; none when `dir` does not exist yet.
 fn files_under(dir: &Path) -> Result<Vec<PathBuf>, PathError> {
   let entries = match std::fs::read_dir(dir).at(dir) {
     Ok(entries) => entries,
@@ -232,7 +218,6 @@ mod tests {
     assert!(!dir.join("references/retired.md").exists());
   }
 
-  /// Profiles are written by hand, so `install` only makes somewhere to put them.
   #[test]
   fn creates_the_profiles_directory_once() {
     let temp = TempDir::new().expect("temp dir");
@@ -261,7 +246,6 @@ mod tests {
     assert_eq!(plan(&resolver).expect("plan"), [], "installed is up to date");
   }
 
-  /// Other skills in the same directory are the user's.
   #[test]
   fn leaves_other_skills_alone() {
     let temp = TempDir::new().expect("temp dir");
@@ -288,7 +272,6 @@ mod tests {
     }
   }
 
-  /// A reference file `SKILL.md` does not name is never read.
   #[test]
   fn every_skill_points_at_its_reference_files() {
     for skill in SKILLS {
@@ -312,8 +295,8 @@ mod tests {
       .collect()
   }
 
-  /// Every field, with no `..Default::default()`: adding one to the manifest
-  /// fails to compile here until the docs describe it too.
+  /// No `..Default::default()`, so a new manifest field fails to compile here
+  /// until it is documented.
   fn every_key() -> Manifest {
     Manifest {
       claude: ClaudeConfig {
@@ -397,7 +380,6 @@ mod tests {
     }
   }
 
-  /// Docs teaching a key the manifest refuses are worse than none.
   #[test]
   fn the_manifest_docs_examples_parse() {
     let docs = manifest_text();

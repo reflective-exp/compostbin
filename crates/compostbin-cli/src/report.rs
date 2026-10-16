@@ -1,14 +1,11 @@
-//! Terminal rendering of a diagnosis.
-
 use crate::engine::select;
 use compostbin_core::doctor::{self, Check, Status};
 use compostbin_core::session::Session;
 use compostbin_core::session::credentials::Keychain;
 use std::error::Error;
-use std::fmt::{Display, Formatter, Result};
+use std::fmt;
 
-/// Prints every check; non-zero if any failed, so scripts can gate on it.
-pub fn report_diagnosis(session: &Session) -> std::result::Result<i32, Box<dyn Error>> {
+pub fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
   let checks = doctor::diagnose(
     session,
     &select(session)?,
@@ -21,12 +18,10 @@ pub fn report_diagnosis(session: &Session) -> std::result::Result<i32, Box<dyn E
   Ok(i32::from(checks.iter().any(|check| check.status == Status::Fail)))
 }
 
-/// Every check, as the terminal shows it. A newtype so `Display` can be
-/// implemented for core's checks.
 pub struct Diagnosis<'a>(pub &'a [Check]);
 
-impl Display for Diagnosis<'_> {
-  fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
+impl fmt::Display for Diagnosis<'_> {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     for check in self.0 {
       let label = match check.status {
         Status::Fail => "FAIL",
@@ -36,8 +31,6 @@ impl Display for Diagnosis<'_> {
 
       writeln!(formatter, "{label}  {}: {}", check.name, check.detail)?;
 
-      // Indented, not aligned past the label: findings are usually paths and
-      // need the columns.
       for item in &check.items {
         writeln!(formatter, "    {item}")?;
       }
@@ -68,7 +61,6 @@ mod tests {
     );
   }
 
-  /// A check about several paths is unreadable as one line.
   #[test]
   fn prints_each_finding_on_its_own_line_under_the_check() {
     assert_eq!(

@@ -1,30 +1,18 @@
-//! What a session is told about itself, mounted read-only as Claude's managed
-//! settings.
-//!
-//! From the inside a container looks like an ordinary Debian box: nothing says
-//! the toolchain is missing on purpose, or that `compostbin-host` is the way out
-//! to the host. So every start says it, generated from the manifest, because
-//! hand-written prose repeating an allowlist drifts from it.
-//!
-//! Managed settings rather than `settings.json`, which is the user's and which
-//! `settings::share` overwrites from the host.
+//! Uses managed settings because `settings::share` overwrites `settings.json` from the host.
 
 use crate::error::{At, PathError};
 use crate::host::{CLIPBOARD_COMMAND, served_commands};
 use crate::manifest::Manifest;
 use std::path::Path;
 
-/// Claude's managed settings directory on Linux. Fixed by Claude Code, not by
-/// us: the guest reads this path or nothing.
+/// Fixed by Claude Code on Linux.
 pub const MANAGED_SETTINGS_TARGET: &str = "/etc/claude-code";
-/// The generated pair, under the session state directory.
+/// Relative to the session state directory.
 pub const MANAGED_SETTINGS_DIR: &str = "managed";
 pub const MANAGED_SETTINGS_FILE: &str = "managed-settings.json";
-/// Beside the settings that name it, so one mount carries both.
 pub const BRIEFING_FILE: &str = "session-context.txt";
 
-/// A `SessionStart` hook's stdout is added to Claude's context, so the briefing
-/// is a file the hook prints rather than anything the guest has to find.
+/// Claude adds a `SessionStart` hook's stdout to its context.
 pub fn managed_settings() -> String {
   format!(
     r#"{{
@@ -45,9 +33,6 @@ pub fn managed_settings() -> String {
   )
 }
 
-/// The briefing itself: where the session is, and every host command it may ask
-/// for, rendered from the manifest that serves them. `config` is where that
-/// manifest lives: the project's, or a profile's.
 pub fn briefing(manifest: &Manifest, config: &str) -> String {
   let mut text = String::from(
     "This session is running inside a compostbin container. It is a Debian guest \
@@ -77,8 +62,6 @@ pub fn briefing(manifest: &Manifest, config: &str) -> String {
   let width = commands.keys().map(String::len).max().unwrap_or_default();
 
   for (name, command) in commands.iter() {
-    // The argv gives the name its meaning; the notes are the two ways a command
-    // can differ from exact.
     let mut notes = Vec::new();
     if command.arguments {
       notes.push("takes further arguments");
@@ -116,8 +99,6 @@ pub fn briefing(manifest: &Manifest, config: &str) -> String {
   text
 }
 
-/// The host services this session can reach, which the guest could not
-/// otherwise discover: nothing in it explains why `localhost:7001` answers.
 fn ports(manifest: &Manifest, config: &str) -> String {
   if !manifest.host.has_ports() {
     return String::new();
@@ -139,9 +120,7 @@ fn ports(manifest: &Manifest, config: &str) -> String {
   )
 }
 
-/// Writes both files into `dir`, creating it. Called before the container
-/// starts, since the mount source must exist by then and the guest cannot
-/// create it.
+/// Must run before the container starts, since the mount source has to exist.
 pub fn write(dir: &Path, manifest: &Manifest, config: &str) -> Result<(), PathError> {
   std::fs::create_dir_all(dir).at(dir)?;
 
@@ -216,8 +195,6 @@ mod tests {
     assert!(briefing.contains("when your stdout is a terminal"), "{briefing}");
   }
 
-  /// The default manifest declares no commands, and telling a session to use a
-  /// channel it does not have is worse than saying nothing.
   #[test]
   fn the_briefing_says_so_when_there_is_no_channel() {
     let briefing = briefing(&Manifest::default(), MANIFEST_RELATIVE_PATH);
@@ -239,7 +216,6 @@ mod tests {
     assert!(!super::briefing(&manifest_with_commands(), MANIFEST_RELATIVE_PATH).contains("clipboard"));
   }
 
-  /// A guest told to edit the project's manifest would edit a file nothing reads.
   #[test]
   fn the_briefing_names_the_profile() {
     let briefing = briefing(&manifest_with_commands(), &profile_path("rust"));

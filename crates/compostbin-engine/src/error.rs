@@ -1,15 +1,17 @@
 use std::error::Error;
 use std::fmt;
 
-/// Something the engine or the builder could not do: what was attempted, and
-/// what the attempt said.
 #[derive(Debug)]
 pub enum EngineError {
-  /// Attempted and failed.
-  Failed { action: String, message: String },
-  /// Couldn't be attempted: a prerequisite is missing or unreadable. The fix
-  /// is to provision it, not debug a failure.
-  Unavailable { action: String, message: String },
+  Failed {
+    action: String,
+    message: String,
+  },
+  /// A prerequisite is missing or unreadable.
+  Unavailable {
+    action: String,
+    message: String,
+  },
 }
 
 impl EngineError {
@@ -68,8 +70,6 @@ mod tests {
     );
   }
 
-  /// The framework's error already names its action; wrapping it as a message
-  /// would say it twice.
   #[test]
   fn takes_a_framework_error_as_its_own() {
     let error = EngineError::from(containerization_framework::Error::Unavailable {

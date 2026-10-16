@@ -1,22 +1,16 @@
-//! What the guest asked for, and whether it is allowed.
-
 use crate::error::Refusal;
 use crate::manifest::HostCommand;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-/// The name of an allowlisted command, plus any arguments the guest appended.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
   pub arguments: Vec<String>,
   pub command: String,
 }
 
-/// One field per line, command first: the writer is a shell script, and
-/// `printf '%s\n'` has no escaping to get wrong. So the guest client refuses an
-/// argument containing a newline, which would arrive here as two.
-///
-/// The only way a request is built from what the guest wrote into the spool.
+/// One field per line, command first; the guest client refuses arguments
+/// containing a newline.
 impl FromStr for Request {
   type Err = Refusal;
 
@@ -35,16 +29,13 @@ impl FromStr for Request {
   }
 }
 
-/// A request the allowlist admits.
 #[derive(Debug, Eq, PartialEq)]
 pub struct Resolved {
   pub argv: Vec<String>,
-  /// The command's `tty` flag, not yet whether it gets one.
+  /// The command's `tty` flag; it gets a pty only if the caller has a terminal too.
   pub tty: bool,
 }
 
-/// What to run, or why the request is refused. Pure, so the allowlist decision
-/// is testable without a filesystem or a container.
 pub fn resolve(commands: &BTreeMap<String, HostCommand>, request: &Request) -> Result<Resolved, Refusal> {
   let Some(command) = commands.get(&request.command) else {
     return Err(Refusal::UnknownCommand(request.command.clone()));
@@ -73,10 +64,7 @@ pub fn resolve(commands: &BTreeMap<String, HostCommand>, request: &Request) -> R
   Ok(Resolved { argv, tty: command.tty })
 }
 
-/// Stops a guest argument from swapping in configuration the user never
-/// reviewed. Not a sandbox: the guest can edit the repo, and a command that
-/// builds it runs whatever is there. Matches `--config`, `--config=x`, and for
-/// a single-letter flag the joined `-Zx`.
+/// Matches `--config`, `--config=x`, and for a single-letter flag the joined `-Zx`.
 fn is_denied(deny: &[String], argument: &str) -> bool {
   deny.iter().any(|denied| {
     let short = denied.len() == 2 && denied.starts_with('-') && denied != "--";
@@ -111,7 +99,6 @@ mod tests {
     );
   }
 
-  /// The per-command flag: `test` is exact, `test-one` is not.
   #[test]
   fn refuses_arguments_unless_the_command_opted_in() {
     let filter = vec!["my_test".to_string()];
@@ -146,7 +133,6 @@ mod tests {
     }
   }
 
-  /// A denied prefix must not swallow an argument that merely starts the same.
   #[test]
   fn allows_an_argument_that_only_looks_like_a_denied_one() {
     assert_eq!(
@@ -160,8 +146,6 @@ mod tests {
     );
   }
 
-  /// Nothing is denied that the manifest did not name: `-Z` means something else
-  /// to another toolchain.
   #[test]
   fn denies_only_declared_arguments() {
     let commands = fixtures::commands(&[("run", &["tool"], true)]);
@@ -174,8 +158,6 @@ mod tests {
     );
   }
 
-  /// `--` is two characters but not a single-letter flag, so denying it must not
-  /// deny every long flag.
   #[test]
   fn denying_separator_allows_long_flags() {
     let mut commands = fixtures::commands(&[("run", &["tool"], true)]);

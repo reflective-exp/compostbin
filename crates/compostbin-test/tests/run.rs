@@ -1,15 +1,9 @@
 #![cfg(feature = "integration")]
-//! `compostbin run`: the entrypoint Claude is attached to.
-//!
-//! Everything else here goes through `exec`, which is deliberately the
-//! forgiving one — it may well be what is debugging a broken session. `run` is
-//! the strict one, and the difference between them is only visible from here.
 
 use compostbin_test::{Project, code, stderr, stdout};
 
-/// Claude, with whatever followed `--`. `--version` because it is the one thing
-/// Claude Code does without an account, a terminal, or a network: enough to say
-/// that `run` attached Claude and that its arguments reached it.
+/// `--version` because Claude Code runs it without an account, terminal, or
+/// network.
 #[test]
 fn claude_is_attached_with_its_arguments() {
   let project = Project::new("cbt-run");
@@ -24,9 +18,6 @@ fn claude_is_attached_with_its_arguments() {
   );
 }
 
-/// The other half of `container::failing_setup_still_allows_exec`: a session
-/// whose setup failed is not the session that was asked for, so Claude is never
-/// attached and the failing line's own status is what comes back.
 #[test]
 fn failing_setup_stops_claude() {
   let project = Project::new("cbt-run-setup-fails");
@@ -62,8 +53,6 @@ setup = ["touch setup-ran", "exit 3"]
   );
 }
 
-/// The first `<major>.<minor>.<patch>` in what Claude printed, which is all this
-/// needs of a version it deliberately does not pin.
 fn version(shown: &str) -> Option<&str> {
   shown.split_whitespace().find(|word| {
     let parts: Vec<&str> = word.split('.').collect();

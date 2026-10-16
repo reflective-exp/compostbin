@@ -1,13 +1,4 @@
-//! The host end of the terminal a guest process is attached to.
-//!
-//! The guest has its own pty in the VM, so the host end must be raw: no line
-//! buffering, echo, or signal characters. Doing it twice shows up as doubled
-//! characters and a shell that only reacts on return.
-//!
-//! Raw mode belongs to the process that owns the terminal (the owner its own,
-//! a joiner the one it passes over the control socket). The framework takes the
-//! descriptor without touching attributes it doesn't own, so this is the only
-//! place they change.
+//! The host end must be raw because the guest has its own pty.
 
 use containerization_framework::containerization_os::terminal::Size;
 use std::io;
@@ -15,20 +6,16 @@ use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// How often a process asks whether its window changed size.
 const RESIZE_POLL: Duration = Duration::from_millis(100);
 
-/// Set by the SIGWINCH handler. One per process: a process attaches at most
-/// one terminal.
+/// Process-wide; a process attaches at most one terminal.
 static RESIZED: AtomicBool = AtomicBool::new(false);
 
-/// Installs the SIGWINCH handler, once.
 pub fn watch_for_resize() {
   static INSTALLED: std::sync::Once = std::sync::Once::new();
 
   INSTALLED.call_once(|| {
-    // SAFETY: `note_resize` only stores into an atomic, which is
-    // async-signal-safe.
+    // SAFETY: `note_resize` only stores to an atomic, which is async-signal-safe.
     unsafe {
       libc::signal(libc::SIGWINCH, note_resize as *const () as libc::sighandler_t);
     }
@@ -39,18 +26,11 @@ extern "C" fn note_resize(_signal: libc::c_int) {
   RESIZED.store(true, Ordering::Relaxed);
 }
 
-/// Whether the window changed size since last asked. Non-blocking, so the
-/// poller can stop when its attach ends.
 pub fn resized() -> bool {
   RESIZED.swap(false, Ordering::Relaxed)
 }
 
-/// Runs `attached`, calling `resize` each time this process's window changes
-/// size while it runs, and returns `attached`'s value.
-///
-/// SIGWINCH reaches whichever process holds the terminal: the owner of the VM
-/// resizes the guest's pty itself, a joiner asks the owner to. Both poll a flag
-/// instead of resizing in the handler, which may only touch an atomic.
+/// Polls `changed` because the SIGWINCH handler may only touch an atomic.
 pub fn while_resizing<T>(
   changed: &(dyn Fn() -> bool + Sync),
   resize: impl Fn() + Send,
@@ -67,14 +47,12 @@ pub fn while_resizing<T>(
           resize();
         }
 
-        // Parked, not slept: the end of the attach unparks the watcher, so the
-        // join below it doesn't wait out the rest of an interval.
+        // Parked, not slept, so the end of the attach can wake it.
         std::thread::park_timeout(RESIZE_POLL);
       }
     });
 
-    // Stops the watcher on every path out of `attached`. One still looping
-    // after a panic would hang `scope`'s join instead of letting it unwind.
+    // Stops the watcher on every path out, including a panic, so `scope`'s join cannot hang.
     let _ending = Ending(|| {
       done.store(true, Ordering::Relaxed);
       watcher.thread().unpark();
@@ -84,7 +62,6 @@ pub fn while_resizing<T>(
   })
 }
 
-/// Runs its closure when dropped, including while a panic unwinds.
 struct Ending<F: Fn()>(F);
 
 impl<F: Fn()> Drop for Ending<F> {
@@ -93,8 +70,6 @@ impl<F: Fn()> Drop for Ending<F> {
   }
 }
 
-/// The window size of the terminal at `descriptor`, as the guest's pty is
-/// resized to.
 pub fn size(descriptor: RawFd) -> io::Result<Size> {
   // SAFETY: TIOCGWINSZ fills the struct or returns < 0 and leaves it alone.
   let window = unsafe {
@@ -113,9 +88,7 @@ pub fn size(descriptor: RawFd) -> io::Result<Size> {
   })
 }
 
-/// Puts a terminal in raw mode for as long as it is held.
-///
-/// Restores on drop so guest exit, errors, and panics all leave a usable shell.
+/// Raw mode until dropped, including on panic.
 pub struct Raw {
   descriptor: RawFd,
   restore: libc::termios,
@@ -150,7 +123,6 @@ impl Raw {
 
 impl Drop for Raw {
   fn drop(&mut self) {
-    // Nothing useful to do if this fails, and it runs on the panic path.
     // SAFETY: restoring attributes this type read from the same descriptor.
     unsafe {
       libc::tcsetattr(self.descriptor, libc::TCSANOW, &self.restore);
@@ -194,8 +166,6 @@ mod tests {
     );
   }
 
-  /// Without the drop guard the watcher keeps looping, and `scope`'s join hangs
-  /// where it should unwind.
   #[test]
   fn ends_the_watcher_even_when_the_attach_panics() {
     let changed = || true;

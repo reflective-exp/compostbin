@@ -1,11 +1,4 @@
 #![cfg(feature = "integration")]
-//! `[host] ports`: a host service on a fixed port answering at the guest's own
-//! `localhost`.
-//!
-//! Each port is relayed over vsock into one VM, so nothing listens on a network
-//! address and no other container can reach it. Both halves of that are worth
-//! a session: that the relay carries a request and its answer, and that a port
-//! nobody declared is not reachable.
 
 use compostbin_test::{Project, stderr, stdout, unused_port};
 use std::io::{BufRead, BufReader, Write};
@@ -14,9 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
-/// A host service on loopback that answers each line with what it was given.
-/// Bound before the manifest is written, since the manifest has to name the
-/// port it landed on.
 struct Service {
   port: u16,
   stop: Arc<AtomicBool>,
@@ -24,12 +14,6 @@ struct Service {
 }
 
 impl Service {
-  fn start() -> Self {
-    Self::answering("the host")
-  }
-
-  /// The same, naming itself in its answers: two services on two ports are
-  /// otherwise indistinguishable.
   fn answering(who: &'static str) -> Self {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind a host port");
     let port = listener.local_addr().expect("the bound address").port();
@@ -73,21 +57,18 @@ impl Drop for Service {
   }
 }
 
-/// What the guest sends and reads back, over its own loopback. `bash` because
-/// `/dev/tcp` is a bash feature and the guest's `sh` is not bash.
+/// `bash` because `/dev/tcp` is a bash feature and the guest's `sh` is not bash.
 fn ask(project: &Project, port: u16, question: &str) -> std::process::Output {
   project.compostbin(&["exec", "bash", "-c", &exchange(port, question)])
 }
 
-/// One question and its answer, as a shell line, so a test can put more than
-/// one of them in a single container.
 fn exchange(port: u16, question: &str) -> String {
   format!("exec 3<>/dev/tcp/127.0.0.1/{port} && printf '{question}\\n' >&3 && head -c 64 <&3")
 }
 
 #[test]
 fn declared_port_reaches_the_host() {
-  let service = Service::start();
+  let service = Service::answering("the host");
   let project = Project::new("cbt-ports");
   project.manifest(&format!(
     r#"
@@ -111,8 +92,6 @@ ports = [{}]
   );
 }
 
-/// Each declared port is a relay of its own: two services do not share one,
-/// and neither answers for the other.
 #[test]
 fn each_declared_port_reaches_its_own_service() {
   let first = Service::answering("the first");
@@ -126,7 +105,7 @@ ports = [{}, {}]
     first.port, second.port
   ));
 
-  // Both in one container: each `exec` would otherwise be a session of its own.
+  // One `exec`, because each `exec` creates its own container.
   let output = project.compostbin(&[
     "exec",
     "bash",
@@ -146,9 +125,6 @@ ports = [{}, {}]
   );
 }
 
-/// A declared port with nothing behind it is ordinary — `[host.commands]` may
-/// well be what starts the service — so the relay records it and the session
-/// carries on.
 #[test]
 fn a_port_with_nothing_behind_it_is_recorded_not_fatal() {
   let port = unused_port();
@@ -179,7 +155,7 @@ ports = [{port}]
 
 #[test]
 fn undeclared_port_is_unreachable() {
-  let service = Service::start();
+  let service = Service::answering("the host");
   let project = Project::new("cbt-ports-none");
 
   let output = ask(&project, service.port, "hello");

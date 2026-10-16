@@ -1,8 +1,3 @@
-//! What to say when something about a session is wrong.
-//!
-//! `diagnose` is the whole public surface; the checks stay internal so their
-//! order is decided in one place.
-
 mod engine;
 mod host;
 mod mounts;
@@ -21,15 +16,12 @@ pub enum Status {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Check {
   pub detail: String,
-  /// The findings behind `detail` (missing paths, dead symlinks, allowlisted
-  /// commands), kept out of the sentence so they print one per line.
+  /// Printed one per line under `detail`, which must not repeat them.
   pub items: Vec<String>,
   pub name: &'static str,
   pub status: Status,
 }
 
-/// Every check, in a fixed order. `api_key_present` is passed in so the
-/// diagnosis depends only on its inputs.
 pub fn diagnose(
   session: &Session,
   engine: &impl Engine,
@@ -53,7 +45,6 @@ pub fn diagnose(
   ]
 }
 
-/// A name, a verdict, and a sentence explaining it.
 fn check(name: &'static str, status: Status, detail: impl Into<String>) -> Check {
   Check {
     detail: detail.into(),
@@ -63,8 +54,7 @@ fn check(name: &'static str, status: Status, detail: impl Into<String>) -> Check
   }
 }
 
-/// A check whose sentence heads a list, so it must describe the items without
-/// naming any.
+/// `detail` heads the list, so it must not name any item.
 fn listed(name: &'static str, status: Status, detail: impl Into<String>, items: Vec<String>) -> Check {
   Check {
     items,
@@ -72,7 +62,6 @@ fn listed(name: &'static str, status: Status, detail: impl Into<String>, items: 
   }
 }
 
-/// Every case goes through `diagnose`, so a check dropped from it fails a test.
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -88,7 +77,6 @@ mod tests {
     FakeSource(Some("token".to_string()))
   }
 
-  /// A session whose single root and Claude home both exist under `home`.
   fn session(home: &TempDir, roots: &str) -> Session {
     let base = home.path().canonicalize().expect("canonical temp");
     std::fs::create_dir_all(base.join("workspace")).expect("create root");
@@ -114,13 +102,10 @@ mod tests {
     format!("\"{}\"", path.join(suffix).display())
   }
 
-  /// The findings alone; layout is the CLI's business.
   fn findings(check: &Check) -> String {
     check.items.join("\n")
   }
 
-  /// A session boots from the store on disk, so an unreadable one leaves
-  /// nothing to start.
   #[test]
   fn reports_a_store_it_cannot_read() {
     let home = TempDir::new().expect("temp dir");
@@ -171,7 +156,6 @@ mod tests {
     );
   }
 
-  /// Listed in the index is not bootable: the blobs it names can be gone.
   #[test]
   fn reports_a_base_image_missing_a_blob() {
     let home = TempDir::new().expect("temp dir");
@@ -448,7 +432,6 @@ mod tests {
     );
   }
 
-  /// The container keeps the mounts it was created with.
   #[test]
   fn warns_when_the_running_container_predates_a_manifest_change() {
     let home = TempDir::new().expect("temp dir");
@@ -504,7 +487,6 @@ mod tests {
     assert_eq!(check(&checks, "container mounts").status, Status::Ok);
   }
 
-  /// A fresh checkout must not be told to stop a container that does not exist.
   #[test]
   fn says_nothing_is_running_rather_than_warning() {
     let home = TempDir::new().expect("temp dir");

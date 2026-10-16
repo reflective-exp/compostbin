@@ -8,12 +8,8 @@ const DEFAULT_CONTAINER_CPUS: u32 = 4;
 const DEFAULT_CONTAINER_MEMORY: Memory = Memory::gibibytes(8);
 const DEFAULT_HOST_CONCURRENCY: usize = 8;
 const DEFAULT_IMAGE: &str = "compostbin/base:latest";
-/// Checked in beside the project it configures.
 pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
-/// Hand-written manifests, each replacing a project's own under `--profile`.
 pub const PROFILES_DIR: &str = "~/.config/compostbin/profiles";
-/// The user's own configuration, applied to every session whatever configures
-/// the project.
 pub const USER_CONFIG_PATH: &str = "~/.config/compostbin/config.toml";
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -21,14 +17,10 @@ pub const USER_CONFIG_PATH: &str = "~/.config/compostbin/config.toml";
 pub struct Manifest {
   pub claude: ClaudeConfig,
   pub container: ContainerConfig,
-  /// Skipped when empty, so a manifest with no host access renders no table.
   #[serde(skip_serializing_if = "HostConfig::is_empty")]
   pub host: HostConfig,
-  /// Per-project additions to the base image; skipped when empty.
   #[serde(skip_serializing_if = "ImageConfig::is_empty")]
   pub image: ImageConfig,
-  /// Both files' entries; rendering keeps only those belonging to the file
-  /// being written.
   #[serde(
     serialize_with = "PathEntry::serialize_shared",
     skip_serializing_if = "PathEntry::none_shared"
@@ -39,7 +31,6 @@ pub struct Manifest {
 }
 
 impl Manifest {
-  /// The defaults, named after the project directory, as `init` writes them.
   pub fn named_after(project_dir: &Path) -> Self {
     Self {
       project: ProjectConfig {
@@ -52,7 +43,7 @@ impl Manifest {
     }
   }
 
-  /// The committed manifest, plus the local one beside it when there is one.
+  /// Includes the paths from the local manifest beside it, if any.
   pub fn load(path: &Path) -> Result<Self, ManifestError> {
     let mut manifest = Self::parse(path)?;
     manifest.paths.extend(Self::parse_local(&local_path(path))?);
@@ -60,18 +51,10 @@ impl Manifest {
     Ok(manifest)
   }
 
-  /// The file alone, without its local overlay.
   pub fn parse(path: &Path) -> Result<Self, ManifestError> {
-    let text = std::fs::read_to_string(path).at(path)?;
-
-    toml::from_str(&text).map_err(|source| ManifestError::Parse {
-      path: path.to_path_buf(),
-      source,
-    })
+    parse_toml(path, &std::fs::read_to_string(path).at(path)?)
   }
 
-  /// Missing is the normal case — most checkouts have no local manifest — so
-  /// only a file that exists and does not parse is an error.
   fn parse_local(path: &Path) -> Result<Vec<PathEntry>, ManifestError> {
     let Some(local) = LocalManifest::load_if_present(path)? else {
       return Ok(Vec::new());
@@ -86,8 +69,6 @@ impl Manifest {
     )
   }
 
-  /// Writes the local `[[paths]]` beside the manifest, leaving the committed
-  /// file alone. Removes the local file when nothing local is left.
   fn save_local(&self, manifest_path: &Path) -> Result<(), ManifestError> {
     let path = local_path(manifest_path);
     let local = LocalManifest {
@@ -109,7 +90,6 @@ impl Manifest {
     local.save(&path)
   }
 
-  /// Writes back the file a new entry belongs to, and only that one.
   pub fn save_to(&self, manifest_path: &Path, local: bool) -> Result<(), ManifestError> {
     if local {
       self.save_local(manifest_path)
@@ -119,14 +99,11 @@ impl Manifest {
   }
 }
 
-/// Unresolved, `~` kept, as the user writes it.
 pub fn profile_path(name: &str) -> String {
   format!("{PROFILES_DIR}/{name}.toml")
 }
 
-/// A compostbin TOML file.
 pub trait TomlFile: Serialize + DeserializeOwned {
-  /// `None` when the file is missing; one that does not parse is an error.
   fn load_if_present(path: &Path) -> Result<Option<Self>, ManifestError> {
     let text = match std::fs::read_to_string(path).at(path) {
       Ok(text) => text,
@@ -134,12 +111,7 @@ pub trait TomlFile: Serialize + DeserializeOwned {
       Err(error) => return Err(error.into()),
     };
 
-    toml::from_str(&text)
-      .map(Some)
-      .map_err(|source| ManifestError::Parse {
-        path: path.to_path_buf(),
-        source,
-      })
+    parse_toml(path, &text).map(Some)
   }
 
   fn save(&self, path: &Path) -> Result<(), ManifestError> {
@@ -156,12 +128,17 @@ pub trait TomlFile: Serialize + DeserializeOwned {
   }
 }
 
+fn parse_toml<T: DeserializeOwned>(path: &Path, text: &str) -> Result<T, ManifestError> {
+  toml::from_str(text).map_err(|source| ManifestError::Parse {
+    path: path.to_path_buf(),
+    source,
+  })
+}
+
 impl TomlFile for Manifest {}
 impl TomlFile for LocalManifest {}
 impl TomlFile for UserConfig {}
 
-/// The `~/.claude` entries the developer wants in every session, whether or not
-/// the project's manifest names them.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UserConfig {
@@ -171,13 +148,9 @@ pub struct UserConfig {
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UserClaudeConfig {
-  /// Added to the manifest's own `[claude] shared`.
   pub shared: Vec<String>,
 }
 
-/// The uncommitted manifest beside a committed one: `[[paths]]` and nothing
-/// else, since everything else in a manifest describes the project rather than
-/// the developer.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct LocalManifest {
@@ -185,8 +158,6 @@ struct LocalManifest {
   paths: Vec<PathEntry>,
 }
 
-/// `…/compostbin.toml` becomes `…/compostbin.local.toml`, so a manifest found
-/// anywhere — a test's temporary directory included — has its overlay beside it.
 fn local_path(manifest_path: &Path) -> PathBuf {
   manifest_path.with_extension("local.toml")
 }
@@ -194,14 +165,11 @@ fn local_path(manifest_path: &Path) -> PathBuf {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClaudeConfig {
-  /// Overrides the per-session default under `SESSIONS_DIR`. Normally unset:
-  /// a home shared between projects makes `--continue` resume whichever ran
-  /// last.
+  /// Overrides the per-session default under `SESSIONS_DIR`.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub home: Option<String>,
   pub seed_from_keychain: bool,
-  /// Extra `~/.claude` entries (files or whole directories) beyond the host
-  /// settings every session already gets. Skipped when empty.
+  /// `~/.claude` entries beyond the host settings every session already gets.
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub shared: Vec<String>,
 }
@@ -222,8 +190,7 @@ pub struct ContainerConfig {
   pub cpus: u32,
   pub env: Vec<String>,
   pub memory: Memory,
-  /// Shell lines run as `claude` in the project directory when the container is
-  /// created, before Claude — for what needs the mounted workspace.
+  /// Run as `claude` in the project directory when the container is created.
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub setup: Vec<String>,
 }
@@ -239,14 +206,11 @@ impl Default for ContainerConfig {
   }
 }
 
-/// A size in bytes, written `8G`, `512M`, `1024K`, or a bare byte count. Parsed
-/// as the manifest loads, so a typo is an error naming the file rather than a
-/// session quietly given some other size.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Memory(u64);
 
-/// Largest first, which is the order `Display` wants them in.
+/// `Display` relies on largest-first order.
 const MEMORY_UNITS: [(char, u64); 3] = [('G', 1 << 30), ('M', 1 << 20), ('K', 1 << 10)];
 
 impl Memory {
@@ -303,8 +267,6 @@ impl From<Memory> for String {
   }
 }
 
-/// In the largest unit that divides it exactly, so `8G` is written back as it
-/// was read.
 impl std::fmt::Display for Memory {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match MEMORY_UNITS
@@ -317,30 +279,15 @@ impl std::fmt::Display for Memory {
   }
 }
 
-/// The guest's paths to the host: commands, the clipboard, and ports.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HostConfig {
-  /// Lets the guest's clipboard tools write to the host's pasteboard by serving
-  /// `clipboard` as though declared. Off by default: whatever the guest copies,
-  /// the user may later paste into a host terminal. Write-only.
-  ///
-  /// A bare value, so before `commands` (see `concurrency`).
   #[serde(skip_serializing_if = "std::ops::Not::not")]
   pub clipboard: bool,
-  /// How many commands may run at once: subagents call `compostbin-host`
-  /// independently, and the bound stops a looping guest spawning unlimited work.
-  ///
-  /// Must stay declared before `commands`, against alphabetical order: TOML
-  /// cannot express a bare value after a table.
   pub concurrency: usize,
-  /// Host loopback ports the guest reaches at its own `localhost`, each relayed
-  /// through a unix socket carried into this container alone. A bare value, so
-  /// before `commands` (see `concurrency`).
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub ports: Vec<u16>,
-  /// Commands the guest may ask the host to run, keyed by the name it sends. A
-  /// `BTreeMap` so rendering is alphabetical and diffs deterministic.
+  /// Must stay last: TOML cannot express a bare value after a table.
   pub commands: BTreeMap<String, HostCommand>,
 }
 
@@ -356,57 +303,40 @@ impl Default for HostConfig {
 }
 
 impl HostConfig {
-  /// No commands, no channel: the spool is neither created nor mounted, so a
-  /// project that has not opted in has no way to run anything on the host.
   pub fn has_commands(&self) -> bool {
     self.clipboard || !self.commands.is_empty()
   }
 
-  /// No ports, no listener: nothing binds on the host.
   pub fn has_ports(&self) -> bool {
     !self.ports.is_empty()
   }
 
-  /// Neither commands nor ports: the guest has no path to the host at all.
   pub fn is_empty(&self) -> bool {
     !self.has_commands() && !self.has_ports()
   }
 }
 
-/// `argv` lives only on the host; the guest sends the key, never a command line.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostCommand {
-  /// Off by default, so a command is exact unless deliberately widened.
   #[serde(default)]
   pub arguments: bool,
   pub argv: Vec<String>,
-  /// Guest arguments refused even when `arguments` is on — flags that point the
-  /// command at other code or configuration, which only the project knows for
-  /// its toolchain. `--config` also refuses `--config=x`; a single-letter `-Z`
-  /// also refuses the joined `-Zx`.
+  /// `--config` also refuses `--config=x`, and `-Z` also refuses `-Zx`.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub deny: Vec<String>,
-  /// Run under a pty, so colour, progress and prompts work. A terminal is one
-  /// device, so this merges stdout and stderr — hence off by default, keeping
-  /// them separate for anything read by a machine.
+  /// A pty merges stdout and stderr.
   #[serde(default)]
   pub tty: bool,
 }
 
-/// Per-project image additions. Non-empty means the session runs a derived
-/// image built on the base; empty means it runs the base itself.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ImageConfig {
-  /// `apt-get install`ed as root, before `run_as_root` and `run`.
   pub packages: Vec<String>,
-  /// Shell lines run as the `claude` user, so a command writing to `~` lands in
-  /// the home the session actually uses.
+  /// Run as the `claude` user.
   pub run: Vec<String>,
-  /// Shell lines run as root, after `packages` and before the image drops to
-  /// `claude` — for what only root can do, like writing under `/etc`. Anything
-  /// touching the session's home belongs in `run`.
+  /// Run as root, after `packages` and before `run`.
   pub run_as_root: Vec<String>,
 }
 
@@ -419,16 +349,12 @@ impl ImageConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathEntry {
-  /// Whether the entry came from the local manifest. Never serialized: the file
-  /// it is written back to says so.
   #[serde(skip)]
   pub local: bool,
   #[serde(default)]
   pub readonly: bool,
   pub source: String,
-  /// An absolute *guest* path, for the rare case where something must appear at
-  /// a fixed location. The default, `/workspace/<basename>`, is what keeps host
-  /// paths out of the container.
+  /// A guest path; defaults to `/workspace/<basename>`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub target: Option<String>,
 }
@@ -443,8 +369,6 @@ impl PathEntry {
     Self::sort_by_source(entries.iter().collect()).serialize(serializer)
   }
 
-  /// The committed manifest's own entries. Local ones are dropped, so saving a
-  /// manifest loaded with an overlay writes back what it read.
   fn serialize_shared<S: Serializer>(entries: &[PathEntry], serializer: S) -> Result<S::Ok, S::Error> {
     Self::sort_by_source(entries.iter().filter(|entry| !entry.local).collect()).serialize(serializer)
   }
@@ -471,7 +395,6 @@ impl Default for ProjectConfig {
   }
 }
 
-/// Roots default to empty: mounting a workspace tree read-write is opt-in.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkspaceConfig {
@@ -581,7 +504,6 @@ tty = true
     assert!(!manifest.host.has_ports());
   }
 
-  /// Ports alone are a path out to the host, but not a reason for a spool.
   #[test]
   fn ports_alone_open_no_spool() {
     let manifest: Manifest = toml::from_str("[host]\nports = [7001, 7002]\n").expect("should parse");
@@ -597,8 +519,6 @@ tty = true
     );
   }
 
-  /// Like `concurrency`, `ports` is a bare value and has to render before the
-  /// `commands` tables; this save fails if it does not.
   #[test]
   fn saves_ports_and_commands() {
     let temp = TempDir::new().expect("temp dir");
@@ -613,7 +533,6 @@ tty = true
     assert_eq!(reloaded.host.commands.len(), 2);
   }
 
-  /// The clipboard alone is a reason for the spool: it is served through it.
   #[test]
   fn clipboard_alone_opens_the_spool() {
     let manifest: Manifest = toml::from_str("[host]\nclipboard = true\n").expect("should parse");
@@ -652,15 +571,11 @@ tty = true
     assert_eq!(manifest.project.image, DEFAULT_IMAGE);
   }
 
-  /// A directory with no basename — `/`, or a relative `..` — is still a
-  /// project; it just goes unnamed.
   #[test]
   fn leaves_a_manifest_unnamed_when_the_directory_has_no_basename() {
     assert_eq!(Manifest::named_after(Path::new("/")).project.name, None);
   }
 
-  /// TOML cannot express a bare value after a table, so `concurrency` has to
-  /// serialise before `commands`; reversing that order breaks this save.
   #[test]
   fn saves_a_manifest_that_declares_host_commands() {
     let temp = TempDir::new().expect("temp dir");
@@ -696,8 +611,6 @@ tty = true
     );
   }
 
-  /// The whole point of the overlay: what one developer mounts is loaded beside
-  /// the project's own paths, and is not written back into the shared file.
   #[test]
   fn loads_local_paths_beside_the_manifest() {
     let temp = TempDir::new().expect("temp dir");
@@ -727,8 +640,6 @@ tty = true
     assert_eq!(rendered, EXPECTED_RENDERING);
   }
 
-  /// A manifest whose only paths are local must render no `[[paths]]` at all,
-  /// rather than an empty array of tables.
   #[test]
   fn renders_no_paths_when_every_one_is_local() {
     let mut manifest = Manifest::default();
@@ -744,7 +655,6 @@ tty = true
     assert!(!rendered.contains("paths"), "{rendered}");
   }
 
-  /// `add --local` must leave the file the project commits alone.
   #[test]
   fn save_to_writes_only_the_file_the_new_entry_belongs_to() {
     let temp = TempDir::new().expect("temp dir");
@@ -793,7 +703,6 @@ tty = true
         .any(|entry| entry.local && entry.source == "~/scratch")
     );
 
-    // Emptied, the file goes: nothing local is left for it to record.
     manifest.paths.retain(|entry| !entry.local);
     manifest.save_local(&path).expect("save should succeed");
     assert!(!local_path(&path).exists());
@@ -867,8 +776,6 @@ tty = true
     assert_eq!(config.claude.shared, ["widgets"]);
   }
 
-  /// The user's config describes the developer, not a project: a project's
-  /// settings there would apply to every project at once.
   #[test]
   fn user_config_refuses_project_settings() {
     assert!(toml::from_str::<UserConfig>("[container]\ncpus = 8\n").is_err());
@@ -947,8 +854,6 @@ source = "~/a-first"
     }
   }
 
-  /// Caught as the manifest loads, not left for the engine to replace with a
-  /// size nobody asked for.
   #[test]
   fn refuses_memory_that_is_not_a_size() {
     for text in ["", "lots", "8GB", "8T", "0", "-1G"] {

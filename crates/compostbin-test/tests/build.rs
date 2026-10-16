@@ -1,10 +1,4 @@
 #![cfg(feature = "integration")]
-//! `build`, against the store a session really boots from.
-//!
-//! Only the cheap half: that a store already provisioned is left alone and an
-//! image already built is not built again. Building the base, or a project
-//! image on top of it, takes minutes — so those are what `compostbin build` is
-//! for, not what a test suite does on every run.
 
 use compostbin_core::image;
 use compostbin_test::{Project, stderr, stdout};
@@ -23,8 +17,6 @@ fn built_base_is_not_rebuilt() {
   );
 }
 
-/// The store is under `~/.cache` because everything in it is regenerable, and
-/// `build` is what regenerates it — so it says which one it is filling.
 #[test]
 fn names_the_store_it_provisions() {
   let project = Project::new("cbt-build-store");
@@ -45,8 +37,6 @@ fn names_the_store_it_provisions() {
   }
 }
 
-/// A project pointed at an image nobody built stops, naming the image, rather
-/// than starting something else.
 #[test]
 fn unbuilt_image_stops_the_session() {
   let project = Project::new("cbt-build-missing");

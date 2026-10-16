@@ -1,18 +1,10 @@
 #![cfg(feature = "integration")]
-//! `doctor`, against a session rather than a fixture.
-//!
-//! Every check is decided by a function with unit tests behind it. What those
-//! cannot answer is whether the checks are asking the machine the right
-//! questions: whether the store it reads is the one a session boots from, and
-//! whether a container that is really running is seen as running.
 
 use compostbin_test::{Project, code, poll_until, stderr, stdout, unused_port};
 use std::time::Duration;
 
-/// How long a container is given to come up.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The check names, so a check dropped from `doctor` is noticed here too.
 const CHECKS: [&str; 10] = [
   "engine",
   "image store",
@@ -46,9 +38,6 @@ fn healthy_project_passes() {
   );
 }
 
-/// The store a session boots from is the one `doctor` reads, so a built base
-/// image is reported as built — which is what tells a first-time user whether
-/// `compostbin build` still has to run.
 #[test]
 fn built_base_image_is_reported() {
   let project = Project::new("cbt-doctor-image");
@@ -81,8 +70,6 @@ fn missing_path_fails() {
   );
 }
 
-/// A container is running only while the process that made it is, so this is
-/// the one check that needs a live session.
 #[test]
 fn running_container_is_seen() {
   let project = Project::new("cbt-doctor-live");
@@ -104,8 +91,6 @@ fn running_container_is_seen() {
   drop(running);
 }
 
-/// Mounts are fixed when the container is created, so a manifest edited during
-/// a session is a gap `doctor` is there to name.
 #[test]
 fn mid_session_edit_is_drift() {
   let project = Project::new("cbt-doctor-drift");
@@ -130,9 +115,6 @@ fn mid_session_edit_is_drift() {
   drop(running);
 }
 
-/// A port whose service has not started is ordinary — `[host.commands]` may
-/// start it — so it is a warning that names the likeliest reason a guest's
-/// `localhost:<port>` refuses.
 #[test]
 fn idle_port_is_reported() {
   let project = Project::new("cbt-doctor-ports");
@@ -154,8 +136,6 @@ ports = [{port}]
   );
 }
 
-/// A command the guest can widen runs on the host with the user's own
-/// privileges, so `doctor` lists every one and warns about the widened.
 #[test]
 fn host_commands_are_listed() {
   let project = Project::new("cbt-doctor-host");
@@ -183,7 +163,6 @@ argv = ["cargo", "nextest", "run"]
   );
 }
 
-/// Polls `doctor` until it sees the container running, and returns that report.
 fn once_running(project: &Project) -> String {
   poll_until(START_TIMEOUT, "doctor to see the session running", || {
     Some(stdout(&project.doctor())).filter(|report| !report.contains("is not running"))

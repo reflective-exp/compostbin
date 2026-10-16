@@ -1,20 +1,3 @@
-//! [`Engine`] and [`Builder`], backed by the `containerization-framework` crate.
-//!
-//! That crate wraps Containerization's own API; everything around it is here,
-//! because it is compostbin's rather than Containerization's:
-//!
-//! - the kernel and init image every VM boots, and fetching them
-//!   ([`store`], [`provision`]);
-//! - unpacking each image once and cloning it per container ([`unpacked`]);
-//! - a container lives *in* the process that booted it, so whichever command
-//!   creates one also serves the control socket through which later ones join
-//!   ([`control`], [`terminal`]);
-//! - nothing lists containers, so a container is up iff something answers on
-//!   its control socket;
-//! - building an image from steps, and what invalidates a build ([`build`],
-//!   [`cache`], [`snapshots`]);
-//! - where a guest sits on the NAT network ([`nat`]).
-
 mod build;
 mod cache;
 mod control;
@@ -52,22 +35,18 @@ use unpacked::Unpacked;
 pub use control::served;
 pub use store::{Store, StoreError};
 
-/// Where the container `name` answers attaches while it runs, given the
-/// directory a `FrameworkEngine` keeps one runtime directory per container in.
 pub fn control_socket(runtime_dir: &Path, name: &str) -> PathBuf {
   runtime_dir.join(name).join(control::CONTROL_SOCKET)
 }
 
-/// The owner's exec id; can't collide with a joiner's `attach-<n>`.
+/// Distinct from joiners' `attach-<n>` ids.
 const OWNER_ATTACH: &str = "attach-owner";
 
-/// What an attach that never ran reports. Outside the guest exit code range.
+/// Exit code for an attach that never ran; outside the guest's range.
 const FAILED: i32 = -1;
 
-/// What `FrameworkEngine::reporting` is given.
 type Report = dyn Fn(&dyn Error) + Send + Sync;
 
-/// A line in the build log, on stderr.
 fn note(message: &str) {
   eprintln!("{message}");
 }
@@ -76,21 +55,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
   mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A container this process booted.
 struct Booted {
-  /// Held for as long as the container runs.
+  /// Must be kept alive for as long as the container runs.
   _manager: ContainerManager,
   container: LinuxContainer,
-  /// What every process in it starts from, as its first process did: a bare
-  /// exec runs as root with only a default `PATH`, ignoring the image's `USER`.
+  /// Base for every exec; a bare exec would ignore the image's user and environment.
   seed: LinuxProcessConfiguration,
 }
 
-/// The containers this process booted, and the processes running in them.
 #[derive(Default)]
 struct Running {
   containers: Mutex<HashMap<String, Arc<Booted>>>,
-  /// By exec id, so a resize reaches its own process.
   processes: Mutex<HashMap<String, Arc<LinuxProcess>>>,
 }
 
@@ -99,8 +74,6 @@ impl Running {
     lock(&self.containers).get(name).cloned()
   }
 
-  /// Runs a guest process in `name` against `stdio` until it exits, returning
-  /// its exit code.
   fn attach(&self, name: &str, id: &str, request: &control::Request, stdio: Stdio) -> Result<i32, EngineError> {
     let booted = self
       .booted(name)
@@ -129,11 +102,7 @@ impl Running {
     Ok(ran?.exit_code)
   }
 
-  /// Tells the guest that the terminal `id`'s process reads changed size.
-  ///
-  /// A no-op once the process has gone, since the window may change size as it
-  /// exits. The size is re-read from `terminal`, so a stale one cannot race a
-  /// second resize.
+  /// A no-op once the process has gone.
   fn resize(&self, id: &str, terminal: RawFd) -> Result<(), EngineError> {
     let Some(process) = lock(&self.processes).get(id).cloned() else {
       return Ok(());
@@ -145,7 +114,6 @@ impl Running {
   }
 }
 
-/// `request` over `seed`, on `stdio`.
 fn configuration(
   seed: &LinuxProcessConfiguration,
   request: &control::Request,
@@ -154,7 +122,7 @@ fn configuration(
   let mut process = seed.clone();
 
   process.arguments = request.arguments.clone();
-  // Last, so a variable the caller sets beats the image's.
+  // Appended so the caller's variables override the image's.
   process
     .environment_variables
     .extend(request.environment.iter().cloned());
@@ -165,14 +133,11 @@ fn configuration(
   }
 
   if stdio.has_terminal() {
-    // Not `setTerminalIO`, which writes back to the terminal it reads: this
-    // keeps a redirection of the caller's stdout. Stderr has nowhere else to
-    // go; one pty carries every stream.
+    // Not `setTerminalIO`, which would write output to the input terminal and lose a stdout redirection.
     process.terminal = true;
     process.stdin = attached(stdio.terminal);
     process.stdout = attached(stdio.stdout);
 
-    // What `setTerminalIO` sets, unless the caller chose.
     if !process
       .environment_variables
       .iter()
@@ -189,9 +154,7 @@ fn configuration(
   process
 }
 
-/// What a process in a container of `config`'s image starts from, as
-/// Containerization seeds its first process: the image's user, environment and
-/// working directory. The default `PATH` stays when the image declares none.
+/// Keeps the default `PATH` when the image declares none.
 fn seed(config: &ImageConfig) -> Result<LinuxProcessConfiguration, containerization_framework::Error> {
   let mut process = LinuxProcessConfiguration::from_image_config(config)?;
 
@@ -208,8 +171,7 @@ fn seed(config: &ImageConfig) -> Result<LinuxProcessConfiguration, containerizat
   Ok(process)
 }
 
-/// `reference` from the store, without pulling: an image missing there is one
-/// `compostbin build` has yet to make.
+/// Never pulls.
 fn built(images: &ImageStore, reference: &str) -> Result<Image, EngineError> {
   images.get(reference, false).map_err(|error| {
     if error.is_code(Code::NotFound) {
@@ -224,11 +186,8 @@ fn built(images: &ImageStore, reference: &str) -> Result<Image, EngineError> {
 }
 
 pub struct FrameworkEngine {
-  /// Told about a joined client whose attach broke, since that leaves the rest
-  /// of the session running and has no call to return to. Ignored by default.
   attach_failed: Arc<Report>,
   running: Arc<Running>,
-  /// One directory per container, holding its control socket.
   runtime_dir: PathBuf,
   store: Store,
 }
@@ -243,7 +202,7 @@ impl FrameworkEngine {
     }
   }
 
-  /// Hands broken attaches to `report`, which decides what to say about them.
+  /// `report` receives errors from joiners' attaches, which have no caller to return to.
   pub fn reporting(self, report: impl Fn(&dyn Error) + Send + Sync + 'static) -> Self {
     Self {
       attach_failed: Arc::new(report),
@@ -251,11 +210,7 @@ impl FrameworkEngine {
     }
   }
 
-  /// Creates and starts `spec`'s container, owned by this process.
-  ///
-  /// The container's directory is cleared first: the VM dies with its process,
-  /// so nothing cleaned up after the previous run, and a container always
-  /// starts from a fresh clone of its image's unpacked rootfs.
+  /// Clears the container's directory first, since nothing cleaned up after a previous run.
   fn boot(&self, spec: &RunSpec) -> Result<Booted, EngineError> {
     let directory = self.store.container_dir(&spec.name);
     let _ = std::fs::remove_dir_all(&directory);
@@ -272,14 +227,11 @@ impl FrameworkEngine {
     let platform = Platform::current()?;
     let seed = seed(&image.config(&platform)?.config.unwrap_or_default())?;
 
-    // Where the manager writes the container's boot log.
     std::fs::create_dir_all(&directory).map_err(|error| EngineError::failed(format!("boot {}", spec.name), error))?;
 
     let rootfs = Unpacked::at(self.store.unpacked()).rootfs(&image, &platform, &directory.join("rootfs.ext4"))?;
 
-    // No networking from the manager, which has no `Network` to allocate from:
-    // the interfaces are ours, on Virtualization's NAT, which an unprivileged
-    // process can use.
+    // The manager has no `Network`; interfaces are configured by `spec` on Virtualization's NAT.
     let options = CreateWithRootfsOptions {
       networking: false,
       vm: spec::vm(spec.resources),
@@ -297,11 +249,6 @@ impl FrameworkEngine {
     })
   }
 
-  /// Serves attaches from other callers on a detached thread, never joined:
-  /// it ends with the process, as does the VM.
-  ///
-  /// A joiner's attach has no call to return an error to, so a failure comes
-  /// back as the code reserved for one and is reported beside it.
   fn serve_control_socket(&self, name: String) -> Result<(), EngineError> {
     let path = control_socket(&self.runtime_dir, &name);
     let listener = control::bind(&path).map_err(|error| EngineError::failed("bind the control socket", error))?;
@@ -311,7 +258,6 @@ impl FrameworkEngine {
     std::thread::spawn(move || {
       control::serve(
         &listener,
-        // The request arrives resolved against the client's environment.
         |request, stdio, id| match running.attach(&name, id, request, *stdio) {
           Ok(code) => code,
           Err(error) => {
@@ -333,13 +279,9 @@ impl FrameworkEngine {
 impl Engine for FrameworkEngine {
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError> {
     let descriptor = std::io::stdin().as_raw_fd();
-    // A terminal is the caller's to give, and it gives one only when both the
-    // streams it interacts through are terminals. A piped prompt or a
-    // redirected `run > log` leaves the guest without one, rather than writing
-    // a terminal's escapes into whatever the caller redirected to.
+    // Both stdin and stdout must be terminals, so redirected output gets no escape codes.
     let has_terminal = spec.tty && is_tty(descriptor) && is_tty(libc::STDOUT_FILENO);
 
-    // Raw while attached, restored on drop. See `terminal` for why.
     let _raw = if has_terminal {
       Some(terminal::Raw::acquire(descriptor).map_err(|error| EngineError::failed("raw mode", error))?)
     } else {
@@ -354,14 +296,12 @@ impl Engine for FrameworkEngine {
     };
 
     let stdio = if has_terminal {
-      // Only a terminal has a window, so only then is there anything to watch.
       terminal::watch_for_resize();
       Stdio::terminal(descriptor, libc::STDOUT_FILENO)
     } else {
       Stdio::inherit(spec.interactive)
     };
 
-    // The owner attaches directly; anyone else asks the owner to.
     if self.running.booted(&spec.name).is_some() {
       let attach = || {
         self
@@ -369,8 +309,6 @@ impl Engine for FrameworkEngine {
           .attach(&spec.name, OWNER_ATTACH, &request, stdio)
       };
 
-      // This process holds the terminal and the VM, so it resizes the guest
-      // directly; a joiner has to ask over the control socket.
       return if has_terminal {
         terminal::while_resizing(
           &terminal::resized,
@@ -393,7 +331,6 @@ impl Engine for FrameworkEngine {
     .map_err(|error| EngineError::failed("attach", error))
   }
 
-  /// Read from the store's index; there is no daemon to ask.
   fn images(&self) -> Result<Vec<String>, EngineError> {
     self.store.references()
   }
@@ -419,8 +356,7 @@ impl Engine for FrameworkEngine {
   }
 
   fn is_running(&self, name: &str) -> bool {
-    // A socket file with nothing answering is a container that died with its
-    // owner. Not `Running`, which answers for this process alone.
+    // Not `Running`, which only knows this process's containers.
     control::served(&control_socket(&self.runtime_dir, name))
   }
 
@@ -442,8 +378,6 @@ impl Engine for FrameworkEngine {
     Ok(None)
   }
 
-  /// The init image and kernel booted, which are pinned separately and whose
-  /// mismatch would fail only at runtime.
   fn version(&self) -> String {
     format!(
       "Containerization {}, kernel {}",
@@ -458,8 +392,6 @@ impl Listener for VsockListener {
     self.into_iter().next()
   }
 
-  /// A listener that cannot stop keeps waiting on a guest that dies with this
-  /// process anyway, so there is nothing better to do with the error.
   fn finish(&self) {
     let _ = VsockListener::finish(self);
   }

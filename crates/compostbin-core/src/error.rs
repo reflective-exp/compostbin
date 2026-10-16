@@ -1,10 +1,6 @@
-//! Every domain's failures, since all of them reach the same CLI.
-//!
-//! A variant that only widens a type (`SessionError::Io`, say) delegates
-//! `Display` to what it holds, so it forwards the inner error's `source` rather
-//! than naming the inner error, which would print the same sentence twice down
-//! a chain. A variant with a message of its own names what it holds as the
-//! source.
+//! A variant that only wraps another error delegates `Display` to it and returns
+//! the inner error's `source`, not the inner error, so a chain never prints the
+//! same message twice.
 
 use compostbin_engine::error::EngineError;
 use std::error::Error;
@@ -12,14 +8,10 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-/// A Claude token that could not be read from the Keychain or written into
-/// Claude's home.
 #[derive(Debug)]
 pub enum CredentialError {
   Io(PathError),
-  /// `security` answered, and its answer was a failure.
   Keychain(String),
-  /// `security` itself could not be run.
   Security(io::Error),
 }
 
@@ -49,7 +41,6 @@ impl From<PathError> for CredentialError {
   }
 }
 
-/// A base image that could not be written into a build context or built.
 #[derive(Debug)]
 pub enum ImageError {
   Engine(EngineError),
@@ -86,9 +77,7 @@ impl From<PathError> for ImageError {
   }
 }
 
-/// A TOML file compostbin owns — the project manifest, or a session's mount
-/// record — that could not be read, parsed, or written. Every variant names the
-/// file, since it may not be the manifest the user expected.
+/// Also used for a session's mount record, not only the project manifest.
 #[derive(Debug)]
 pub enum ManifestError {
   Io(PathError),
@@ -122,8 +111,6 @@ impl From<PathError> for ManifestError {
   }
 }
 
-/// A session that could not be prepared or created, or whose mount record could
-/// not be written. One error because `run` does all three as one step.
 #[derive(Debug)]
 pub enum SessionError {
   Config(ManifestError),
@@ -152,7 +139,6 @@ impl Error for SessionError {
       Self::Credential(error) => error.source(),
       Self::Engine(error) => error.source(),
       Self::Io(error) => error.source(),
-      // Has its own message, so the inner error is the source.
       Self::Record(error) => Some(error),
     }
   }
@@ -176,7 +162,6 @@ impl From<PathError> for SessionError {
   }
 }
 
-/// A manifest's memory size that is not one, as written.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvalidMemory(pub(crate) String);
 
@@ -192,8 +177,6 @@ impl fmt::Display for InvalidMemory {
 
 impl Error for InvalidMemory {}
 
-/// A filesystem error that names its path, which `std::io::Error` alone does
-/// not.
 #[derive(Debug)]
 pub struct PathError {
   path: PathBuf,
@@ -208,8 +191,6 @@ impl PathError {
     }
   }
 
-  /// Whether nothing was there. Several callers treat that as ordinary (no
-  /// local manifest, no record, no spool yet) rather than a failure.
   pub fn is_not_found(&self) -> bool {
     self.source.kind() == io::ErrorKind::NotFound
   }
@@ -227,9 +208,7 @@ impl Error for PathError {
   }
 }
 
-/// Attaches the failing path to an `io::Result`: `.at(&path)?`. Every `std::fs`
-/// call in compostbin goes through this, and every error type that holds a
-/// `PathError` converts from it, so `?` does the rest.
+/// Every `std::fs` call should go through this so its error names the path.
 pub trait At<T> {
   fn at(self, path: impl Into<PathBuf>) -> Result<T, PathError>;
 }
@@ -240,14 +219,11 @@ impl<T> At<T> for io::Result<T> {
   }
 }
 
-/// Why a host command was refused — an outcome reported to the guest, not a
-/// failure of the agent.
+/// Reported to the guest; not a failure of the agent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Refusal {
-  /// Declared without `arguments = true`.
   ArgumentsNotAllowed(String),
   DeniedArgument(String),
-  /// Declared with an empty `argv`.
   EmptyCommand(String),
   EmptyRequest,
   UnknownCommand(String),

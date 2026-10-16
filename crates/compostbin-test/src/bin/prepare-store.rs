@@ -1,6 +1,3 @@
-//! nextest's setup script for the integration suite; see `compostbin_test::prepare`.
-//! With `--remove-after <pid> <directory>`, the process it leaves to clean up.
-
 use std::path::Path;
 
 fn main() {

@@ -1,5 +1,3 @@
-//! A throwaway project, and the session it starts.
-
 use crate::output::{stderr, stdout};
 use crate::poll::poll_until;
 use crate::signing::signed_binary;
@@ -14,59 +12,38 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-/// Where a project's temporary home goes. Not the system temp directory, whose
-/// path on macOS is long enough that a port socket under it — `<home>/.local/
-/// state/compostbin/sessions/<name>/ports/<port>.sock` — exceeds the 104 bytes
-/// a unix socket path may have.
+/// Not the system temp directory: on macOS its path makes port socket paths
+/// exceed the 104-byte unix socket path limit.
 const HOME_PARENT: &str = "/tmp";
-/// How long [`Project::wait_for`] gives the guest. Generous, because the first
-/// command in a project is waiting on a container to be created.
+/// Long because the first command in a project creates the container.
 const GUEST_TIMEOUT: Duration = Duration::from_secs(60);
-/// Stands in for a credential in `doctor`, which fails a session that has none.
 const FAKE_API_KEY: &str = "not-a-real-key";
-/// What a session gets unless the test asks for something else: enough to run
-/// a shell, little enough that the whole suite can run at once.
 const TEST_CPUS: u32 = 1;
 const TEST_MEMORY: Memory = Memory::gibibytes(1);
 
-/// A project with a manifest, a home of its own, and a container named after
-/// it.
-///
-/// The name must be unique across the suite: it names the container, and two
-/// tests running at once must not be the same session. Dropping it takes the
-/// home — and so the session's state — with it.
+/// The name must be unique across the suite because it names the container.
 pub struct Project {
-  /// Held only to be dropped: that is what removes the home, and with it the
-  /// session's state. `home()` is the canonical path to the same directory.
   _home: tempfile::TempDir,
   name: String,
   dir: PathBuf,
 }
 
 impl Project {
-  /// A project directory under a fresh home, holding the default manifest.
-  /// Call [`Project::manifest`] before the first command to change it: the
-  /// container is created by the first one that needs it.
-  ///
-  /// The home starts with a clone of the suite's cache, base image built and
-  /// unpacked. Whatever the test writes there, a build's blob sweep included,
-  /// stays in the clone.
+  /// Call [`Project::manifest`] before the first command, which creates the
+  /// container.
   pub fn new(name: &str) -> Self {
     Self::with_cache(name, |cache| store::clone(&store::suite_cache(), cache))
   }
 
-  /// The same, writing to `cache` itself, as preparing the suite's must.
   pub(crate) fn sharing_cache(name: &str, cache: &Path) -> Self {
     Self::with_cache(name, |link| {
       std::os::unix::fs::symlink(cache, link).expect("link the shared cache");
     })
   }
 
-  /// `place` puts the cache at the path it is given.
   fn with_cache(name: &str, place: impl FnOnce(&Path)) -> Self {
     let home = tempfile::TempDir::new_in(HOME_PARENT).expect("temp home");
-    // Canonical, so an assertion comparing host paths is not defeated by
-    // macOS's `/tmp` -> `/private/tmp` symlink.
+    // Canonical because macOS's `/tmp` is a symlink to `/private/tmp`.
     let root = home.path().canonicalize().expect("canonical home");
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).expect("create project dir");
@@ -83,17 +60,8 @@ impl Project {
     project
   }
 
-  /// Writes `body` as the manifest, with what every test needs filled in: the
-  /// project name, and a session that never reads the login Keychain — an
-  /// ad-hoc signed binary has a new code identity each build, so a test that
-  /// asked would block on a keychain prompt nobody is there to answer.
-  ///
-  /// A body that says nothing about the size of the machine gets a small one:
-  /// the suite runs these sessions in parallel, and a default 8 GiB each would
-  /// have the host swapping rather than testing.
-  ///
-  /// Written through `Manifest` rather than as text, so a body that a session
-  /// could not load fails here, in the test that wrote it.
+  /// Disables Keychain seeding, which would block an ad-hoc signed binary on a
+  /// prompt, and defaults to a small machine so parallel sessions don't swap.
   pub fn manifest(&self, body: &str) {
     let declared: toml::Table = toml::from_str(body).expect("the manifest body should parse");
     let declares_cpus = declares(&declared, "cpus");
@@ -121,8 +89,6 @@ impl Project {
     &self.dir
   }
 
-  /// The home this project's session keeps its state under, and the `~` its
-  /// manifest resolves against.
   pub fn home(&self) -> &Path {
     self
       .dir
@@ -134,20 +100,16 @@ impl Project {
     self.dir.join(MANIFEST_RELATIVE_PATH)
   }
 
-  /// The session `compostbin` runs for this project, loaded as it would load
-  /// it, so a test asks it where things are rather than knowing.
   pub fn session(&self) -> Session {
     Session::load(None, PathResolver::new(&self.dir, self.home()), &self.dir).expect("the manifest should load")
   }
 
-  /// Where the running container answers attaches; there only while it runs.
   pub fn control_socket(&self) -> PathBuf {
     let session = self.session();
 
     control_socket(&session.sessions_dir(), &session.container_name())
   }
 
-  /// A directory beside the project, holding `files`, for a test to mount.
   pub fn sibling(&self, name: &str, files: &[(&str, &str)]) -> PathBuf {
     let path = self.home().join(name);
     std::fs::create_dir(&path).expect("create the sibling");
@@ -158,7 +120,7 @@ impl Project {
     path
   }
 
-  /// Writes a manifest that mounts `path` and nothing else.
+  /// Replaces the manifest with one that mounts only `path`.
   pub fn mount(&self, path: &Path, readonly: bool) {
     self.manifest(&format!(
       r#"
@@ -170,7 +132,6 @@ source = "{}"
     ));
   }
 
-  /// Writes a file in the project directory, creating its parents.
   pub fn write(&self, relative: &str, contents: &str) -> PathBuf {
     let path = self.dir.join(relative);
     if let Some(parent) = path.parent() {
@@ -181,18 +142,12 @@ source = "{}"
     path
   }
 
-  /// Reads a file from the project directory, for the guest-wrote-it direction.
   pub fn read(&self, relative: &str) -> String {
     std::fs::read_to_string(self.dir.join(relative)).expect("read file")
   }
 
-  /// Waits for a file in the project directory to have something in it, which
-  /// is how a test watching a running session learns where the guest has got
-  /// to.
-  ///
-  /// Its contents, not its existence: the guest's `>` creates the file before
-  /// the command it redirects has run, so waiting to see it would let the test
-  /// act on a command still in flight.
+  /// Waits for contents rather than existence, because the guest's `>` creates
+  /// the file before the command it redirects has run.
   pub fn wait_for(&self, relative: &str) {
     let path = self.dir.join(relative);
 
@@ -203,35 +158,26 @@ source = "{}"
     });
   }
 
-  /// Runs `compostbin` in the project directory, on this project's home.
   pub fn compostbin(&self, arguments: &[&str]) -> Output {
     self.invoke(arguments, None, &[])
   }
 
-  /// The same, with extra environment variables — what `[container] env` names
-  /// has to be set on this side to be passed through.
   pub fn compostbin_with_env(&self, arguments: &[&str], env: &[(&str, &str)]) -> Output {
     self.invoke(arguments, None, env)
   }
 
-  /// `compostbin doctor`, with a key in the environment: a harness session
-  /// never reads the Keychain, so without one the credentials check fails.
   pub fn doctor(&self) -> Output {
     self.compostbin_with_env(&["doctor"], &[("ANTHROPIC_API_KEY", FAKE_API_KEY)])
   }
 
-  /// Runs a shell line in the guest, which is what most of these tests assert
-  /// on. Creates the container if it is not already up.
   pub fn guest(&self, script: &str) -> Output {
     self.compostbin(&["exec", "sh", "-c", one_line(script)])
   }
 
-  /// The same, with `input` reaching the guest's stdin.
   pub fn guest_with_input(&self, script: &str, input: &str) -> Output {
     self.invoke(&["exec", "sh", "-c", one_line(script)], Some(input), &[])
   }
 
-  /// A guest line that must succeed, as its trimmed stdout.
   pub fn guest_output(&self, script: &str) -> String {
     let output = self.guest(script);
     assert!(
@@ -244,13 +190,6 @@ source = "{}"
     stdout(&output).trim().to_string()
   }
 
-  /// Starts a guest process and leaves it running, for a test that has to
-  /// watch the session from this side while something happens in it. The guard
-  /// kills it if the test ends first.
-  /// Its stdin stays open: a test tells such a process to go on with
-  /// [`Running::send`], which is the one channel into a running guest that is
-  /// immediate. A host file written into the mount is not — a guest that has
-  /// already looked for it can go on not seeing it indefinitely.
   pub fn guest_in_background(&self, script: &str) -> Running {
     Running(Some(
       self
@@ -260,9 +199,6 @@ source = "{}"
     ))
   }
 
-  /// Runs `compostbin` on a terminal of its own, which is the only way to reach
-  /// what it does when the caller has one: `exec -t`, `shell`, and a
-  /// `tty = true` host command.
   pub fn on_a_terminal(&self, arguments: &[&str]) -> Terminal {
     Terminal::attach(self.command(arguments, &[]))
   }
@@ -276,8 +212,7 @@ source = "{}"
     if let Some(input) = input {
       stdin.write_all(input.as_bytes()).expect("write stdin");
     }
-    // Closed either way: a guest process reading to EOF would otherwise wait
-    // for a stdin nobody is going to write to.
+    // Closed so a guest process reading to EOF does not hang.
     drop(stdin);
 
     child.wait_with_output().expect("compostbin should finish")
@@ -289,9 +224,7 @@ source = "{}"
       .args(arguments)
       .current_dir(&self.dir)
       .env("HOME", self.home())
-      // Whether the host has one decides a doctor check and nothing else, so
-      // it is never inherited: a developer with a key set would see different
-      // results from CI.
+      // Not inherited, so a developer's key doesn't change doctor results.
       .env_remove("ANTHROPIC_API_KEY")
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
@@ -305,15 +238,11 @@ source = "{}"
   }
 }
 
-/// A guest process still running. Killing the `compostbin` that created the
-/// container ends the container too, so a test that leaves one behind would
-/// leave a VM behind.
 pub struct Running(Option<std::process::Child>);
 
 impl Running {
-  /// Writes a line to the guest process's stdin, for a script stepping through
-  /// a test with `read`. The only prompt way to reach a running guest: a file
-  /// written into the mount from here may not be seen there for minutes.
+  /// The only prompt way to reach a running guest: a file written into the
+  /// mount from the host may take minutes to appear there.
   pub fn send(&mut self, line: &str) {
     let child = self.0.as_mut().expect("the process is still running");
     let stdin = child.stdin.as_mut().expect("piped stdin");
@@ -322,13 +251,9 @@ impl Running {
     stdin.flush().expect("flush the guest's stdin");
   }
 
-  /// Waits for the process and reports what it wrote. The container it created
-  /// goes when it does.
   pub fn finish(mut self) -> Output {
     let mut child = self.0.take().expect("a running process is taken once");
 
-    // Closed first: a script that reads to the end of its input would
-    // otherwise wait for a stdin this test is done with.
     drop(child.stdin.take());
 
     child
@@ -346,12 +271,8 @@ impl Drop for Running {
   }
 }
 
-/// A script, checked for the newline that would quietly cut it short.
-///
-/// Arguments cross to the guest as newline-separated lines (see the
-/// `containerization-framework` wire format), so a two-line script arrives as
-/// two arguments and `sh -c` runs only the first. A test that hits this would
-/// otherwise see its later lines silently not happen; separate them with `;`.
+/// Arguments cross to the guest newline-separated, so `sh -c` would run only
+/// the first line of a multi-line script.
 fn one_line(script: &str) -> &str {
   assert!(
     !script.contains('\n'),
@@ -361,8 +282,6 @@ fn one_line(script: &str) -> &str {
   script
 }
 
-/// Whether the body being written said anything about `[container] <key>`, so
-/// a test that chose a machine size keeps it.
 fn declares(body: &toml::Table, key: &str) -> bool {
   body
     .get("container")

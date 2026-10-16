@@ -1,11 +1,3 @@
-//! Relaying declared host ports to the guest, one vsock port per port (D11).
-//!
-//! The guest's own relay turns `localhost:<port>` into a vsock connection to
-//! the host; this is the other half, accepting there and connecting to the
-//! host's `127.0.0.1:<port>`. Vsock reaches only the VM that dialed it, so
-//! nothing listens on a network address and no other container can reach a
-//! forwarded port.
-
 use crate::host::agent::POLL_INTERVAL;
 use compostbin_engine::engine::{Engine, Listener};
 use compostbin_engine::error::EngineError;
@@ -19,59 +11,48 @@ use std::time::Duration;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const BUFFER_SIZE: usize = 16 * 1024;
 
-/// Added to a forwarded port to give its vsock port, well clear of the low
-/// ports Containerization's own guest agent uses.
+/// Kept clear of the low vsock ports Containerization's guest agent uses.
 const VSOCK_PORT_BASE: u32 = 0x7000_0000;
 
-/// One declared port: the vsock port the guest reaches it through, and the
-/// host service behind it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Forward {
   pub upstream: SocketAddr,
 }
 
-impl Forward {
-  /// The same port on both sides, which is all the manifest can say.
-  pub fn to_loopback(port: u16) -> Self {
+impl From<u16> for Forward {
+  fn from(port: u16) -> Self {
     Self {
       upstream: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
     }
   }
+}
 
+impl Forward {
   pub fn port(&self) -> u16 {
     self.upstream.port()
   }
 
-  /// Derived from the port, so neither side has to be told the other's.
   pub fn vsock_port(&self) -> u32 {
     VSOCK_PORT_BASE + u32::from(self.port())
   }
 
-  /// `<port>:<vsock port>`, as the guest's relay takes each one.
   pub fn guest_argument(&self) -> String {
     format!("{}:{}", self.port(), self.vsock_port())
   }
 }
 
-/// A forward the engine is listening for. It lives as long as the VM, which
-/// dies with the process holding it.
 pub struct Bound {
   forward: Forward,
   listener: Box<dyn Listener>,
 }
 
-/// What the relay has to say, left to the caller to print: core does not own
-/// the terminal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PortEvent {
-  /// Listening, and so ready for the guest to connect.
   Listening(Forward),
-  /// Nothing answers upstream. Once per run of failures, since a client
-  /// retrying against a server that is not up yet would flood the terminal.
+  /// Reported once per run of consecutive failures.
   UpstreamRefused(Forward, String),
 }
 
-/// In the terms a user would look for.
 impl std::fmt::Display for PortEvent {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
@@ -86,9 +67,6 @@ impl std::fmt::Display for PortEvent {
   }
 }
 
-/// Listens for every forward into the running container `name`, reporting each
-/// as it comes up. All or nothing, so a session never forwards only some of
-/// what it declared.
 pub fn listen_all(
   engine: &impl Engine,
   name: &str,
@@ -108,8 +86,6 @@ pub fn listen_all(
   Ok(bound)
 }
 
-/// Relays every bound forward until `stop` is set, then returns once every
-/// connection has closed.
 pub fn relay(bound: &[Bound], stop: &AtomicBool, report: &(dyn Fn(PortEvent) + Sync)) {
   std::thread::scope(|scope| {
     for bound in bound {
@@ -120,22 +96,19 @@ pub fn relay(bound: &[Bound], stop: &AtomicBool, report: &(dyn Fn(PortEvent) + S
       std::thread::sleep(POLL_INTERVAL);
     }
 
-    // An `accept` watches no flag; finishing is what ends it.
+    // `accept` never checks `stop`; only `finish` ends it.
     for bound in bound {
       bound.listener.finish();
     }
   });
 }
 
-/// Every connection to one forward, each on a thread of its own, until its
-/// listener finishes.
 fn accept(bound: &Bound, stop: &AtomicBool, report: &(dyn Fn(PortEvent) + Sync)) {
   let refused = AtomicBool::new(false);
 
   std::thread::scope(|scope| {
     while let Some(guest) = bound.listener.accept() {
-      // A vsock socket, not a unix one, but this uses only what every stream
-      // socket answers alike: reads, writes, shutdown and timeouts.
+      // A vsock socket, used only through operations every stream socket shares.
       let guest = UnixStream::from(guest);
       let refused = &refused;
       scope.spawn(move || connect(guest, &bound.forward, refused, stop, report));
@@ -143,7 +116,6 @@ fn accept(bound: &Bound, stop: &AtomicBool, report: &(dyn Fn(PortEvent) + Sync))
   });
 }
 
-/// One guest connection, relayed until both directions have ended.
 fn connect(
   guest: UnixStream,
   forward: &Forward,
@@ -179,27 +151,18 @@ fn connect(
   });
 }
 
-/// The two ends of a relayed connection: a socket to the guest, a TCP stream to
-/// the service.
-///
-/// `read_some` and `write_some` restate `Read` and `Write` for `&Self`. A
-/// `for<'a> &'a Self: Read + Write` bound instead would not carry to `splice`
-/// and `send` (a higher-ranked where-clause is not an implied bound), so every
-/// caller would have to restate it.
+/// `read_some` and `write_some` exist because a `for<'a> &'a Self: Read + Write`
+/// bound is not implied, so every caller would have to restate it.
 trait Stream: Sync {
   fn read_some(&self, buffer: &mut [u8]) -> io::Result<usize>;
   fn write_some(&self, data: &[u8]) -> io::Result<usize>;
   fn shutdown_write(&self) -> io::Result<()>;
 
-  /// Blocking, since an accepted socket may inherit its listener's
-  /// non-blocking mode, but never for longer than a poll: every wait re-checks
-  /// `stop`.
+  /// Accepted sockets may inherit non-blocking mode; the timeouts let every wait
+  /// re-check `stop`.
   fn configure(&self) -> io::Result<()>;
 }
 
-/// Both ends answer the same inherent methods, so both impls are the same
-/// lines; a blanket one cannot reach `shutdown` or the timeout setters, which
-/// no trait declares.
 macro_rules! impl_stream {
   ($socket:ty) => {
     impl Stream for $socket {
@@ -227,8 +190,8 @@ macro_rules! impl_stream {
 impl_stream!(UnixStream);
 impl_stream!(TcpStream);
 
-/// An EOF for the guest, then whatever it already sent is read and dropped:
-/// closing with unread data would reset the connection instead.
+/// Drains unread input before closing, since closing with unread data sends a
+/// reset instead of EOF.
 fn close_cleanly(guest: &impl Stream) {
   let _ = guest.shutdown_write();
 
@@ -240,8 +203,6 @@ fn close_cleanly(guest: &impl Stream) {
   }
 }
 
-/// One direction, until EOF, an error, or `stop` — then the EOF is passed on,
-/// so a half-close reaches the other side.
 fn splice(from: &impl Stream, to: &impl Stream, stop: &AtomicBool) {
   let mut buffer = [0; BUFFER_SIZE];
 
@@ -261,8 +222,7 @@ fn splice(from: &impl Stream, to: &impl Stream, stop: &AtomicBool) {
   let _ = to.shutdown_write();
 }
 
-/// `write_all`, except that a stalled peer is waited on a poll at a time, so
-/// `stop` still ends it.
+/// Not `write_all`, so `stop` can interrupt a stalled peer.
 fn send(to: &impl Stream, mut data: &[u8], stop: &AtomicBool) -> bool {
   while !data.is_empty() {
     match to.write_some(data) {
@@ -280,7 +240,6 @@ fn send(to: &impl Stream, mut data: &[u8], stop: &AtomicBool) -> bool {
   true
 }
 
-/// A timeout is a poll, not a failure.
 fn waiting(error: &io::Error) -> bool {
   matches!(
     error.kind(),
@@ -299,15 +258,12 @@ mod tests {
   const DEADLINE: Duration = Duration::from_secs(5);
   const NAME: &str = "cb-ports";
 
-  /// A port nothing is listening on, found by binding and letting go.
   fn free_port() -> SocketAddr {
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
       .and_then(|listener| listener.local_addr())
       .expect("an ephemeral port")
   }
 
-  /// A failing test must fail, not hang: a blocking `accept` would wait forever
-  /// for a relay that is broken.
   fn accept_within(listener: &TcpListener) -> TcpStream {
     listener.set_nonblocking(true).expect("non-blocking");
     let started = Instant::now();
@@ -330,8 +286,7 @@ mod tests {
     }
   }
 
-  /// Sets `stop` however the scope exits, so a failed assertion still lets the
-  /// relay return and the scope join.
+  /// Sets `stop` even when an assertion panics, so the scope can join.
   struct StopOnDrop<'a>(&'a AtomicBool);
 
   impl Drop for StopOnDrop<'_> {
@@ -340,15 +295,12 @@ mod tests {
     }
   }
 
-  /// An upstream listener and the forward that reaches it.
   fn upstream_listener() -> (TcpListener, Forward) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
     let upstream = listener.local_addr().expect("upstream address");
     (listener, Forward { upstream })
   }
 
-  /// Reads everything the guest sends, then echoes it back — so a reply at all
-  /// means the guest's half-close reached upstream.
   fn serve_echo(listener: &TcpListener) {
     let mut stream = accept_within(listener);
     let mut received = Vec::new();
@@ -358,8 +310,7 @@ mod tests {
     stream.write_all(&received).expect("echo");
   }
 
-  /// The same, `connections` times and blocking on accept: the test below times
-  /// the relay's own accept, so its upstream must add no poll of its own.
+  /// Blocks on accept so the timing test measures only the relay's own accept.
   fn serve_echoes(listener: &TcpListener, connections: usize) {
     for _ in 0..connections {
       let Ok((mut stream, _)) = listener.accept() else { return };
@@ -392,7 +343,7 @@ mod tests {
 
   #[test]
   fn derives_a_vsock_port_from_the_forwarded_one() {
-    let forward = Forward::to_loopback(7001);
+    let forward = Forward::from(7001);
 
     assert_eq!(
       forward.upstream,
@@ -406,7 +357,7 @@ mod tests {
   #[test]
   fn listens_on_each_forwards_vsock_port() {
     let engine = RecordingEngine::new();
-    let forwards = [Forward::to_loopback(7001), Forward::to_loopback(7002)];
+    let forwards = [Forward::from(7001), Forward::from(7002)];
     let events = Mutex::new(Vec::new());
 
     let bound = listen_all(&engine, NAME, &forwards, &record(&events)).expect("listen");
@@ -440,8 +391,6 @@ mod tests {
     });
   }
 
-  /// Accepting must not wait out a `POLL_INTERVAL`. Timed because prompt and
-  /// eventual differ only in duration; the budget is a quarter interval each.
   #[test]
   fn accepts_without_waiting_for_a_poll() {
     const CONNECTIONS: u32 = 10;
@@ -504,8 +453,6 @@ mod tests {
     assert_eq!(refusals, 1);
   }
 
-  /// An idle connection must not keep the session's exit waiting, and the guest
-  /// is refused from then on.
   #[test]
   fn stops_with_a_connection_open() {
     let engine = RecordingEngine::new();

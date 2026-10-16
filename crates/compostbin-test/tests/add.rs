@@ -1,10 +1,4 @@
 #![cfg(feature = "integration")]
-//! `add` against a session that is already up.
-//!
-//! What a path resolves to, which file records it, and what `add` refuses are
-//! decided on the host and tested there. What only a session can show is the
-//! consequence the message promises: a container's mounts were fixed when it
-//! was created, so an added path arrives in the next one, not this one.
 
 use compostbin_core::manifest::MANIFEST_RELATIVE_PATH;
 use compostbin_test::{Project, stderr, stdout};
@@ -14,8 +8,6 @@ fn a_path_added_to_a_live_session_reaches_the_next_container() {
   let project = Project::new("cbt-add-live");
   let libfoo = project.sibling("libfoo", &[("marker", "added mid-session\n")]);
 
-  // The owner reports what it can see before and after, stepped over its own
-  // stdin so that `add` runs between the two.
   let mut owner = project.guest_in_background("ls /workspace > before && read step && ls /workspace > after");
   project.wait_for("before");
 

@@ -1,11 +1,7 @@
-//! The `install` command: compostbin's skills in ~/.claude.
-
 use compostbin_core::skills::{self, Change};
 use std::error::Error;
 use std::io::{IsTerminal, Write};
 
-/// Shows what installing would change and applies it, asking first unless
-/// `yes`.
 pub fn install(changes: &[Change], yes: bool) -> Result<i32, Box<dyn Error>> {
   if changes.is_empty() {
     println!("the skills and the profiles directory are up to date");

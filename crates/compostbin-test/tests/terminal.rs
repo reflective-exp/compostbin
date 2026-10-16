@@ -1,15 +1,4 @@
 #![cfg(feature = "integration")]
-//! What compostbin does when the caller has a terminal to give.
-//!
-//! `exec.rs` and `host_commands.rs` assert the other direction — that `-t` is
-//! refused without one, and that a `tty = true` command captured into a pipe
-//! keeps its streams apart. Neither can say that a terminal asked for is a
-//! terminal the guest, or the host command, actually gets: a test process's
-//! streams are pipes. These run compostbin on a pty of their own instead.
-//!
-//! Everything a terminal shows arrives as one stream, the guest's own echo of
-//! what was typed included, so these assert on what the output contains rather
-//! than on what it is.
 
 use compostbin_test::Project;
 
@@ -28,8 +17,6 @@ fn exec_with_a_terminal_gives_the_guest_one() {
   );
 }
 
-/// `compostbin shell` is `exec -t bash`, so it cannot run without a terminal
-/// and nothing else in the suite has one to give it.
 #[test]
 fn shell_opens_bash_on_a_terminal() {
   let project = Project::new("cbt-tty-shell");
@@ -47,7 +34,6 @@ fn shell_opens_bash_on_a_terminal() {
   );
 }
 
-/// And as whoever it was told to open as, which is the only flag `shell` has.
 #[test]
 fn shell_opens_as_the_user_it_was_given() {
   let project = Project::new("cbt-tty-shell-root");
@@ -65,9 +51,6 @@ fn shell_opens_as_the_user_it_was_given() {
   );
 }
 
-/// A `tty = true` command gets a pty on the host only when the guest's caller
-/// has a terminal to show it on. `host_commands.rs` can observe that condition
-/// being false; this is the same manifest with it true.
 #[test]
 fn a_tty_host_command_gets_a_terminal_on_the_host() {
   let project = Project::new("cbt-tty-host");

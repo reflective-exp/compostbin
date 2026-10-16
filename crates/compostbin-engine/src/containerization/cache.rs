@@ -1,16 +1,5 @@
-//! Cache keys for a build: one per step, covering everything that has gone into
-//! the rootfs by the time that step finishes. Two builds that agree up to step
-//! `i` agree on `keys.steps[i]`, so the second starts from the first's rootfs.
-//!
-//! A key covers the environment and every step's script and user so far. It
-//! leaves out:
-//!
-//!   * step names — a label, and renaming one shouldn't cost a rebuild;
-//!   * a mount's contents, for steps whose script doesn't name where it lands,
-//!     so editing a file one step installs doesn't re-run `apt-get`;
-//!   * the base's digest, which only the builder knows and mixes in itself;
-//!   * anything that never reaches the rootfs: the image's user and workdir, the
-//!     builder's cpus and memory.
+//! Keys exclude step names, the base's digest (the builder salts it in), and
+//! settings that never reach the rootfs.
 
 use crate::error::EngineError;
 use crate::model::{BuildMount, BuildPlan};
@@ -28,8 +17,6 @@ pub struct Keys {
   pub steps: Vec<String>,
 }
 
-/// The key chain for `plan`. Digests a mount's source only when some step
-/// reads it, so an untouched mount costs nothing to key.
 pub fn keys(plan: &BuildPlan) -> Result<Keys, EngineError> {
   let mut digests = Vec::new();
 
@@ -66,22 +53,16 @@ pub fn keys(plan: &BuildPlan) -> Result<Keys, EngineError> {
   Ok(Keys { base, steps })
 }
 
-/// A step reads a mount iff its script names where that mount lands.
 fn reads(script: &str, mount: &BuildMount) -> bool {
   script.contains(&mount.destination)
 }
 
-/// What one entry under a mount contributes to its digest. A symlink counts as
-/// its target path, not what it points at, and is tagged so that it cannot
-/// collide with a file holding that same path.
 enum Entry {
   File { executable: bool, path: PathBuf },
   Link { target: String },
 }
 
-/// One digest over every file under a mount's source, in path order, because
-/// `read_dir` order is the filesystem's. Contents stream into the hash, so no
-/// file is ever in memory whole.
+/// Sorted by path because `read_dir` order is filesystem-dependent.
 fn digest_of(root: &Path) -> Result<String, EngineError> {
   let mut entries = Vec::new();
 
@@ -114,9 +95,7 @@ fn unreadable(path: &Path, error: io::Error) -> EngineError {
   EngineError::unavailable(format!("read the mounted directory at {}", path.display()), error)
 }
 
-/// Every file and symlink under `directory`, each paired with its path relative
-/// to `root`. FIFOs, sockets, and devices have no contents to key, and reading
-/// one could block forever, so they are left out.
+/// Skips FIFOs, sockets and devices, since reading one could block forever.
 fn collect(root: &Path, directory: &Path, into: &mut Vec<(String, Entry)>) -> Result<(), EngineError> {
   let listing = fs::read_dir(directory).map_err(|error| unreadable(directory, error))?;
 
@@ -172,8 +151,7 @@ fn collect(root: &Path, directory: &Path, into: &mut Vec<(String, Entry)>) -> Re
   Ok(())
 }
 
-/// A SHA-256 over length-prefixed fields, so `ab`,`c` and `a`,`bc` differ.
-/// Cloned to take each key while the chain keeps running.
+/// Fields are length-prefixed so `ab`,`c` and `a`,`bc` differ.
 #[derive(Clone)]
 struct Key(Sha256);
 
@@ -187,10 +165,7 @@ impl Key {
     self.0.update(value);
   }
 
-  /// The file at `path` as one field, the same as `field` over its bytes.
-  ///
-  /// Opened non-blocking, so a file swapped for a FIFO since `collect` saw it
-  /// fails the check below instead of hanging the open.
+  /// Opened non-blocking so a file swapped for a FIFO fails the check below instead of hanging.
   fn contents(&mut self, path: &Path) -> io::Result<()> {
     let mut file = fs::OpenOptions::new()
       .read(true)
@@ -204,8 +179,7 @@ impl Key {
 
     self.0.update(metadata.len().to_le_bytes());
 
-    // The prefix promised this many bytes; any other count frames every field
-    // after it differently.
+    // Any count other than the length prefix would misframe later fields.
     if io::copy(&mut file, &mut Hashing(&mut self.0))? != metadata.len() {
       return Err(io::Error::other("changed while it was read"));
     }
@@ -223,7 +197,6 @@ impl Key {
   }
 }
 
-/// Feeds a hash from `io::copy`.
 struct Hashing<'a>(&'a mut Sha256);
 
 impl Write for Hashing<'_> {
@@ -345,7 +318,6 @@ mod tests {
     );
   }
 
-  /// Where `with_mount` lands what it shares.
   const MOUNT: &str = "/mnt/scripts";
 
   fn context_with(contents: &str) -> tempfile::TempDir {
@@ -401,7 +373,6 @@ mod tests {
     );
   }
 
-  /// Each mount is keyed on its own contents, and only where a step names it.
   #[test]
   fn keys_every_mount_a_step_reads() {
     let scripts = context_with("one");
@@ -442,7 +413,6 @@ mod tests {
     );
   }
 
-  /// Reading a FIFO with no writer would block the build forever.
   #[test]
   fn keys_a_mount_holding_a_fifo_as_if_it_were_not_there() {
     let reads = format!("cp -r {MOUNT}/. /usr/local/bin/");

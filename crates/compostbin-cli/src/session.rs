@@ -1,5 +1,3 @@
-//! Attaching a process to a running session.
-
 use crate::engine::select;
 use compostbin_core::session::credentials::{KEYCHAIN_SERVICE, Keychain};
 use compostbin_core::session::{Notice, Process, Session};
@@ -20,10 +18,7 @@ fn notify(notice: Notice) {
   }
 }
 
-/// A terminal asked for is a terminal required: this side can only pass on one
-/// it has, and silently running without would leave whatever wanted it — a
-/// shell, anything drawing a UI — with pipes and no way to say so. Says so when
-/// there is none.
+/// Prints an error when stdin or stdout is not a terminal.
 pub fn missing_terminal() -> bool {
   let missing = !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
 
@@ -34,7 +29,6 @@ pub fn missing_terminal() -> bool {
   missing
 }
 
-/// Attaches `process` to the session, creating the container if it isn't up.
 pub fn attach(session: &Session, process: &Process) -> Result<i32, Box<dyn Error>> {
   Ok(session.run(&select(session)?, &Keychain, process, &notify)?)
 }

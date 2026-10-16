@@ -1,5 +1,3 @@
-//! The `add` and `ls` commands: what the session mounts.
-
 use compostbin_core::manifest::MANIFEST_RELATIVE_PATH;
 use compostbin_core::session::{AddOutcome, CLAUDE_HOME_TARGET, Session};
 use compostbin_core::workspace::danger::danger;
@@ -7,7 +5,6 @@ use compostbin_core::workspace::paths::PathResolver;
 use std::error::Error;
 use std::path::Path;
 
-/// Records `path` as a mount, refusing a dangerous one unless `force`.
 pub fn add(
   resolver: PathResolver,
   project_dir: &Path,
@@ -18,8 +15,6 @@ pub fn add(
 ) -> Result<i32, Box<dyn Error>> {
   let canonical = resolver.canonicalize(path)?;
 
-  // A guardrail against slips, not a security boundary (the container has
-  // the user's privileges anyway), hence `--force`.
   if let Some(danger) = danger(&canonical, &resolver)
     && !force
   {
@@ -48,7 +43,6 @@ pub fn add(
   }
 }
 
-/// Prints each mount, then Claude's home.
 pub fn ls(session: &Session) -> Result<i32, Box<dyn Error>> {
   for entry in session.workspace().entries() {
     let readonly = if entry.readonly { ", readonly" } else { "" };

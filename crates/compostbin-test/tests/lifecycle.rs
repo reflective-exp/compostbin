@@ -1,34 +1,22 @@
 #![cfg(feature = "integration")]
-//! Who owns the container, and what `clean` may take while it is up.
 
 use compostbin_core::host::Spool;
 use compostbin_core::session::CLAUDE_HOME_TARGET;
 use compostbin_test::{Project, poll_until, stderr, stdout};
 use std::time::Duration;
 
-/// Something container-local: `/tmp` is not mounted, so a file there says
-/// which container a command ran in.
+/// `/tmp` is not mounted, so a file there identifies the container.
 const LOCAL_MARKER: &str = "/tmp/joined";
-/// How long a container is given to come up.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
-/// How long a container is given to go once its creator has.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A second command joins the session rather than making one of its own, which
-/// is what makes `compostbin shell` a client of a running `run`.
-///
-/// Ignored because it fails: a second command blocks until the owner's own
-/// process exits, then starts a container of its own. Measured with an owner
-/// sleeping 30 seconds, a joiner returned after 30.4 — in a container that had
-/// never seen the owner's `/tmp` — while `doctor` from a third process saw the
-/// session as running the whole time. Un-ignore it when joining works.
+/// Ignored: a second command blocks until the owner's process exits and then
+/// starts its own container, though `doctor` sees the session running throughout.
 #[test]
 #[ignore = "a second command waits for the owner's process instead of joining it"]
 fn second_command_joins() {
   let project = Project::new("cbt-join");
 
-  // The owner reports what it can see, so joining is proved from inside the
-  // container rather than by timing.
   let owner = project.guest_in_background(&format!("sleep 3; cat {LOCAL_MARKER}"));
   wait_until_up(&project);
 
@@ -41,8 +29,6 @@ fn second_command_joins() {
   );
 }
 
-/// Whichever command creates the container owns it: when that process exits,
-/// the container goes, with everything that joined it.
 #[test]
 fn container_goes_with_its_creator() {
   let project = Project::new("cbt-ownership");
@@ -62,10 +48,8 @@ fn container_goes_with_its_creator() {
   });
 }
 
-/// The spool is a mount source, and a running container's mount is attached to
-/// the inode it was created with: emptying it in place is the only kind of
-/// cleaning a live mount survives. Both host commands are the owner's, so this
-/// measures `clean` rather than what a second command can do.
+/// A running container's mount is bound to the spool's inode, so `clean` must
+/// empty it in place.
 #[test]
 fn clean_keeps_the_channel_working() {
   let project = Project::new("cbt-clean-live");
@@ -76,17 +60,13 @@ argv = ["echo", "still served"]
 "#,
   );
 
-  // Stepped over the process's stdin, not a file: the guest is told to go on
-  // once `clean` has run. Each host command reads `/dev/null`, since the
-  // client forwards its own stdin and would otherwise swallow that line.
+  // Host commands read `/dev/null` because the client forwards its stdin and
+  // would swallow the step line.
   let mut owner = project.guest_in_background(
     "compostbin-host greet > before < /dev/null \
      && read step \
      && compostbin-host greet > after < /dev/null",
   );
-  // Its contents, not its existence: the guest's `>` creates the file before
-  // the command it redirects has run, so cleaning on sight would empty the
-  // spool out from under a request still in flight.
   project.wait_for("before");
 
   let cleaned = project.compostbin(&["clean"]);
@@ -114,8 +94,6 @@ argv = ["echo", "still served"]
   );
 }
 
-/// `clean` keeps the conversation `--continue` resumes; `--all` is how you
-/// discard it.
 #[test]
 fn clean_all_discards_the_conversation() {
   let project = Project::new("cbt-clean-all");

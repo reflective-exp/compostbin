@@ -1,23 +1,16 @@
-//! A pull's progress, as a line on stderr redrawn in place.
-//!
-//! Only on a terminal: anything else reading stderr gets the build log's lines
-//! and no redraws.
-//!
-//! Not an unpack's: asked for progress, `EXT4Unpacker` decompresses every
-//! layer an extra time to total it.
+//! Not used for unpacking: given a progress handler, `EXT4Unpacker`
+//! decompresses every layer an extra time.
 
 use super::stdio::is_tty;
 use containerization_framework::containerization_extras::{ProgressEvent, ProgressHandler};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Redraws no more often than this; Swift reports every buffer it writes.
 const REDRAW_EVERY: Duration = Duration::from_millis(100);
 
 /// Moves to the start of the line and clears it.
 const CLEAR_LINE: &str = "\r\x1b[2K";
 
-/// What has been reported so far.
 #[derive(Debug, Default)]
 struct Tally {
   items: i64,
@@ -38,7 +31,7 @@ impl Tally {
     }
   }
 
-  /// The progress line. `None` before any total.
+  /// `None` before any total.
   fn line(&self) -> Option<String> {
     let items = (self.total_items > 0).then(|| format!("{} of {} blobs", self.items, self.total_items));
 
@@ -56,7 +49,6 @@ impl Tally {
   }
 }
 
-/// `size` in decimal units, as Finder shows it.
 fn bytes(size: i64) -> String {
   const UNITS: [&str; 4] = ["kB", "MB", "GB", "TB"];
 
@@ -77,11 +69,9 @@ fn bytes(size: i64) -> String {
 
 struct Drawn {
   tally: Tally,
-  /// When the line was last drawn; `None` until it first is.
   at: Option<Instant>,
 }
 
-/// A progress line, erased when dropped. Inert off a terminal.
 pub struct Meter {
   drawn: Option<Arc<Mutex<Drawn>>>,
 }
@@ -98,7 +88,6 @@ impl Meter {
     Self { drawn }
   }
 
-  /// What to hand the framework: `None` off a terminal.
   pub fn handler(&self) -> Option<ProgressHandler> {
     let drawn = Arc::clone(self.drawn.as_ref()?);
 
@@ -166,7 +155,6 @@ mod tests {
 
   #[test]
   fn adds_totals_reported_in_stages() {
-    // A pull totals the index, then its manifests, then their layers.
     let tally = tally(&[
       ProgressEvent::AddTotalSize(500),
       ProgressEvent::AddSize(500),

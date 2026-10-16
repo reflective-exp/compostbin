@@ -1,27 +1,16 @@
-//! The binary under test, copied aside and given the entitlement it needs.
-
 use crate::lock::Lock;
 use crate::output::stderr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-/// The entitled copy of the binary under test, beside the one cargo builds.
 const SIGNED_NAME: &str = "compostbin-signed";
-/// Records which build `SIGNED_NAME` was copied from, so a rebuilt binary is
-/// signed again and an unchanged one is not.
 const SIGNED_SOURCE: &str = "compostbin-signed.source";
-/// Held while one process signs. Taken by creating it, so the loser waits
-/// rather than signing over a copy another test is about to run.
 const SIGNING_LOCK: &str = "compostbin-signed.lock";
 
-/// The binary under test, copied aside and signed.
-///
-/// Virtualization.framework refuses every call from a binary without
-/// `com.apple.security.virtualization`, and the build cargo just did dropped
-/// whatever signature the last one had. Signing the copy rather than the
-/// original leaves the developer's `target/debug/compostbin` alone and, more to
-/// the point, never rewrites a file another test is in the middle of running.
+/// Virtualization.framework requires the `com.apple.security.virtualization`
+/// entitlement, which every build drops; a copy is signed so no running binary
+/// is ever rewritten.
 pub fn signed_binary() -> PathBuf {
   let target = target_dir();
   let unsigned = target.join("compostbin");
@@ -41,14 +30,11 @@ pub fn signed_binary() -> PathBuf {
 
   let _lock = Lock::take(target.join(SIGNING_LOCK));
 
-  // The process that held the lock may have just done this.
   if std::fs::read_to_string(&marker).is_ok_and(|recorded| recorded == stamp) {
     return signed;
   }
 
-  // Signed under another name and renamed into place, so a test starting the
-  // binary either gets the last complete one or this one, never a half-written
-  // copy — and a process already running the old one keeps its own inode.
+  // Renamed into place so no test starts a half-written copy.
   let partial = target.join(format!("{SIGNED_NAME}.partial"));
   std::fs::copy(&unsigned, &partial).expect("copy the binary aside");
   sign(&partial);
@@ -58,8 +44,6 @@ pub fn signed_binary() -> PathBuf {
   signed
 }
 
-/// What a build of the binary is: its size and when it was written. Cheaper
-/// than hashing it, and a rebuild changes both.
 fn stamp(binary: &Path) -> String {
   let metadata = std::fs::metadata(binary).expect("the binary should be readable");
   let modified = metadata
@@ -86,8 +70,6 @@ fn sign(binary: &Path) {
   );
 }
 
-/// The directory cargo built into: `…/target/<profile>`, two above this test
-/// binary in `…/target/<profile>/deps`.
 pub(crate) fn target_dir() -> PathBuf {
   let exe = std::env::current_exe().expect("the running binary has a path");
   let dir = exe.parent().expect("the running binary is in a directory");

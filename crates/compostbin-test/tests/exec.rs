@@ -1,9 +1,4 @@
 #![cfg(feature = "integration")]
-//! `exec`, `shell` and what they hand the guest process.
-//!
-//! The contract is that running something in the session is as close to running
-//! it here as a container allows: this side's streams are its streams, and its
-//! exit status is ours. None of that can be seen from the host side alone.
 
 use compostbin_test::{Project, code, stderr, stdout};
 
@@ -59,7 +54,6 @@ fn runs_as_claude_by_default() {
   assert_eq!(project.guest_output("id -un"), "claude");
 }
 
-/// For the `apt-cache search` case: another user of the image, on request.
 #[test]
 fn user_flag_picks_another_user() {
   let project = Project::new("cbt-user-flag");
@@ -74,8 +68,6 @@ fn user_flag_picks_another_user() {
   );
 }
 
-/// Everything after the command belongs to the command, so a flag it shares
-/// with `compostbin` is still its own.
 #[test]
 fn arguments_belong_to_the_command() {
   let project = Project::new("cbt-argv");
@@ -85,8 +77,6 @@ fn arguments_belong_to_the_command() {
   assert_eq!(stdout(&output), "-U -- -t\n");
 }
 
-/// A terminal asked for is a terminal required: this side can only pass on one
-/// it has, and a test process has none.
 #[test]
 fn a_terminal_is_refused_without_one() {
   let project = Project::new("cbt-no-terminal");
@@ -103,8 +93,6 @@ fn a_terminal_is_refused_without_one() {
   }
 }
 
-/// `exec` joins a session rather than needing one: with nothing running it
-/// creates the container itself.
 #[test]
 fn exec_starts_the_container() {
   let project = Project::new("cbt-cold-start");

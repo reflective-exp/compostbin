@@ -1,14 +1,3 @@
-//! The build cache, under `build-cache` in the image store:
-//!
-//! - `rootfs/<key>.ext4`: the rootfs after some step. A build matching an
-//!   earlier one through step `i` resumes from it.
-//! - `images/<key>.json`: the descriptor a build stored, so an unchanged build
-//!   skips the export.
-//!
-//! Snapshots are clones, so they cost only what they differ by.
-//!
-//! Keys come from [`super::cache`]; [`Salted`] mixes in what only a build knows.
-
 use super::cache::Keys;
 use super::files::{clone, partial};
 use super::{note, oci};
@@ -17,23 +6,18 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-/// Snapshots kept, most recently used first.
 const KEEP: usize = 24;
-/// Anything unused this long goes regardless.
 const KEEP_FOR: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
-/// A plan's key chain, salted with what only the builder knows.
 pub struct Salted {
   pub base: String,
   pub steps: Vec<String>,
-  /// The last rootfs plus the user and working directory, which a rootfs does
-  /// not record.
+  /// Also covers the user and working directory, which a rootfs does not record.
   pub image: String,
 }
 
 impl Salted {
-  /// Salted with the base's digest, so a moved base misses everything, and
-  /// the rootfs ceiling, because a snapshot keeps the size it was taken at.
+  /// Salted with the rootfs size too, because a snapshot keeps the size it was taken at.
   pub fn new(keys: Keys, base_digest: &str, rootfs_size: u64, user: Option<&str>, workdir: Option<&Path>) -> Self {
     let salted = |key: &str| digest(&format!("{base_digest}\n{rootfs_size}\n{key}"));
     let base = salted(&keys.base);
@@ -43,13 +27,16 @@ impl Salted {
       steps.last().unwrap_or(&base),
       user.unwrap_or_default(),
       workdir
-        .map(Path::display)
-        .map(|path| path.to_string())
+        .map(|path| path.display().to_string())
         .unwrap_or_default()
     ));
 
     Self { base, steps, image }
   }
+}
+
+pub fn short(key: &str) -> &str {
+  &key[..12.min(key.len())]
 }
 
 fn digest(text: &str) -> String {
@@ -88,16 +75,15 @@ impl Snapshots {
     self.rootfs_path(key).is_file()
   }
 
-  /// Clones a snapshot to `destination`. The build writes to the clone, so a
-  /// failed build leaves the cache untouched.
   pub fn restore(&self, key: &str, destination: &Path) -> std::io::Result<()> {
-    clone(&self.rootfs_path(key), destination)?;
-    touch(&self.rootfs_path(key));
+    let source = self.rootfs_path(key);
+
+    clone(&source, destination)?;
+    touch(&source);
 
     Ok(())
   }
 
-  /// Best effort: a failure only costs the next build time.
   pub fn save_rootfs(&self, rootfs: &Path, key: &str) {
     let destination = self.rootfs_path(key);
 
@@ -117,16 +103,14 @@ impl Snapshots {
       });
 
     if let Err(error) = saved {
-      note(&format!(
-        "could not cache the rootfs for {}: {error}",
-        &key[..12.min(key.len())]
-      ));
+      note(&format!("could not cache the rootfs for {}: {error}", short(key)));
     }
   }
 
   pub fn image(&self, key: &str) -> Option<Descriptor> {
-    let text = std::fs::read_to_string(self.image_path(key)).ok()?;
-    touch(&self.image_path(key));
+    let path = self.image_path(key);
+    let text = std::fs::read_to_string(&path).ok()?;
+    touch(&path);
 
     oci::from_json(&text)
   }
@@ -136,14 +120,11 @@ impl Snapshots {
       .and_then(|_| std::fs::write(self.image_path(key), oci::to_json(descriptor)));
 
     if let Err(error) = saved {
-      note(&format!(
-        "could not cache the image for {}: {error}",
-        &key[..12.min(key.len())]
-      ));
+      note(&format!("could not cache the image for {}: {error}", short(key)));
     }
   }
 
-  /// By last use: restoring or re-saving touches an entry.
+  /// Restoring or re-saving an entry counts as use.
   pub fn evict(&self) {
     let cutoff = SystemTime::now() - KEEP_FOR;
 
@@ -161,7 +142,6 @@ impl Snapshots {
   }
 }
 
-/// Most recently used first.
 fn entries(directory: &Path) -> Vec<(PathBuf, SystemTime)> {
   let mut entries: Vec<(PathBuf, SystemTime)> = std::fs::read_dir(directory)
     .into_iter()
@@ -209,7 +189,6 @@ mod tests {
     assert_ne!(before.image, after.image);
   }
 
-  /// A rootfs does not record what the image runs as.
   #[test]
   fn the_image_key_covers_its_user_and_working_directory() {
     let plain = Salted::new(keys(), "sha256:aa", 8 << 30, None, None);

@@ -1,6 +1,3 @@
-//! The two ways a session reaches out of the container: the commands it may run
-//! on the host, and the token it authenticates with.
-
 use super::{Check, Status, check, listed};
 use crate::host::served_commands;
 use crate::session::Session;
@@ -8,11 +5,9 @@ use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialSource, KEYCH
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
-/// Loopback answers or refuses at once; this only keeps `doctor` from hanging
-/// on a service that accepts nothing.
+/// Loopback answers at once; this only bounds a service that accepts nothing.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// Lists every allowlisted command, since each runs on the host as the user.
 pub fn allowlist(session: &Session) -> Check {
   if !session.manifest.host.has_commands() {
     return check(
@@ -41,12 +36,6 @@ pub fn allowlist(session: &Session) -> Check {
   )
 }
 
-/// Declared ports, and whether anything listens behind each. A down service is
-/// a warning, not an error (it may start later), but it is the likeliest reason
-/// a guest's `localhost:<port>` refuses.
-///
-/// Each port is relayed into this container alone, so there is no wider reach
-/// to report.
 pub fn ports(session: &Session) -> Check {
   if !session.manifest.host.has_ports() {
     return check("host ports", Status::Ok, "no [host] ports: nothing is forwarded");
@@ -89,7 +78,6 @@ pub fn credentials(session: &Session, source: &impl CredentialSource, api_key_pr
     return check("credentials", Status::Ok, seeded.display().to_string());
   }
 
-  // A Keychain token only counts if `run` will copy it in.
   if !session.manifest.claude.seed_from_keychain {
     if api_key_present {
       return check("credentials", Status::Ok, "ANTHROPIC_API_KEY is set");

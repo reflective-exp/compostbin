@@ -1,5 +1,3 @@
-//! What is running containers, and whether it holds the image a session needs.
-
 use super::{Check, Status, check};
 use crate::session::Session;
 use compostbin_engine::engine::Engine;
@@ -9,10 +7,6 @@ pub fn version(engine: &impl Engine) -> Check {
   check("engine", Status::Ok, engine.version())
 }
 
-/// Whether the image store can be read at all.
-///
-/// There is no daemon to be up or down: a session boots from the store on disk,
-/// which `compostbin build` writes.
 pub fn store(images: Result<&[String], &EngineError>) -> Check {
   match images {
     Ok(_) => check("image store", Status::Ok, "readable"),

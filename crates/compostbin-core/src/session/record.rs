@@ -1,22 +1,12 @@
-//! What the container that is running now was actually started with.
-//!
-//! Mounts cannot be added to a running container, and `run` attaches to a live
-//! one rather than recreating it, so a manifest edited mid-session takes effect
-//! only on the next create. Without a record that looks like a broken feature.
-//!
-//! Recorded by whoever creates the container rather than asked of the engine:
-//! not every engine can say what a running container was created with.
+//! Written at creation because not every engine can report what a running container was created with.
 
 use crate::manifest::TomlFile;
 use compostbin_engine::model::Mount;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Beside Claude's home and the spool, under the session state directory.
 pub const RECORD_FILE: &str = "mounts.toml";
 
-/// One mount as it was passed to the engine. Paths are strings: TOML holds
-/// them that way, and the record is only ever compared, never resolved.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordedMount {
@@ -35,8 +25,6 @@ impl From<&Mount> for RecordedMount {
   }
 }
 
-/// How `doctor` names a mount to the user: source, target, and whether the
-/// kernel is holding it read-only.
 impl fmt::Display for RecordedMount {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(formatter, "{} -> {}", self.source, self.target)?;
@@ -53,13 +41,9 @@ impl fmt::Display for RecordedMount {
 #[serde(default, deny_unknown_fields)]
 pub struct Record {
   pub mounts: Vec<RecordedMount>,
-  /// Not mounts, but fixed at creation in the same way: the guest's relay is
-  /// the container's own process, started with them.
   pub ports: Vec<u16>,
 }
 
-/// A missing record is not an error: a state directory cleaned mid-session
-/// leaves nothing to compare against.
 impl TomlFile for Record {}
 
 impl Record {
@@ -70,12 +54,7 @@ impl Record {
     }
   }
 
-  /// How the manifest's mounts and ports differ from the ones the container
-  /// really has.
-  ///
-  /// Mounts are matched by guest path, since that is what a session reaches
-  /// for: a mount whose source moved is a *changed* mount rather than a
-  /// removal and an add.
+  /// Mounts match by guest path, so a moved source is a change rather than a removal and an add.
   pub fn drift(&self, wanted: &[Mount], ports: &[u16]) -> Drift {
     let mut drift = Drift {
       added_ports: ports
@@ -117,9 +96,6 @@ impl Record {
   }
 }
 
-/// Every way the manifest and the running container disagree, kept apart because
-/// each reads differently: a mount the manifest gained is invisible in the
-/// session, one it lost is still exposed, and one that moved points elsewhere.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct Drift {
   pub added: Vec<String>,
@@ -138,9 +114,6 @@ impl Drift {
       && self.removed_ports.is_empty()
   }
 
-  /// One line per disagreeing mount or port, phrased by what the user would
-  /// otherwise see happen. A line each, because a mount is already two paths
-  /// wide.
   pub fn lines(&self) -> Vec<String> {
     let mounts = [
       ("declared but not mounted, so invisible in the session", &self.added),
@@ -190,8 +163,6 @@ mod tests {
     Record::of(mounts, &[])
   }
 
-  /// A port declared after the container started is exactly as unreachable as
-  /// a mount added after it started is invisible, and has the same fix.
   #[test]
   fn a_port_declared_since_the_container_started_has_drifted() {
     let drift = Record::of(&[], &[7001]).drift(&[], &[7001, 7002]);
@@ -258,7 +229,6 @@ mod tests {
     );
   }
 
-  /// The session still has `/workspace/a`, pointing somewhere else.
   #[test]
   fn a_mount_whose_source_moved_reads_as_one_change() {
     let drift = recorded(&[mount("/host/old", "/workspace/a")]).drift(&[mount("/host/new", "/workspace/a")], &[]);
@@ -307,8 +277,6 @@ mod tests {
     );
   }
 
-  /// A session whose state directory was cleaned while it ran. `doctor` says so
-  /// rather than claiming a match.
   #[test]
   fn a_missing_record_is_not_an_error() {
     let temp = TempDir::new().expect("temp dir");

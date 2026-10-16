@@ -1,17 +1,5 @@
-//! How a second caller reaches a session this process owns.
-//!
-//! The VM dies with the process that created it, so a later caller connects to
-//! a socket in the session's state directory and the owning process runs the
-//! command on its behalf.
-//!
-//! What crosses is the client's **stdio**, not its bytes: the request carries
-//! the client's descriptors via `SCM_RIGHTS` — its tty and stdout, or its
-//! stdin, stdout and stderr when it has no tty — and the owner hands them
-//! straight to the guest process. Nothing relays keystrokes, and the owner's
-//! code path is the same as for its own.
-//!
-//! The socket carries only what a descriptor cannot: the request, a nudge per
-//! window resize, and the exit code back.
+//! Clients pass their stdio descriptors to the owning process via `SCM_RIGHTS`;
+//! the socket itself carries only the request, resize nudges and the exit code.
 
 use super::stdio::{Stdio, UNATTACHED};
 use std::io::{self, Read, Write};
@@ -19,23 +7,16 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
-/// Socket file name, inside the container's runtime directory.
 pub const CONTROL_SOCKET: &str = "control.sock";
 
-/// Separates list elements within a request line; cannot occur in an argument
-/// or environment variable.
+/// Cannot occur in an argument or environment variable.
 const UNIT: char = '\u{1f}';
 
-/// Written by the client whenever its window changes size.
 const RESIZE: u8 = b'R';
 
-/// Enough for any plausible argv and environment; larger is a bug.
 const MAX_REQUEST: usize = 64 * 1024;
 
-/// How a [`Stdio`]'s streams are named on the wire.
-///
-/// Descriptors cross in the order these list them, so both ends agree on which
-/// is which without sending numbers that mean nothing to the other side.
+/// Descriptors cross in this order.
 fn labelled(stdio: &Stdio) -> [(char, RawFd); MAX_DESCRIPTORS] {
   [
     ('t', stdio.terminal),
@@ -45,8 +26,6 @@ fn labelled(stdio: &Stdio) -> [(char, RawFd); MAX_DESCRIPTORS] {
   ]
 }
 
-/// Files `descriptor` under the stream `label` names. `None` for a label
-/// `labelled` doesn't name: guessing would attach the caller to the wrong one.
 fn set(stdio: &mut Stdio, label: char, descriptor: RawFd) -> Option<()> {
   let stream = match label {
     't' => &mut stdio.terminal,
@@ -61,7 +40,6 @@ fn set(stdio: &mut Stdio, label: char, descriptor: RawFd) -> Option<()> {
   Some(())
 }
 
-/// Only the streams the caller attached, in the order they cross.
 fn attached(stdio: &Stdio) -> impl Iterator<Item = (char, RawFd)> {
   labelled(stdio)
     .into_iter()
@@ -76,8 +54,6 @@ fn labels(stdio: &Stdio) -> String {
   attached(stdio).map(|(label, _)| label).collect()
 }
 
-/// Pairs the labels a request carried with the descriptors that came beside
-/// it. `None` when they disagree, or a label names no stream.
 fn from_labels(labels: &str, descriptors: &[RawFd]) -> Option<Stdio> {
   if labels.chars().count() != descriptors.len() {
     return None;
@@ -92,12 +68,10 @@ fn from_labels(labels: &str, descriptors: &[RawFd]) -> Option<Stdio> {
   Some(stdio)
 }
 
-/// What a client asks the owner to run.
 #[derive(Debug, Eq, PartialEq)]
 pub struct Request {
   pub arguments: Vec<String>,
   pub environment: Vec<String>,
-  /// `None` is the image's own user, and crosses as an empty line.
   pub user: Option<String>,
   pub working_directory: String,
 }
@@ -114,8 +88,7 @@ impl Request {
     )
   }
 
-  /// The request, and the streams its descriptors are. The working directory
-  /// comes last: it is the only field that may itself contain a newline.
+  /// The working directory comes last because it alone may contain a newline.
   fn decode(payload: &str, descriptors: &[RawFd]) -> Option<(Self, Stdio)> {
     let mut lines = payload.splitn(5, '\n');
     let arguments = lines.next()?;
@@ -135,10 +108,6 @@ impl Request {
   }
 }
 
-/// Whether a connection sent nothing, i.e. was a liveness check.
-///
-/// A client always sends request and descriptors in one message, so neither
-/// means it closed before speaking — not a failed attach worth reporting.
 fn probe(payload: &str, descriptors: &[OwnedFd]) -> bool {
   payload.is_empty() && descriptors.is_empty()
 }
@@ -151,16 +120,12 @@ fn split(line: &str) -> Vec<String> {
   line.split(UNIT).map(str::to_string).collect()
 }
 
-/// Whether something is accepting on the unix socket at this path: a control
-/// socket's owner, or a port relay.
-///
-/// The inode outlives its owner, so only a connect tells dead from listening.
+/// The socket file outlives its owner, so only a connect tells dead from listening.
 pub fn served(path: &Path) -> bool {
   UnixStream::connect(path).is_ok()
 }
 
-/// Binds the control socket, creating its directory and replacing any socket
-/// left by a dead owner (safe because `served` found nothing answering).
+/// Replaces any socket left by a dead owner.
 pub fn bind(path: &Path) -> io::Result<UnixListener> {
   if let Some(parent) = path.parent() {
     std::fs::create_dir_all(parent)?;
@@ -173,14 +138,6 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
   UnixListener::bind(path)
 }
 
-/// Serves requests until the listener is dropped, one thread per attached
-/// client.
-///
-/// `run` gets the request and the client's stdio and returns the guest's exit
-/// code. `resize` gets the client's terminal on each window change, and is
-/// never called for a client that sent none. `failed` gets a client whose
-/// attach broke: one client going away leaves the rest of the session running,
-/// so there is nothing to return it to and nowhere here to report it.
 pub fn serve<R, S, F>(listener: &UnixListener, run: R, resize: S, failed: F)
 where
   R: Fn(&Request, &Stdio, &str) -> i32 + Sync,
@@ -190,7 +147,6 @@ where
   std::thread::scope(|scope| {
     for (sequence, stream) in listener.incoming().enumerate() {
       let Ok(stream) = stream else {
-        // A failed accept says nothing about the next one.
         continue;
       };
 
@@ -199,7 +155,6 @@ where
       let failed = &failed;
 
       scope.spawn(move || {
-        // Unique per attach, so a resize reaches only its own process.
         let id = format!("attach-{sequence}");
 
         if let Err(error) = attend(stream, &id, run, resize) {
@@ -213,20 +168,16 @@ where
 fn attend<R, S>(stream: UnixStream, id: &str, run: R, resize: S) -> io::Result<()>
 where
   R: Fn(&Request, &Stdio, &str) -> i32,
-  // The resize watcher gets its own thread so resizes arrive while the guest
-  // is quiet.
   S: Fn(&str, RawFd) + Send,
 {
   let (payload, received) = receive(&stream)?;
 
-  // `served` (via `is_running`) connects and closes without sending. Reporting
-  // it would report on every liveness check.
+  // `served` connects and closes without sending; that is not an error.
   if probe(&payload, &received) {
     return Ok(());
   }
 
-  // Owned, so they close once the guest is done; the client keeps its own, and
-  // the framework streams duplicates of these.
+  // `received` keeps these open until the guest is done.
   let descriptors: Vec<RawFd> = received.iter().map(AsRawFd::as_raw_fd).collect();
 
   let (request, stdio) = Request::decode(&payload, &descriptors)
@@ -236,13 +187,10 @@ where
     let mut watching = stream.try_clone()?;
     let terminal = stdio.terminal;
 
-    // Only a client on a terminal has a window to resize, and only it nudges.
     if stdio.has_terminal() {
       scope.spawn(move || {
         let mut byte = [0u8; 1];
 
-        // Ends when the client closes after getting its exit code, so this
-        // thread cannot outlive the attach.
         while let Ok(1) = watching.read(&mut byte) {
           if byte[0] == RESIZE {
             resize(id, terminal);
@@ -261,12 +209,7 @@ where
   })
 }
 
-/// Asks the owner to run something on the given stdio; blocks until the guest
-/// exits and returns its exit code. Nothing is relayed meanwhile.
-///
-/// `resized` returns whether this process's window changed size since last
-/// asked. The owner cannot see that for itself, so each change crosses as a
-/// nudge, and the owner resizes the guest's pty on our behalf.
+/// `resized` returns whether this process's window changed size since last asked.
 pub fn request(path: &Path, request: &Request, stdio: &Stdio, resized: &(dyn Fn() -> bool + Sync)) -> io::Result<i32> {
   let stream = UnixStream::connect(path)?;
 
@@ -279,7 +222,6 @@ pub fn request(path: &Path, request: &Request, stdio: &Stdio, resized: &(dyn Fn(
     Ok(i32::from_be_bytes(code))
   };
 
-  // Only a caller with a terminal has a window that can change size.
   if !stdio.has_terminal() {
     return wait();
   }
@@ -287,16 +229,12 @@ pub fn request(path: &Path, request: &Request, stdio: &Stdio, resized: &(dyn Fn(
   super::terminal::while_resizing(
     resized,
     || {
-      // A write that fails needs no handling: the owner is gone, and the read
-      // below is about to say so.
       let _ = (&stream).write_all(&[RESIZE]);
     },
     wait,
   )
 }
 
-/// `sendmsg` with the payload and the descriptors in one `SCM_RIGHTS` control
-/// message.
 fn send(stream: &UnixStream, payload: &[u8], descriptors: &[RawFd]) -> io::Result<()> {
   let mut space = [0u8; CMSG_SPACE];
   let mut iov = libc::iovec {
@@ -305,15 +243,13 @@ fn send(stream: &UnixStream, payload: &[u8], descriptors: &[RawFd]) -> io::Resul
   };
   let bytes = size_of_val(descriptors) as u32;
 
-  // SAFETY: every pointer below refers to a local that outlives the call, and
-  // the control buffer is sized by CMSG_SPACE for MAX_DESCRIPTORS of them.
+  // SAFETY: every pointer refers to a local that outlives the call, and the control buffer fits MAX_DESCRIPTORS.
   let sent = unsafe {
     let mut message: libc::msghdr = std::mem::zeroed();
     message.msg_iov = &mut iov;
     message.msg_iovlen = 1;
     message.msg_control = space.as_mut_ptr() as *mut libc::c_void;
-    // Exactly these descriptors' worth, not the buffer's capacity: any length
-    // past it reads as a second, malformed control message — EINVAL.
+    // Not the buffer's capacity: any excess reads as a malformed second control message (EINVAL).
     message.msg_controllen = libc::CMSG_SPACE(bytes);
 
     let header = libc::CMSG_FIRSTHDR(&message);
@@ -336,8 +272,6 @@ fn send(stream: &UnixStream, payload: &[u8], descriptors: &[RawFd]) -> io::Resul
   Ok(())
 }
 
-/// The counterpart of `send`: the payload, and whichever descriptors came, in
-/// the order they were sent.
 fn receive(stream: &UnixStream) -> io::Result<(String, Vec<OwnedFd>)> {
   let mut payload = vec![0u8; MAX_REQUEST];
   let mut space = [0u8; CMSG_SPACE];
@@ -346,9 +280,7 @@ fn receive(stream: &UnixStream) -> io::Result<(String, Vec<OwnedFd>)> {
     iov_len: payload.len(),
   };
 
-  // SAFETY: as in `send`. The descriptors the kernel writes into the control
-  // buffer are ours to own from the moment recvmsg returns, and it writes no
-  // more of them than the buffer holds.
+  // SAFETY: as in `send`; descriptors the kernel writes into the control buffer are ours to own and never exceed it.
   let (read, descriptors) = unsafe {
     let mut message: libc::msghdr = std::mem::zeroed();
     message.msg_iov = &mut iov;
@@ -376,8 +308,7 @@ fn receive(stream: &UnixStream) -> io::Result<(String, Vec<OwnedFd>)> {
     (read as usize, descriptors)
   };
 
-  // A filled buffer is a request longer than `MAX_REQUEST`, whose tail the
-  // kernel dropped. Decoding what is left would run some truncated argument.
+  // A full buffer means the kernel truncated the request.
   if read == payload.len() {
     return Err(io::Error::new(
       io::ErrorKind::InvalidData,
@@ -390,12 +321,9 @@ fn receive(stream: &UnixStream) -> io::Result<(String, Vec<OwnedFd>)> {
   Ok((String::from_utf8_lossy(&payload).into_owned(), descriptors))
 }
 
-/// One per stream `Stdio` labels, which is every descriptor that can cross.
 const MAX_DESCRIPTORS: usize = 4;
 
-/// Buffer capacity for one `SCM_RIGHTS` message carrying `MAX_DESCRIPTORS`.
-/// `CMSG_SPACE` isn't const, so the exact length is computed at the call; this
-/// only has to be at least that.
+/// An upper bound, since `libc::CMSG_SPACE` isn't const.
 const CMSG_SPACE: usize = 64;
 
 const _: () = assert!(CMSG_SPACE >= 32 + MAX_DESCRIPTORS * size_of::<RawFd>());
@@ -413,8 +341,6 @@ mod tests {
     }
   }
 
-  /// Descriptors as the owner receives them: numbers of its own, in the order
-  /// the client's labels name.
   fn received(stdio: &Stdio) -> Vec<RawFd> {
     (10..).take(descriptors(stdio).len()).collect()
   }
@@ -482,7 +408,6 @@ mod tests {
     assert_eq!(Request::decode("bash\nIS_SANDBOX=1\nroot\nt", &[10]), None);
   }
 
-  /// Both ends would disagree about which stream is which.
   #[test]
   fn reads_nothing_from_a_request_whose_labels_and_descriptors_disagree() {
     let stdio = Stdio::inherit(true);
@@ -501,7 +426,6 @@ mod tests {
     assert_eq!(Request::decode("bash\n\n\nx\n/", &[10]), None);
   }
 
-  /// `served` connects and closes; that must not be reported as malformed.
   #[test]
   fn a_connection_that_says_nothing_is_a_liveness_probe() {
     assert!(probe("", &[]));
@@ -522,7 +446,6 @@ mod tests {
     assert!(!served(&directory.path().join(CONTROL_SOCKET)));
   }
 
-  /// Every stream a caller without a terminal sends, which is the most of them.
   #[test]
   fn carries_three_descriptors_and_a_payload_across() {
     let directory = tempfile::tempdir().expect("a temp dir");

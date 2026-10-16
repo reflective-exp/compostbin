@@ -17,19 +17,18 @@ pub struct Arguments {
 pub enum Command {
   /// Mount a path into the session
   Add {
-    /// The host path to mount, `~` included
+    /// Host path to mount
     path: String,
-    /// Mount a path `add` would otherwise refuse as too broad or too sensitive
+    /// Mount even if the path is too broad or sensitive
     #[arg(long)]
     force: bool,
-    /// Record it in the uncommitted `.config/compostbin.local.toml` instead of
-    /// the manifest the project shares
+    /// Record in .config/compostbin.local.toml instead of the shared manifest
     #[arg(long)]
     local: bool,
     #[arg(long)]
     readonly: bool,
   },
-  /// Build the base image, and the project's own image if the manifest adds to it
+  /// Build the base image and any project image
   Build {
     /// Skip cached rootfs snapshots
     #[arg(long)]
@@ -39,7 +38,7 @@ pub enum Command {
   },
   /// Remove this session's transient state
   Clean {
-    /// Also remove Claude's home, discarding the conversation `--continue` resumes
+    /// Also remove Claude's home and its conversations
     #[arg(long)]
     all: bool,
     #[command(flatten)]
@@ -52,7 +51,7 @@ pub enum Command {
   },
   /// Write a manifest with defaults
   Init,
-  /// Install or update compostbin's Claude skills in ~/.claude/skills
+  /// Install or update compostbin's Claude skills
   Install {
     /// Apply the changes without asking
     #[arg(short, long)]
@@ -63,55 +62,51 @@ pub enum Command {
     #[command(flatten)]
     config: Config,
   },
-  /// Start or join the session and run a command in it
+  /// Start or join the session and run a command
   Exec {
-    /// The command and its arguments
+    /// Command and arguments
     #[arg(required = true, trailing_var_arg = true)]
     argv: Vec<String>,
     #[command(flatten)]
     config: Config,
-    /// Give it a terminal, which needs one on this side too
+    /// Allocate a terminal (requires one locally)
     #[arg(short = 't', long)]
     tty: bool,
-    /// The guest user to run it as
+    /// Guest user
     #[arg(short = 'U', long, default_value = image::USER)]
     user: String,
   },
   /// Start or join the session and attach Claude
   Run {
-    /// Arguments passed to Claude
+    /// Arguments for Claude
     #[arg(last = true)]
     arguments: Vec<String>,
     #[command(flatten)]
     config: Config,
   },
-  /// Open a shell in the session: `exec -t bash`
+  /// Open a shell in the session
   Shell {
     #[command(flatten)]
     config: Config,
-    /// The guest user to open it as
+    /// Guest user
     #[arg(short = 'U', long, default_value = image::USER)]
     user: String,
   },
 }
 
-/// Where a session command reads its configuration.
 #[derive(Args, Debug, Default, PartialEq)]
 pub struct Config {
-  /// Read ~/.config/compostbin/profiles/<PROFILE>.toml instead of the
-  /// project's manifest
+  /// Use ~/.config/compostbin/profiles/<PROFILE>.toml instead of the project's manifest
   #[arg(long, value_parser = profile_name)]
   pub profile: Option<String>,
 }
 
 impl Config {
-  /// The session this configuration selects for `project_dir`.
   pub fn load(&self, resolver: PathResolver, project_dir: &Path) -> Result<Session, ManifestError> {
     Session::load(self.profile.as_deref(), resolver, project_dir)
   }
 }
 
-/// A file name under the profiles directory, not a path out of it.
 fn profile_name(name: &str) -> Result<String, String> {
   if name.is_empty() || name.starts_with('.') || name.contains('/') {
     return Err(format!("\"{name}\" is not a profile name"));
@@ -167,7 +162,6 @@ mod tests {
     assert_eq!(parse(&["compostbin", "run"]), claude(&[]));
   }
 
-  /// The command's own flags are its own: only what precedes it is ours.
   #[test]
   fn parses_exec_with_the_commands_own_arguments() {
     assert_eq!(
@@ -241,7 +235,6 @@ mod tests {
     );
   }
 
-  /// They write the project's manifest; profiles are written by hand.
   #[test]
   fn refuses_a_profile_on_add_and_init() {
     assert!(Arguments::try_parse_from(["compostbin", "add", "../libfoo", "--profile", "rust"]).is_err());

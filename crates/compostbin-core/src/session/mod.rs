@@ -1,12 +1,3 @@
-//! One project's container, and the state that outlives it.
-//!
-//! The public submodules are what a session owns rather than uses: its
-//! briefing, its token, the host Claude config it starts from, and the record of
-//! what its container was created with. The private ones split `Session`
-//! itself: `state` is where it keeps things on the host, `spec` what it asks the
-//! engine for, and `lifecycle` how it creates, attaches to, and cleans up after
-//! its container.
-
 pub mod briefing;
 pub mod credentials;
 pub mod record;
@@ -30,8 +21,7 @@ use std::path::{Path, PathBuf};
 
 pub const NAME_PREFIX: &str = "compostbin-";
 
-/// The first eight hex digits of the path's SHA-256: stable across Rust
-/// releases, unlike `DefaultHasher`, so a profiled session keeps its name.
+/// SHA-256 rather than `DefaultHasher`, which is not stable across Rust releases.
 fn directory_hash(dir: &Path) -> String {
   use sha2::{Digest, Sha256};
   use std::os::unix::ffi::OsStrExt;
@@ -42,44 +32,31 @@ fn directory_hash(dir: &Path) -> String {
     .collect()
 }
 
-/// What a session has to say as it starts, runs, and ends, left to the caller to
-/// print: core does not own the terminal.
-///
-/// Port events only arrive here until Claude is attached. After that the
-/// terminal is Claude's, and the relay writes to `ports_log` instead.
+/// Port events arrive here only until Claude attaches; after that the relay writes to `ports_log`.
 #[derive(Debug)]
 pub enum Notice {
-  /// Claude's home had no token, and the Keychain had none to seed it with.
   NotInKeychain,
-  /// What was copied from the host's own `~/.claude`. Never empty.
+  /// Files copied from the host's `~/.claude`. Never empty.
   Shared(Vec<String>),
   Port(PortEvent),
-  /// This image's first run, which unpacks it before the container can start.
   Unpacking(String),
-  /// A `[container] setup` line exited non-zero. Stops Claude, not any other
-  /// entrypoint.
+  /// Stops Claude but not other entrypoints.
   SetupFailed {
     line: String,
     code: i32,
   },
-  /// The host command agent gave up; the session carries on without it.
   AgentStopped(PathError),
-  /// The spool could not be emptied after Claude exited.
   CleanupFailed(PathError),
 }
 
-/// What `add` did, and therefore what the caller must do next.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AddOutcome {
-  /// Already inside a mounted root — visible in the container right now.
   AlreadyMounted { root: PathBuf },
-  /// Recorded in the manifest, but invisible until the container is recreated.
   NeedsRestart,
 }
 
 pub struct Session {
   pub manifest: Manifest,
-  /// Set when a profile replaces the project's manifest.
   profile: Option<String>,
   project_dir: PathBuf,
   resolver: PathResolver,
@@ -95,8 +72,7 @@ impl Session {
     }
   }
 
-  /// Configured by the project's manifest and its local overlay, or by
-  /// `profile` alone, in which case neither project manifest is read.
+  /// With `profile`, the project's manifest and local overlay are not read.
   pub fn load(
     profile: Option<&str>,
     resolver: PathResolver,
@@ -116,7 +92,6 @@ impl Session {
     })
   }
 
-  /// Where this session's configuration lives, as the user would write it.
   pub fn config_path(&self) -> String {
     match &self.profile {
       Some(name) => profile_path(name),
@@ -124,10 +99,7 @@ impl Session {
     }
   }
 
-  /// Records a path in the manifest unless a mounted root already covers it.
-  /// `path` must be canonical: a symlink out of a root looks contained and is
-  /// not. `local` records it in the uncommitted manifest instead of the one the
-  /// project shares.
+  /// `path` must be canonical, or a symlink out of a root would look contained.
   pub fn add(&mut self, path: &Path, readonly: bool, local: bool) -> AddOutcome {
     if let Some(root) = root_containing(path, &self.resolved_roots()) {
       return AddOutcome::AlreadyMounted {
@@ -149,9 +121,7 @@ impl Session {
     &self.resolver
   }
 
-  /// A profile serves many directories, so its sessions are named after the
-  /// directory plus a hash of its path: two checkouts named `api` must not
-  /// share a container or conversation.
+  /// Profiled names include a hash of the directory so checkouts sharing a basename get separate containers.
   pub fn container_name(&self) -> String {
     let basename = || {
       self
@@ -169,9 +139,7 @@ impl Session {
     format!("{NAME_PREFIX}{project}")
   }
 
-  /// The host paths this session exposes, in declaration order: roots, the
-  /// project directory when no root covers it, then explicit `[[paths]]`. Order
-  /// matters — a name goes to the first entry that claims it.
+  /// Order matters: a guest name goes to the first entry that claims it.
   pub fn workspace(&self) -> Workspace {
     let mut workspace = Workspace::default();
 
@@ -247,7 +215,6 @@ mod tests {
     assert_eq!(session.manifest.paths[1].local, false, "add records a shared path");
   }
 
-  /// A local path mounts exactly like any other, and only `ls` tells them apart.
   #[test]
   fn a_local_path_mounts_and_says_where_it_came_from() {
     let mut session = session();
@@ -266,8 +233,6 @@ mod tests {
     assert_eq!(entry.guest, PathBuf::from("/workspace/libfoo"));
   }
 
-  /// A home holding `profile` as `rust`, and a project whose own manifest
-  /// disagrees.
   fn profiled(profile: &str, project: &str) -> (TempDir, Session) {
     let temp = TempDir::new().expect("temp dir");
     let home = temp.path().canonicalize().expect("canonical temp");
@@ -317,8 +282,6 @@ mod tests {
     assert!(error.to_string().contains("profiles/absent.toml"), "{error}");
   }
 
-  /// Neither the profile's `[project] name` nor the basename alone tells
-  /// directories apart.
   #[test]
   fn a_profiled_session_is_named_after_its_directory() {
     let profile = "[project]\nname = \"shared\"\n";
@@ -332,7 +295,7 @@ mod tests {
     assert_ne!(name, second.container_name());
   }
 
-  /// Pinned: a changed name strands the conversation kept under the old one.
+  /// Changing the hash strands existing containers and conversations.
   #[test]
   fn directory_hash_is_stable() {
     assert_eq!(directory_hash(Path::new("/Users/user/code/api")), "a2415cbb");

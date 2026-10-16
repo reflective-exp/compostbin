@@ -1,7 +1,3 @@
-//! What can be wrong about what the container can see: a declared path that is
-//! not there, a link that dies at the mount boundary, a mount set the running
-//! container never got, and a mount that hands over too much.
-
 use super::{Check, Status, check, listed};
 use crate::manifest::TomlFile;
 use crate::session::Session;
@@ -9,13 +5,8 @@ use crate::session::record::Record;
 use crate::workspace::danger::danger;
 use crate::workspace::{Escape, Origin};
 
-/// Directory entries `escaping_symlinks` looks at before giving up: enough for
-/// an ordinary source tree, few enough to stay imperceptible.
 const WALK_LIMIT: usize = 50_000;
 
-/// Roots and explicit paths only. The project directory is where compostbin
-/// was invoked, so it exists; Claude's home is excluded: `run` creates it, so
-/// it is normally absent before the first session.
 pub fn mounted_paths(session: &Session) -> Check {
   let missing: Vec<String> = session
     .workspace()
@@ -37,11 +28,6 @@ pub fn mounted_paths(session: &Session) -> Check {
   )
 }
 
-/// Symlinks that resolve on the host but dangle in the container, their targets
-/// outside every mounted tree.
-///
-/// A warning: the session runs, and whether to mount the target or drop the
-/// link is the user's call.
 pub fn dangling_symlinks(session: &Session) -> Check {
   const NAMED: usize = 5;
 
@@ -64,7 +50,6 @@ pub fn dangling_symlinks(session: &Session) -> Check {
     .map(Escape::to_string)
     .collect();
 
-  // In the list, so the sentence stays true however many were named.
   let rest = found.escapes.len().saturating_sub(named.len());
   if rest > 0 {
     named.push(format!("and {rest} more"));
@@ -78,13 +63,6 @@ pub fn dangling_symlinks(session: &Session) -> Check {
   )
 }
 
-/// Whether the running container has the mounts the manifest describes. `run`
-/// attaches to a live container, and mounts cannot be added to one, so a
-/// manifest edit takes effect only once `run` recreates it. Otherwise the path
-/// is just missing in the guest.
-///
-/// A warning, since recreating is the user's call, but the fix is named because
-/// it is not guessable.
 pub fn live_mounts(session: &Session, running: bool) -> Check {
   let name = session.container_name();
 
@@ -130,16 +108,15 @@ pub fn live_mounts(session: &Session, running: bool) -> Check {
   )
 }
 
-/// Every mounted path, not only roots: a hand-edited manifest bypasses `add`'s
-/// refusal.
+/// Checks every path, not only roots, because a hand-edited manifest bypasses
+/// `add`'s refusal.
 pub fn root_breadth(session: &Session) -> Check {
   let dangerous: Vec<String> = session
     .workspace()
     .entries()
     .iter()
     .filter_map(|entry| {
-      // Judged as `add` judges it: `~/code/../.ssh`, or a link to `~/.ssh`, is
-      // still `~/.ssh`. A missing path is judged as written.
+      // Canonicalized as `add` does, so `~/code/../.ssh` or a link to `~/.ssh` is still caught.
       let judged = entry
         .host
         .canonicalize()

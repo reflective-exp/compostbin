@@ -1,12 +1,6 @@
 #!/bin/sh
-# The guest's pbcopy, xclip, xsel and wl-copy, all one script named by how it
-# was called: each sends what it would have copied to `compostbin-host
-# clipboard`, which the host serves with `[host] clipboard` by running pbcopy.
-#
-# Only the flags a caller copying text would pass are understood. Pasting is
-# refused rather than faked: nothing on the host clipboard reaches the guest.
-# The primary selection has no macOS equivalent, so a copy to it is read and
-# dropped — Claude copies to both, and one host round trip is enough.
+# pbcopy, xclip, xsel and wl-copy, dispatched on $0, sending copies to `compostbin-host clipboard`.
+# Pasting is refused, and copies to the primary selection are discarded.
 set -eu
 
 name=$(basename "$0")

@@ -1,5 +1,3 @@
-//! What a session keeps on the host, and how much of it `clean` may take.
-
 use crate::error::{At, PathError};
 use crate::fs::{empty, remove};
 use crate::host::Spool;
@@ -8,27 +6,13 @@ use crate::session::briefing::MANAGED_SETTINGS_DIR;
 use crate::session::record::RECORD_FILE;
 use std::path::{Path, PathBuf};
 
-/// Session state, keyed by container name: Claude's home, kept so `--continue`
-/// works, beside transient state that `clean` empties.
 const SESSIONS_DIR: &str = "~/.local/state/compostbin/sessions";
-/// Under the session state directory: kept, because `claude --continue` reads it.
 const CLAUDE_HOME_DIR: &str = "claude-home";
-/// Under the session state directory: requests in flight. `clean` empties it
-/// rather than removing it, because the container mounts it.
 const SPOOL_DIR: &str = "host";
-/// Where the relay says what it could not, while a session is attached.
 const PORTS_LOG: &str = "ports.log";
 
-/// Empties a directory without unlinking it, or removes a plain file.
-///
-/// Every transient path a session keeps is also a mount source, and a running
-/// container's mount is attached to the inode it was created with: a directory
-/// removed and recreated at the same path is never reattached, so the guest is
-/// left holding one that nothing writes to any more. Emptying is the only kind
-/// of cleaning a live mount survives.
-///
-/// A symlink is removed rather than followed, so a link planted where a mount
-/// source belongs cannot make this clear something else.
+/// Empties directories instead of removing them, because a running container's mount stays bound to the original inode.
+/// Symlinks are removed, not followed.
 fn clear(target: &Path) -> Result<(), PathError> {
   if std::fs::symlink_metadata(target).at(target)?.is_dir() {
     empty(target)
@@ -38,12 +22,6 @@ fn clear(target: &Path) -> Result<(), PathError> {
 }
 
 impl Session {
-  /// The source side of the bind mount, and so where credentials are seeded
-  /// before the container starts.
-  ///
-  /// Per session unless the manifest overrides it: one shared home would make
-  /// `--continue` resume whichever project ran last, and expose one project's
-  /// history to another's container.
   pub fn claude_home(&self) -> PathBuf {
     match &self.manifest.claude.home {
       Some(home) => self.resolver.resolve(home),
@@ -51,29 +29,19 @@ impl Session {
     }
   }
 
-  /// Where every session keeps its state, each under its own container name.
   pub fn sessions_dir(&self) -> PathBuf {
     self.resolver.resolve(SESSIONS_DIR)
   }
 
-  /// Everything this session keeps on the host, under its own container name.
   pub fn state_dir(&self) -> PathBuf {
     self.sessions_dir().join(self.container_name())
   }
 
-  /// What `clean` may delete: state meaningless once the container is gone. Not
-  /// Claude's home, which holds the conversation `--continue` reattaches to.
   fn transient_state(&self) -> Vec<PathBuf> {
     vec![self.host_spool(), self.ports_log(), self.managed_settings()]
   }
 
-  /// Empties this session's transient state, and with `everything` removes the
-  /// session directory whole. Missing paths are not an error: `clean` exists
-  /// because an earlier exit may not have run.
-  ///
-  /// Emptied rather than removed: the container may still be running, and each
-  /// of these paths is a mount source (§`clear`). `everything` is the exception:
-  /// it discards the conversation, so the session is over by definition.
+  /// Without `everything`, empties paths in place because the container may still mount them.
   pub fn clean(&self, everything: bool) -> Result<Vec<PathBuf>, PathError> {
     if everything {
       let state = self.state_dir();
@@ -104,12 +72,6 @@ impl Session {
     Ok(cleared)
   }
 
-  /// What the `run` that created the container clears when Claude exits: only
-  /// the spool, so nothing claimed outlives the agent that claimed it.
-  ///
-  /// Emptied rather than removed: until this process exits the container still
-  /// holds that mount (§`clear`). The rest is left for the next create, which
-  /// rewrites the managed settings anyway.
   pub(super) fn clean_after_exit(&self) -> Result<(), PathError> {
     let spool = self.host_spool();
     if !spool.exists() {
@@ -119,14 +81,10 @@ impl Session {
     Spool::new(&spool).empty()
   }
 
-  /// Inside the session directory, so concurrent projects cannot see each
-  /// other's requests and `clean` takes it with the rest.
   pub fn host_spool(&self) -> PathBuf {
     self.state_dir().join(SPOOL_DIR)
   }
 
-  /// The spool at `host_spool`, or `None` with no commands declared: with no
-  /// allowlist there is no channel at all, rather than an empty one.
   pub(super) fn spool(&self) -> Option<Spool> {
     self
       .manifest
@@ -135,8 +93,6 @@ impl Session {
       .then(|| Spool::new(self.host_spool()))
   }
 
-  /// The mount source must exist before the container starts, and the guest
-  /// cannot create it. A no-op with no commands declared.
   pub(super) fn prepare_host_spool(&self) -> Result<(), PathError> {
     match self.spool() {
       Some(spool) => spool.create(),
@@ -144,25 +100,14 @@ impl Session {
     }
   }
 
-  /// Where the relay writes once Claude is attached.
-  ///
-  /// A file, because by then the terminal is Claude's: the relay runs on a
-  /// thread of `run`, and anything it printed would land mid-draw. A host
-  /// service not yet started is ordinary (`[host.commands]` may start it), so a
-  /// refused connection must not look like a fault.
   pub fn ports_log(&self) -> PathBuf {
     self.state_dir().join(PORTS_LOG)
   }
 
-  /// The source side of the managed settings mount: what this session tells its
-  /// Claude about itself. Per session, because it is rendered from this
-  /// project's manifest.
   pub fn managed_settings(&self) -> PathBuf {
     self.state_dir().join(MANAGED_SETTINGS_DIR)
   }
 
-  /// Where the container's creation-time mounts are recorded, so `doctor` can
-  /// tell a manifest edited mid-session from one that took effect.
   pub fn mount_record(&self) -> PathBuf {
     self.state_dir().join(RECORD_FILE)
   }
@@ -182,8 +127,6 @@ mod tests {
     );
   }
 
-  /// `prepare` creates the mount source, so an undeclared channel must leave
-  /// nothing behind.
   #[test]
   fn prepares_the_spool_only_when_commands_are_declared() {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -243,9 +186,6 @@ mod tests {
     );
   }
 
-  /// A spool unlinked while the container holds it leaves every later `shell`
-  /// and `host-agent` writing to an inode the guest cannot reach: a host channel
-  /// present and permanently empty.
   #[test]
   fn cleaning_keeps_the_inode_a_running_container_mounts() {
     let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);

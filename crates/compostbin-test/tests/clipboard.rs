@@ -1,9 +1,4 @@
 #![cfg(feature = "integration")]
-//! `[host] clipboard`: the guest's copying tools reaching the host pasteboard.
-//!
-//! The pasteboard is the developer's own, so every test here puts back what it
-//! found. It is also the only shared thing these tests touch, so they run one
-//! at a time.
 
 use compostbin_core::host::CLIPBOARD_COMMAND;
 use compostbin_core::image::CLIPBOARD_TOOLS;
@@ -13,13 +8,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// How long a guest's copy is given to land on the host.
 const COPY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Holds the machine's one pasteboard for the length of a test, and puts back
-/// what was on it. Held across processes, since that is how the tests run.
 struct Pasteboard {
-  /// Held only to be dropped, which is what lets the next test look.
   _held: Lock,
   restore: String,
 }
@@ -34,8 +25,7 @@ impl Pasteboard {
 }
 
 impl Drop for Pasteboard {
-  /// The lock is a field, so it is released after this: what was on the
-  /// pasteboard is back before any other test can look at it.
+  /// Runs before the lock field is dropped, so the pasteboard is restored first.
   fn drop(&mut self) {
     copy(&self.restore);
   }
@@ -75,15 +65,11 @@ clipboard = true
   project
 }
 
-/// One script under four names, each ahead of any real one on `PATH`, so a
-/// project image that installs `xclip` still copies to the host.
 #[test]
 fn every_tool_reaches_the_pasteboard() {
   let project = with_clipboard("cbt-clipboard");
   let _pasteboard = Pasteboard::take();
 
-  // One container for all four, stepping over its stdin: each tool copies,
-  // says so, and waits while this side reads the pasteboard.
   let copying: Vec<String> = CLIPBOARD_TOOLS
     .iter()
     .map(|tool| format!("printf '%s' 'copied with {tool}' | {tool} && read step"))
@@ -104,16 +90,13 @@ fn every_tool_reaches_the_pasteboard() {
   );
 }
 
-/// The guest's copy crosses to the host as a command of its own, so it lands a
-/// moment after the tool says it has run.
 fn wait_for_the_pasteboard(expected: &str, tool: &str) {
   poll_until(COPY_TIMEOUT, &format!("{tool} to reach the host pasteboard"), || {
     (paste() == expected).then_some(())
   });
 }
 
-/// Claude on Linux looks for `wl-copy` only when there is a display to copy to.
-/// There is none; the variable is what makes it look.
+/// Claude on Linux looks for `wl-copy` only when `WAYLAND_DISPLAY` is set.
 #[test]
 fn session_gets_a_display() {
   let project = with_clipboard("cbt-clipboard-display");
@@ -121,17 +104,13 @@ fn session_gets_a_display() {
   assert_eq!(project.guest_output("echo $WAYLAND_DISPLAY"), CLIPBOARD_DISPLAY);
 }
 
-/// Write-only: nothing on the host pasteboard reaches the guest, and a paste
-/// says so rather than returning something stale or empty.
 #[test]
 fn pasting_is_refused() {
   let _pasteboard = Pasteboard::take();
   let project = with_clipboard("cbt-clipboard-paste");
   copy("a host secret");
 
-  // Not bare `xsel`, which pastes only when its stdin is a terminal and
-  // copies otherwise — as it does here. One container for all of them: each
-  // reports its own exit code.
+  // Not bare `xsel`, which copies rather than pastes when stdin is not a terminal.
   let attempts = ["xclip -o", "xclip -out", "xsel -o", "xsel --output"];
   let output = project.guest(
     &attempts
@@ -163,8 +142,6 @@ fn pasting_is_refused() {
   );
 }
 
-/// Off by default: whatever the guest copies, the user may later paste into a
-/// host terminal.
 #[test]
 fn off_without_the_setting() {
   let _pasteboard = Pasteboard::take();
@@ -180,8 +157,6 @@ fn off_without_the_setting() {
   assert_eq!(paste(), "untouched", "and the host pasteboard is not written to");
 }
 
-/// The clipboard is served as a host command, so a project that declares one
-/// itself points the guest's tools at that instead.
 #[test]
 fn declared_command_wins() {
   let project = Project::new("cbt-clipboard-own");

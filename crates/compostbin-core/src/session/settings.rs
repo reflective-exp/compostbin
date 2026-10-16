@@ -1,9 +1,3 @@
-//! The host's own Claude, copied into the session's Claude home.
-//!
-//! Not the token — that is `credentials` — and not history or projects, which
-//! belong to the session. Only what the user maintains once, on the host, and
-//! expects to find in every container.
-
 use crate::error::{At, PathError};
 use std::ffi::{CString, OsStr};
 use std::fs::{File, Metadata, OpenOptions};
@@ -13,28 +7,14 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
-/// The host user's own Claude home, the source of everything copied in here.
 pub const HOST_CLAUDE_HOME: &str = "~/.claude";
 
-/// What every session gets: the user's house style, their agents, their
-/// settings, their skills. Not configurable and never named in a manifest,
-/// because this is the user's Claude rather than a per-project decision.
 pub const HOST_CLAUDE_SETTINGS: [&str; 4] = ["CLAUDE.md", "agents", "settings.json", "skills"];
 
-/// Deep enough for any skill tree, shallow enough that a symlink loop under
-/// `~/.claude` ends the copy instead of filling the disk.
+/// Bounds the copy so a symlink loop under `~/.claude` terminates.
 const MAX_DEPTH: usize = 32;
 
-/// Copies `HOST_CLAUDE_SETTINGS`, plus whatever `extra` the user's config and
-/// the manifest add, from the host's `~/.claude` into the session's home,
-/// overwriting what is there. An entry may be a file (`CLAUDE.md`) or a
-/// directory (`skills`), copied whole, following links.
-///
-/// The host is authoritative, so a shared directory is replaced rather than
-/// merged: a skill deleted on the host disappears from the session too.
-/// Everything else in the session home (history, projects, the refreshed token)
-/// is never touched. Names must be single components, so a manifest cannot
-/// escape with `../`.
+/// Replaces each entry wholesale rather than merging, so deletions on the host propagate.
 pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<Vec<String>, PathError> {
   let mut names: Vec<String> = HOST_CLAUDE_SETTINGS
     .iter()
@@ -56,8 +36,7 @@ pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<
     }
 
     let source = host_home.join(&name);
-    // Metadata rather than the entry's own type: symlinking the skills directory
-    // is a normal way to keep it under version control elsewhere.
+    // Follows links, since a symlinked skills directory is common.
     let Ok(metadata) = std::fs::metadata(&source) else {
       continue;
     };
@@ -66,17 +45,17 @@ pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<
       continue;
     }
 
-    if opened.is_none() {
-      std::fs::create_dir_all(session_home).at(session_home)?;
-      opened = Some(open_directory(session_home).at(session_home)?);
-    }
-    let home = opened.as_ref().expect("opened above");
+    let home = match &opened {
+      Some(home) => home,
+      None => {
+        std::fs::create_dir_all(session_home).at(session_home)?;
+        opened.insert(open_directory(session_home).at(session_home)?)
+      }
+    };
     let destination = session_home.join(&name);
 
-    // The guest can write here while this runs, and a symlink it plants would
-    // carry a path-based copy out onto the host. So everything below is created
-    // through `home`'s descriptor, exclusively and without following links: a
-    // link planted at any moment ends the copy with an error instead.
+    // The guest can plant symlinks here concurrently, so everything is created through `home`'s
+    // descriptor without following links.
     crate::fs::remove(&destination)?;
 
     if metadata.is_dir() {
@@ -91,8 +70,7 @@ pub fn share(host_home: &Path, session_home: &Path, extra: &[String]) -> Result<
   Ok(copied)
 }
 
-/// Creates `name` inside `parent`. `destination` only names it in errors: a path
-/// is resolved afresh on every call, and the guest can rearrange it in between.
+/// `destination` is only for error messages, since the guest can rearrange the path between calls.
 fn copy_tree(source: &Path, parent: &OwnedFd, name: &OsStr, destination: &Path, depth: usize) -> Result<(), PathError> {
   if depth == 0 {
     return Ok(());
@@ -133,8 +111,6 @@ fn copy_file(
   Ok(())
 }
 
-/// The session home itself, refused if it is a link. Everything `share` writes
-/// is created relative to this descriptor.
 fn open_directory(path: &Path) -> io::Result<OwnedFd> {
   let file = OpenOptions::new()
     .read(true)
@@ -143,8 +119,6 @@ fn open_directory(path: &Path) -> io::Result<OwnedFd> {
   Ok(file.into())
 }
 
-/// Creates `name` in `parent` and opens it. Fails, rather than following, when
-/// something is already there or is swapped for a link between the two calls.
 fn make_directory(parent: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
   let name = c_name(name)?;
 
@@ -170,8 +144,6 @@ fn make_directory(parent: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
   Ok(unsafe { OwnedFd::from_raw_fd(opened) })
 }
 
-/// A new file in `parent`. `O_EXCL` refuses whatever is already at `name`, a
-/// link included, so nothing is ever written through one.
 fn create_file(parent: &OwnedFd, name: &OsStr, mode: u32) -> io::Result<File> {
   let name = c_name(name)?;
 
@@ -202,8 +174,6 @@ mod tests {
   use super::*;
   use tempfile::TempDir;
 
-  /// A host home holding every settings entry, so a test can assert on what a
-  /// case adds rather than on the baseline.
   fn host_home(temp: &TempDir) -> std::path::PathBuf {
     let host = temp.path().join("host-claude");
     std::fs::create_dir_all(host.join("agents")).expect("create host agents");
@@ -243,8 +213,6 @@ mod tests {
     assert_eq!(copied, ["CLAUDE.md", "agents", "settings.json", "skills", "widgets"]);
   }
 
-  /// A link is how many people keep `~/.claude` under version control; the
-  /// session gets the contents, since the link's target is not in the guest.
   #[test]
   fn copies_a_linked_agent_as_its_contents() {
     let temp = TempDir::new().expect("temp dir");
@@ -317,8 +285,6 @@ mod tests {
     );
   }
 
-  /// What a guest racing `share` would do: plant a link after `remove` has
-  /// cleared the name.
   #[test]
   fn refuses_a_file_link_planted_mid_copy() {
     let temp = TempDir::new().expect("temp dir");
@@ -377,8 +343,7 @@ mod tests {
     );
   }
 
-  /// An empty name joins to the host home itself, which would make the whole
-  /// session home the destination — and `remove` would wipe it.
+  /// An empty name would make `remove` wipe the whole session home.
   #[test]
   fn ignores_an_empty_name() {
     let temp = TempDir::new().expect("temp dir");

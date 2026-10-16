@@ -1,18 +1,9 @@
 #![cfg(feature = "integration")]
-//! The guest's way out to the host: `compostbin-host <name>`.
-//!
-//! Which requests the allowlist admits is decided by a pure function with
-//! tests of its own. What only a session can show is the round trip: that the
-//! guest script, the spool, the agent and the host process together behave as
-//! though this shell had run the command — same streams, same status — and
-//! that a refusal reaches the caller rather than being swallowed.
 
 use compostbin_core::error::Refusal;
 use compostbin_core::host::{REJECTED_EXIT_CODE, Spool};
 use compostbin_test::{Project, code, stderr, stdout};
 
-/// A project whose host commands are shells: an allowlist entry is argv on the
-/// host, so `sh -c` lets one test write what it wants run there.
 fn with_host_commands(name: &str) -> Project {
   let project = Project::new(name);
   project.manifest(
@@ -88,7 +79,6 @@ fn stdin_reaches_the_command() {
   assert_eq!(stdout(&output), "piped from the guest\n");
 }
 
-/// The command runs where the project is on the host, not where the guest is.
 #[test]
 fn runs_in_the_project_directory() {
   let project = with_host_commands("cbt-host-cwd");
@@ -135,8 +125,6 @@ fn arguments_need_opting_in() {
   );
 }
 
-/// The deny list is what keeps a widened command from being pointed at other
-/// code or configuration; the joined forms are the ones easy to miss.
 #[test]
 fn denied_arguments_are_refused() {
   let project = with_host_commands("cbt-host-denied");
@@ -159,8 +147,6 @@ fn denied_arguments_are_refused() {
   );
 }
 
-/// A request is one field per line, so a newline would smuggle in a second
-/// argument; the guest client refuses it before anything is sent.
 #[test]
 fn an_argument_containing_a_newline_is_refused() {
   let project = with_host_commands("cbt-host-newline");
@@ -172,8 +158,6 @@ fn an_argument_containing_a_newline_is_refused() {
   assert_eq!(stdout(&output), "", "nothing ran");
 }
 
-/// `tty = true` asks for a terminal; a caller capturing the output has none to
-/// give, and must not get the merged streams a pty produces.
 #[test]
 fn a_tty_command_without_a_terminal_keeps_streams_apart() {
   let project = with_host_commands("cbt-host-tty");
@@ -189,8 +173,6 @@ fn a_tty_command_without_a_terminal_keeps_streams_apart() {
   );
 }
 
-/// Subagents call the client independently, so more than one request is in the
-/// spool at once.
 #[test]
 fn concurrent_requests_are_all_served() {
   let project = Project::new("cbt-host-concurrent");
@@ -214,10 +196,6 @@ argv = ["sh", "-c", "sleep 0.5; echo served $1", "--"]
   assert_eq!(served, ["served a", "served b", "served c", "served d"]);
 }
 
-/// `concurrency` is a bound on what runs at once, not a promise to run that
-/// many. `concurrent_requests_are_all_served` fires exactly as many as the cap
-/// admits, so it never reaches it; a cap of one is the case where reaching it
-/// is visible.
 #[test]
 fn the_cap_bounds_what_runs_at_once() {
   let project = Project::new("cbt-host-capped");
@@ -249,8 +227,6 @@ argv = ["sh", "-c", "echo in $1 >> log; sleep 0.4; echo out $1 >> log", "--"]
   }
 }
 
-/// And a cap is a queue, not a limit on how much may be asked for: what does
-/// not fit waits rather than being refused or dropped.
 #[test]
 fn requests_past_the_cap_wait_their_turn() {
   let project = Project::new("cbt-host-queued");
@@ -280,8 +256,6 @@ argv = ["sh", "-c", "echo $1 >> log", "--"]
   );
 }
 
-/// No `[host.commands]`, no channel: the spool is never created, and the
-/// client says so rather than hanging on a directory nothing serves.
 #[test]
 fn no_commands_means_no_channel() {
   let project = Project::new("cbt-host-none");

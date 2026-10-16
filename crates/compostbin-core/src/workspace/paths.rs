@@ -1,8 +1,6 @@
 use crate::error::{At, PathError};
 use std::path::{Path, PathBuf};
 
-/// Resolves manifest path strings against an explicit working and home
-/// directory, so resolution does not depend on the environment.
 pub struct PathResolver {
   cwd: PathBuf,
   home: PathBuf,
@@ -25,18 +23,15 @@ impl PathResolver {
       )
     })?;
 
-    Ok(Self::new(cwd, PathBuf::from(home)))
+    Ok(Self::new(cwd, home))
   }
 
-  /// Resolves, then follows symlinks and normalises `.` and `..` against the real
-  /// filesystem. Fails if the path does not exist.
   pub fn canonicalize(&self, raw: &str) -> Result<PathBuf, PathError> {
     let resolved = self.resolve(raw);
     resolved.canonicalize().at(&resolved)
   }
 
-  /// Expands a leading `~` and makes the result absolute. Unlike a shell,
-  /// `~user` is not expanded but treated as a literal relative path.
+  /// `~user` is not expanded; it is treated as a relative path.
   pub fn resolve(&self, raw: &str) -> PathBuf {
     if raw == "~" || raw == "~/" {
       return self.home.clone();
@@ -55,9 +50,6 @@ impl PathResolver {
   }
 }
 
-/// The first root that `path` lies within, or `None` if it lies outside all of
-/// them. Comparison is by path component, so `~/workspaces` is not inside
-/// `~/workspace` despite the string prefix matching.
 pub fn root_containing<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a Path> {
   roots
     .iter()
@@ -74,9 +66,7 @@ mod tests {
     PathResolver::new("/Users/user/workspace/compostbin", "/Users/user")
   }
 
-  /// A temp tree holding `real/file.txt` and a `link` symlink pointing at `real`.
-  /// The returned path is canonical, so macOS's `/var` -> `/private/var` symlink
-  /// does not leak into the assertions.
+  /// Canonical, because macOS's `/var` is a symlink to `/private/var`.
   fn linked_tree() -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("temp dir");
     let root = temp.path().canonicalize().expect("canonical temp root");

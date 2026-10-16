@@ -1,14 +1,4 @@
-//! Where the boot artefacts live, and which kernel and init image boot.
-//!
-//! Containerization's `ImageStore` layout, which `ContainerManager` opens as-is:
-//! an image index in `state.json`, blobs under `content`, and one directory per
-//! container under `containers/<id>`.
-//!
-//! Ours: `kernels` and `initfs` (what every VM boots, see [`super::provision`]),
-//! `unpacked` (each image's rootfs, unpacked once and cloned per container), and
-//! `build-cache` (the builder's step snapshots).
-//!
-//! Everything is re-creatable by `provision` and `build`, hence `~/.cache`.
+//! Follows Containerization's `ImageStore` layout, which `ContainerManager` opens as-is.
 
 use crate::error::EngineError;
 use containerization_framework::containerization::image::{Image, ImageStore};
@@ -17,15 +7,12 @@ use containerization_framework::versions::{INIT_IMAGE, KERNEL_ARCHIVE_URL};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// The Containerization release of [`INIT_IMAGE`]: its tag.
 pub fn initfs_version() -> &'static str {
   INIT_IMAGE
     .rsplit_once(':')
     .map_or(INIT_IMAGE, |(_, tag)| tag)
 }
 
-/// The Kata Containers release of [`KERNEL_ARCHIVE_URL`]: the directory it is
-/// published under.
 pub fn kernel_version() -> &'static str {
   KERNEL_ARCHIVE_URL
     .rsplit('/')
@@ -43,9 +30,7 @@ pub struct Store {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum StoreError {
-  /// Never provisioned.
   Missing(PathBuf),
-  /// Lacks the kernel or init image a boot needs.
   Incomplete { root: PathBuf, missing: String },
 }
 
@@ -63,7 +48,6 @@ impl fmt::Display for StoreError {
 impl std::error::Error for StoreError {}
 
 impl Store {
-  /// Names a store without touching it; the first `build` provisions it.
   pub fn at(root: impl Into<PathBuf>) -> Self {
     Self { root: root.into() }
   }
@@ -72,47 +56,36 @@ impl Store {
     &self.root
   }
 
-  /// The kernel every VM boots.
-  ///
-  /// Named for its version, as is the init image, so an upgrade that moves a
-  /// pin finds nothing at the new path and provisioning fetches it, rather
-  /// than booting what an older release left behind.
+  /// Named for its version so a changed pin makes provisioning fetch the new one.
   pub fn kernel(&self) -> PathBuf {
     self
       .root
       .join(format!("kernels/vmlinux-{}", kernel_version()))
   }
 
-  /// Where [`INIT_IMAGE`] is unpacked, and booted from.
   pub fn initfs(&self) -> PathBuf {
     self
       .root
       .join(format!("initfs/vminit-{}.ext4", initfs_version()))
   }
 
-  /// One directory per container, builders' and sessions' alike.
   pub fn containers(&self) -> PathBuf {
     self.root.join(CONTAINERS)
   }
 
-  /// A container's rootfs and boot log: the directory `ContainerManager` uses
-  /// for that id.
+  /// Must match the directory `ContainerManager` uses for that id.
   pub fn container_dir(&self, name: &str) -> PathBuf {
     self.containers().join(name)
   }
 
-  /// Where a build keeps its step snapshots.
   pub fn build_cache(&self) -> PathBuf {
     self.root.join("build-cache")
   }
 
-  /// Where each image is unpacked once.
   pub fn unpacked(&self) -> PathBuf {
     self.root.join("unpacked")
   }
 
-  /// Whether this store holds what a boot needs, naming the first thing
-  /// missing. Worth asking before a boot, which would fail late instead.
   pub fn ready(&self) -> Result<(), StoreError> {
     if !self.root.is_dir() {
       return Err(StoreError::Missing(self.root.clone()));
@@ -130,13 +103,10 @@ impl Store {
     Ok(())
   }
 
-  /// The store's images, as Containerization opens them.
   pub fn images(&self) -> Result<ImageStore, EngineError> {
     Ok(ImageStore::new(&self.root)?)
   }
 
-  /// The store's blobs, and its images over those same blobs: what a build
-  /// writes into, then names.
   pub fn content(&self) -> Result<(LocalContentStore, ImageStore), EngineError> {
     let content = LocalContentStore::new(&self.root.join(CONTENT))?;
     let images = ImageStore::with_content_store(&self.root, &content)?;
@@ -144,8 +114,6 @@ impl Store {
     Ok((content, images))
   }
 
-  /// Every image the store holds, as `name:tag`, sorted. No store yet means
-  /// none, not an error: that's a first run.
   pub fn references(&self) -> Result<Vec<String>, EngineError> {
     if !self.root.is_dir() {
       return Ok(Vec::new());
@@ -182,8 +150,6 @@ mod tests {
     );
   }
 
-  /// Versions are parsed from the framework's constants, so a release that
-  /// changes their shape fails here instead of naming a file after a URL.
   #[test]
   fn reads_each_version_off_the_framework_pins() {
     for version in [initfs_version(), kernel_version()] {

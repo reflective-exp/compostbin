@@ -2,12 +2,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-/// One build step: a named `RUN`. The name is what the build log shows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildStep {
   pub name: String,
   pub script: String,
-  /// The guest user, as the image names it. `None` is root.
+  /// `None` is root.
   pub user: Option<String>,
 }
 
@@ -29,35 +28,27 @@ impl BuildStep {
   }
 }
 
-/// A host directory mounted read-only into every step of a build: what a
-/// `COPY` reads from, or anything else a step needs from outside the image.
+/// Mounted read-only into every build step.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildMount {
   pub destination: String,
   pub source: PathBuf,
 }
 
-/// An image to build: a base, steps, and what the result runs as.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildPlan {
-  /// Registry-qualified: nothing expands `debian:stable-slim` to
-  /// `docker.io/library/…`.
+  /// Must be registry-qualified; short names like `debian:stable-slim` are not expanded.
   pub base: String,
-  /// Whether to start from cached snapshots. Off still writes them.
+  /// Whether to start from cached snapshots; snapshots are written either way.
   pub cache: bool,
-  /// Host directories the steps can read, and where each appears in the guest.
-  /// A step that names one is keyed on its contents.
+  /// A step that names a mount is cache-keyed on its contents.
   pub mounts: Vec<BuildMount>,
-  /// `NAME=VALUE`, visible to every step and written into the image config.
+  /// `NAME=VALUE`, also written into the image config.
   pub environment: Vec<String>,
-  /// Written into the image config as its OCI labels.
   pub labels: BTreeMap<String, String>,
-  /// The builder's own resources, not a session's.
   pub resources: Resources,
   pub steps: Vec<BuildStep>,
-  /// What the built image is registered as.
   pub tag: String,
-  /// The user and directory the built image runs as.
   pub user: Option<String>,
   pub workdir: Option<PathBuf>,
 }
@@ -79,7 +70,6 @@ impl BuildPlan {
   }
 }
 
-/// What a VM is given. Always set by the caller, never defaulted by an engine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Resources {
   pub cpus: u32,
@@ -88,7 +78,7 @@ pub struct Resources {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EnvVar {
-  /// The host's value; dropped if unset, so the guest can tell unset from empty.
+  /// The host's value; omitted entirely if unset on the host.
   Inherit(String),
   Set {
     name: String,
@@ -96,19 +86,15 @@ pub enum EnvVar {
   },
 }
 
-/// A process to run in an already-running container.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecSpec {
   pub arguments: Vec<String>,
   pub env: Vec<EnvVar>,
-  /// Whether the process reads the caller's stdin.
   pub interactive: bool,
-  /// The container to run it in.
   pub name: String,
-  /// Whether it gets the caller's terminal. Only the caller's own stdio says
-  /// whether there is one, so an engine may run without it.
+  /// An engine may run without a terminal when the caller's stdio is not one.
   pub tty: bool,
-  /// The guest user, as the image names it. `None` is the image's default.
+  /// `None` is the image's default user.
   pub user: Option<String>,
   pub workdir: Option<PathBuf>,
 }
@@ -120,7 +106,6 @@ pub struct Mount {
   pub target: PathBuf,
 }
 
-/// `source:target[:ro]`, as `doctor`'s drift report shows it.
 impl fmt::Display for Mount {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(formatter, "{}:{}", self.source.display(), self.target.display())?;
@@ -133,8 +118,7 @@ impl fmt::Display for Mount {
   }
 }
 
-/// A container to create and start. Mounts keep declared order, which matters
-/// for nested paths.
+/// `mounts` are applied in order, which matters for nested paths.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunSpec {
   pub arguments: Vec<String>,

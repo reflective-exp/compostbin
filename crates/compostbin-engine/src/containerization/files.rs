@@ -1,13 +1,9 @@
-//! The file operations the store's caches share.
-
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-/// A path in `directory` that nothing else will write to: where a file is made
-/// before moving into place, so an interrupted write is never found, and
-/// two processes writing the same file never share one.
+/// A unique path in `directory` to write to before moving into place.
 pub fn partial(directory: &Path) -> io::Result<PathBuf> {
   let mut bytes = [0u8; 8];
   getrandom::fill(&mut bytes).map_err(io::Error::other)?;
@@ -15,15 +11,21 @@ pub fn partial(directory: &Path) -> io::Result<PathBuf> {
   Ok(directory.join(format!("{:016x}.partial", u64::from_be_bytes(bytes))))
 }
 
-/// Whether `path` is a [`partial`]'s.
 pub fn is_partial(path: &Path) -> bool {
   path
     .extension()
     .is_some_and(|extension| extension == "partial")
 }
 
-/// `clonefile` where supported, else a real copy. A clone costs only the blocks
-/// either side later changes, so a multi-gigabyte rootfs is free to copy.
+/// Losing the race to another process's equivalent copy is not an error.
+pub fn settle(partial: &Path, destination: &Path) -> io::Result<()> {
+  match std::fs::rename(partial, destination) {
+    Err(_) if destination.is_file() => Ok(()),
+    moved => moved,
+  }
+}
+
+/// `clonefile` where supported, else a real copy.
 pub fn clone(source: &Path, destination: &Path) -> io::Result<()> {
   let _ = std::fs::remove_file(destination);
 

@@ -1,10 +1,4 @@
 #![cfg(feature = "integration")]
-//! What the session is told about itself.
-//!
-//! The text is rendered on the host and asserted on by unit tests. What needs a
-//! session is that it arrives: at the path Claude Code reads managed settings
-//! from, as a hook the guest runs, and read-only — a guest that can rewrite its
-//! own briefing has none.
 
 use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest};
 use compostbin_core::session::briefing::{
@@ -12,13 +6,15 @@ use compostbin_core::session::briefing::{
 };
 use compostbin_test::{Project, stderr};
 
-/// The briefing as the host would render it from the manifest the project has
-/// on disk, which is what the guest must be holding.
 fn rendered(project: &Project) -> String {
   briefing(
     &Manifest::load(&project.manifest_path()).expect("the manifest should load"),
     MANIFEST_RELATIVE_PATH,
   )
+}
+
+fn seen(project: &Project) -> String {
+  project.guest_output(&format!("cat {MANAGED_SETTINGS_TARGET}/{BRIEFING_FILE}"))
 }
 
 #[test]
@@ -40,17 +36,13 @@ tty = true
 "#,
   );
 
-  let seen = project.guest_output(&format!("cat {MANAGED_SETTINGS_TARGET}/{BRIEFING_FILE}"));
-
   assert_eq!(
-    seen,
+    seen(&project),
     rendered(&project).trim(),
     "the briefing is generated from `[host.commands]`, so the two cannot drift"
   );
 }
 
-/// The briefing is a file a `SessionStart` hook prints, so Claude needs the
-/// settings naming that hook, at the path it reads managed settings from.
 #[test]
 fn managed_settings_name_the_hook() {
   let project = Project::new("cbt-managed");
@@ -60,12 +52,7 @@ fn managed_settings_name_the_hook() {
     managed_settings().trim(),
     "Claude Code reads this path or nothing"
   );
-  // The settings are only as good as the command they name, and the hook's
-  // stdout is what reaches Claude's context.
-  assert_eq!(
-    project.guest_output(&format!("cat {MANAGED_SETTINGS_TARGET}/{BRIEFING_FILE}")),
-    rendered(&project).trim()
-  );
+  assert_eq!(seen(&project), rendered(&project).trim());
 }
 
 #[test]
@@ -82,25 +69,22 @@ fn briefing_is_read_only() {
   );
 }
 
-/// A project that declares nothing gets told that, rather than being left to
-/// discover there is no way out.
 #[test]
 fn no_commands_is_said_too() {
   let project = Project::new("cbt-briefing-bare");
 
-  let seen = project.guest_output(&format!("cat {MANAGED_SETTINGS_TARGET}/{BRIEFING_FILE}"));
+  let briefing = seen(&project);
 
-  assert!(seen.contains("declares no host commands"), "briefing: {seen}");
-  assert_eq!(seen, rendered(&project).trim());
+  assert!(briefing.contains("declares no host commands"), "briefing: {briefing}");
+  assert_eq!(briefing, rendered(&project).trim());
 }
 
-/// The briefing is written at creation, so an edited manifest reaches the guest
-/// on the next container rather than the next `exec`.
+/// The briefing is written when the container is created, not on each `exec`.
 #[test]
 fn briefing_follows_the_manifest() {
   let project = Project::new("cbt-briefing-edit");
 
-  let before = project.guest_output(&format!("cat {MANAGED_SETTINGS_TARGET}/{BRIEFING_FILE}"));
+  let before = seen(&project);
   assert!(before.contains("declares no host commands"));
 
   project.manifest(
@@ -110,7 +94,7 @@ argv = ["make"]
 "#,
   );
 
-  let after = project.guest_output(&format!("cat {MANAGED_SETTINGS_TARGET}/{BRIEFING_FILE}"));
+  let after = seen(&project);
 
   assert!(
     after.contains("compostbin-host build  make"),

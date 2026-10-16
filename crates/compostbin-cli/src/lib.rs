@@ -14,7 +14,6 @@ use compostbin_core::workspace::paths::PathResolver;
 use session::{attach, missing_terminal};
 use std::error::Error;
 
-/// Parses argv and executes the requested command, returning its exit code.
 pub fn run() -> Result<i32, Box<dyn Error>> {
   let arguments = Arguments::parse();
   let resolver = PathResolver::from_env()?;

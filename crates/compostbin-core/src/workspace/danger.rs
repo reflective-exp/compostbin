@@ -1,14 +1,7 @@
-//! Which host paths should probably not be mounted at all.
-//!
-//! `add` refuses on either verdict without `--force`; `doctor` reports both,
-//! since a manifest can be hand-edited.
-
 use crate::workspace::paths::PathResolver;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Paths whose contents are secrets. Mounting one, or anything inside it, hands
-/// the container credentials it has no business holding.
 const SENSITIVE_PATHS: [&str; 7] = [
   "/etc",
   "/private/etc",
@@ -18,16 +11,11 @@ const SENSITIVE_PATHS: [&str; 7] = [
   "~/.ssh",
   "~/Library/Keychains",
 ];
-/// Paths not secret in themselves, but covering a whole account or machine,
-/// `SENSITIVE_PATHS` included.
 const BROAD_PATHS: [&str; 6] = ["/", "/Users", "~", "~/Desktop", "~/Documents", "~/Downloads"];
 
-/// Why a path should probably not be mounted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Danger {
-  /// Wide enough to expose the whole account, `SENSITIVE_PATHS` included.
   Broad(PathBuf),
-  /// The path is, or lies inside, something that holds credentials.
   Sensitive(PathBuf),
 }
 
@@ -44,8 +32,7 @@ impl fmt::Display for Danger {
   }
 }
 
-/// Judges an already-resolved host path. Guards against obvious slips, not a
-/// containment boundary: the container runs with the user's own privileges.
+/// Expects a resolved path; this guards against slips and is not a security boundary.
 pub fn danger(path: &Path, resolver: &PathResolver) -> Option<Danger> {
   if let Some(sensitive) = SENSITIVE_PATHS
     .iter()

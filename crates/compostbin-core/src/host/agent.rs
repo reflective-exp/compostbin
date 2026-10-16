@@ -1,8 +1,5 @@
-//! Claiming a request, running it, and publishing what it produced.
-//!
-//! One guarantee shapes all of it: when the guest sees `<id>.status`, every byte
-//! of output is already a complete inode. Hence chunks published by rename, and
-//! a status file written last.
+//! Every output chunk is published by rename before `<id>.status` is written, so
+//! a guest that sees the status has complete output.
 
 use crate::error::{At, PathError};
 use crate::host::pty::Pty;
@@ -21,13 +18,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-/// Immediate enough for a command, rare enough to be invisible on the host.
 pub(super) const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Big enough that a noisy build does not make thousands of files.
 const CHUNK_SIZE: usize = 64 * 1024;
 
-/// Runs a claimed request through to its status file and clears the claim.
 fn complete(
   spool: &Spool,
   commands: &BTreeMap<String, HostCommand>,
@@ -40,8 +34,6 @@ fn complete(
   std::fs::remove_file(claimed).at(claimed)
 }
 
-/// Runs one claimed request, returning the exit code to report. Refusals go to
-/// the error stream, where the guest learns of any other failure.
 fn run_claimed(
   spool: &Spool,
   commands: &BTreeMap<String, HostCommand>,
@@ -62,8 +54,6 @@ fn run_claimed(
     }
   };
 
-  // Outside `resolve`, which stays pure: the caller's terminal is on disk.
-  // A terminal needs both the command to want one and the caller to have one.
   let tty = tty && spool.responses().join(format!("{id}{TTY_SUFFIX}")).exists();
 
   let mut command = Command::new(&argv[0]);
@@ -85,8 +75,7 @@ fn run_claimed(
 
   let finished = AtomicBool::new(false);
 
-  // The scope joins every reader, so all chunks are published before `complete`
-  // writes the status file that means "output complete".
+  // The scope joins every reader, so all chunks are published before the status file.
   let status = std::thread::scope(|scope| {
     scope.spawn(|| {
       if let Some(sink) = stdin {
@@ -112,15 +101,12 @@ fn run_claimed(
     .at(&argv[0])
 }
 
-/// The child, a sink for its input, and the streams to publish.
 type Started = (
   Child,
   Option<Box<dyn Write + Send>>,
   Vec<(&'static str, Box<dyn Read + Send>)>,
 );
 
-/// Separate streams through to the guest's own descriptors. `isatty` is false,
-/// so the command gives non-interactive output.
 fn start_on_pipes(command: &mut Command) -> io::Result<Started> {
   command
     .stdin(Stdio::piped())
@@ -144,8 +130,6 @@ fn start_on_pipes(command: &mut Command) -> io::Result<Started> {
   Ok((child, stdin, sources))
 }
 
-/// A real terminal: `isatty` is true, so the command gives colour and progress.
-/// A terminal is one device, hence one stream.
 fn start_on_terminal(command: &mut Command) -> io::Result<Started> {
   let terminal = Pty::open()?;
   terminal.attach(command)?;
@@ -162,8 +146,7 @@ fn start_on_terminal(command: &mut Command) -> io::Result<Started> {
   ))
 }
 
-/// Publishes one stream as numbered chunks, ending at EOF — or at an error,
-/// which is how a pty master reports that the command is gone.
+/// Ends on a read error too, since that is how a pty master reports the command exited.
 fn publish_stream(spool: &Spool, id: &str, stream: &str, mut source: impl Read) {
   let mut buffer = vec![0; CHUNK_SIZE];
   let mut sequence = 0;
@@ -173,17 +156,14 @@ fn publish_stream(spool: &Spool, id: &str, stream: &str, mut source: impl Read) 
       Ok(0) | Err(_) => return,
       Ok(read) => {
         sequence += 1;
-        // Nothing to be done: the channel back to the guest is what just failed.
         let _ = spool.publish_chunk(id, stream, sequence, &buffer[..read]);
       }
     }
   }
 }
 
-/// Feeds the guest's input to the command as it arrives, ending at the guest's
-/// `<id>.in.eof` marker. The marker is checked before reading, so the final read
-/// sees everything written before it appeared. Dropping `sink` closes the
-/// command's stdin.
+/// The EOF marker is checked before reading, so the final read sees everything
+/// written before it appeared.
 fn pump_stdin(spool: &Spool, id: &str, mut sink: Box<dyn Write + Send>, finished: &AtomicBool) {
   let input_path = spool.responses().join(format!("{id}{INPUT_SUFFIX}"));
   let eof_path = spool.responses().join(format!("{id}{INPUT_EOF_SUFFIX}"));
@@ -193,13 +173,11 @@ fn pump_stdin(spool: &Spool, id: &str, mut sink: Box<dyn Write + Send>, finished
   loop {
     let ended = eof_path.exists() || finished.load(Ordering::Relaxed);
 
-    // Reopened every poll: across the mount, a descriptor held while the guest
-    // appends can stay short (see the guest_input_streaming integration test).
+    // Reopened every poll because a descriptor held across the mount can miss the guest's appends.
     if let Ok(mut file) = File::open(&input_path) {
       buffer.clear();
       if file.seek(SeekFrom::Start(offset)).is_ok() && file.read_to_end(&mut buffer).is_ok() && !buffer.is_empty() {
         offset += buffer.len() as u64;
-        // Normal: the command may simply not read input.
         if sink.write_all(&buffer).is_err() || sink.flush().is_err() {
           return;
         }
@@ -214,10 +192,6 @@ fn pump_stdin(spool: &Spool, id: &str, mut sink: Box<dyn Write + Send>, finished
   }
 }
 
-/// Serves requests until `stop` is set, each on its own thread, since subagents
-/// call `compostbin-host` independently and one long run must not block the
-/// rest. Claims are in arrival order; `limit` bounds what is in flight, so a
-/// guest looping on submissions cannot spawn unbounded work.
 pub fn serve(
   spool: &Spool,
   commands: &BTreeMap<String, HostCommand>,
@@ -241,7 +215,6 @@ pub fn serve(
           let in_flight = &in_flight;
 
           scope.spawn(move || {
-            // One request's failure must not strand every other session command.
             if let Err(error) = complete(spool, commands, project_dir, &id, &claimed) {
               eprintln!("compostbin: serving {id}: {error}");
             }
@@ -264,8 +237,6 @@ mod tests {
   use std::path::PathBuf;
   use tempfile::TempDir;
 
-  /// Claims and runs one request in the caller's thread, reporting whether there
-  /// was anything to do. Sessions use `serve` instead.
   fn serve_once(
     spool: &Spool,
     commands: &BTreeMap<String, HostCommand>,
@@ -279,8 +250,6 @@ mod tests {
     Ok(true)
   }
 
-  /// What a caller of `compostbin-host` sees. A missing stream reads as empty,
-  /// since a refused request writes no stdout.
   fn serve_one(spool: &Spool, allowlist: &BTreeMap<String, HostCommand>, project_dir: &Path, id: &str) -> Response {
     assert!(
       serve_once(spool, allowlist, project_dir).expect("serve should succeed"),
@@ -296,8 +265,6 @@ mod tests {
     }
   }
 
-  /// Reassembles one stream from its chunks in sequence order, as the guest
-  /// client's glob does.
   fn gather(spool: &Spool, id: &str, stream: &str) -> String {
     let prefix = format!("{id}.{stream}.");
     let mut chunks: Vec<PathBuf> = std::fs::read_dir(spool.responses())
@@ -318,7 +285,6 @@ mod tests {
       .collect()
   }
 
-  /// What the guest client does when its own stdout is a terminal.
   fn caller_has_terminal(spool: &Spool, id: &str) {
     std::fs::write(spool.responses().join(format!("{id}{TTY_SUFFIX}")), "").expect("write tty marker");
   }
@@ -368,8 +334,6 @@ mod tests {
     assert_eq!(serve_one(&spool, &allowlist, Path::new("."), "0001").status, 3);
   }
 
-  /// A refusal comes back through the same channel as output: the guest only
-  /// ever sees these two files.
   #[test]
   fn reports_a_refusal_as_output_and_a_status() {
     let (_temp, spool) = spool();
@@ -407,7 +371,6 @@ mod tests {
     );
   }
 
-  /// Ids are timestamp-prefixed, so serving in name order serves in arrival order.
   #[test]
   fn serves_the_oldest_request_first() {
     let (_temp, spool) = spool();
@@ -427,8 +390,6 @@ mod tests {
     assert_eq!(serve_one(&spool, &allowlist, Path::new("."), "0002").output, "second\n");
   }
 
-  /// A `.partial` write is invisible until renamed, so the agent can never read
-  /// a half-written request.
   #[test]
   fn ignores_a_request_that_is_still_being_written() {
     let (_temp, spool) = spool();
@@ -437,7 +398,6 @@ mod tests {
     assert!(!serve_once(&spool, &allowlist(), Path::new(".")).expect("serve should succeed"));
   }
 
-  /// A command writing to both streams must not have them merged into one.
   #[test]
   fn keeps_stdout_and_stderr_apart() {
     let (_temp, spool) = spool();
@@ -457,8 +417,6 @@ mod tests {
     );
   }
 
-  /// What `tty = true` is for: `isatty` is true, so the command gives colour and
-  /// progress instead of its non-interactive output.
   #[test]
   fn gives_a_terminal_to_a_command_that_asked_for_one() {
     let (_temp, spool) = spool();
@@ -476,8 +434,6 @@ mod tests {
     );
   }
 
-  /// A caller capturing output — a pipe, a file, an agent's tool call — must get
-  /// plain output, not colour codes and progress redraws meant for a screen.
   #[test]
   fn gives_pipes_to_a_terminal_command_whose_caller_has_none() {
     let (_temp, spool) = spool();
@@ -498,7 +454,6 @@ mod tests {
     );
   }
 
-  /// The same command on pipes, so the test above cannot pass by accident.
   #[test]
   fn gives_pipes_to_a_command_that_did_not() {
     let (_temp, spool) = spool();
@@ -511,8 +466,6 @@ mod tests {
     assert_eq!(serve_one(&spool, &allowlist, Path::new("."), "0001").status, 1);
   }
 
-  /// A terminal is one device, so the two streams merge — which is why the flag
-  /// is off by default.
   #[test]
   fn merges_the_streams_a_terminal_cannot_keep_apart() {
     let (_temp, spool) = spool();
@@ -537,12 +490,7 @@ mod tests {
     );
   }
 
-  /// Stdin forwarding works on a pty too.
-  ///
-  /// The command reads one line and exits on its own because on a pty it must:
-  /// closing the master is not EOF to the slave (a terminal signals end of input
-  /// with an EOT character, which is never sent), so a `tty = true` command that
-  /// reads to EOF hangs.
+  /// Closing a pty master is not EOF to the slave, so this command must exit after one line.
   #[test]
   fn feeds_a_terminal_command_its_input() {
     let (_temp, spool) = spool();
@@ -563,7 +511,6 @@ mod tests {
     );
   }
 
-  /// Input written before the command starts, with the end marked, must reach it.
   #[test]
   fn feeds_the_command_its_input() {
     let (_temp, spool) = spool();
@@ -578,8 +525,6 @@ mod tests {
     assert_eq!(serve_one(&spool, &allowlist, Path::new("."), "0001").output, "HELLO\n");
   }
 
-  /// A command that never reads stdin, and a guest that never marks the end of
-  /// input, must not wedge the agent: the pump stops when the command exits.
   #[test]
   fn finishes_a_command_that_ignores_unterminated_input() {
     let (_temp, spool) = spool();
@@ -593,7 +538,6 @@ mod tests {
     assert_eq!(serve_one(&spool, &allowlist, Path::new("."), "0001").output, "hello\n");
   }
 
-  /// Output far larger than one chunk comes back complete and in order.
   #[test]
   fn reassembles_output_spanning_many_chunks() {
     let (_temp, spool) = spool();
@@ -627,7 +571,6 @@ mod tests {
     );
   }
 
-  /// A chunk is only visible once complete, so no half-written one is left.
   #[test]
   fn leaves_no_partial_chunk_behind() {
     let (_temp, spool) = spool();

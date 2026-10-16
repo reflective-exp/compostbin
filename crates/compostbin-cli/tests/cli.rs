@@ -7,8 +7,6 @@ use tempfile::TempDir;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_compostbin");
 
-/// Runs `compostbin` in `dir` on a throwaway `home`, so no test reads or writes
-/// the state of whoever runs it. Stdin is closed.
 fn compostbin(home: &Path, dir: &Path, arguments: &[&str]) -> Output {
   Command::new(BINARY)
     .args(arguments)
@@ -18,13 +16,10 @@ fn compostbin(home: &Path, dir: &Path, arguments: &[&str]) -> Output {
     .expect("compostbin should run")
 }
 
-/// The temp directory's canonical path, so the paths `compostbin` prints back
-/// are comparable.
 fn home(temp: &TempDir) -> PathBuf {
   temp.path().canonicalize().expect("canonical temp")
 }
 
-/// An `init`ed project in `home`.
 fn initialized_project(home: &Path) -> PathBuf {
   let project_dir = home.join("my-project");
   std::fs::create_dir(&project_dir).expect("create project dir");
@@ -33,13 +28,10 @@ fn initialized_project(home: &Path) -> PathBuf {
   project_dir
 }
 
-/// The session `compostbin` runs for the project in `project_dir`, under `home`.
 fn session(home: &Path, project_dir: &Path) -> Session {
   Session::load(None, PathResolver::new(project_dir, home), project_dir).expect("the manifest should load")
 }
 
-/// A project whose `workspace.roots` names a sibling `workspace/` tree, holding
-/// `inside` and next to an `outside` that no root covers.
 struct Rooted {
   home: PathBuf,
   project_dir: PathBuf,
@@ -273,7 +265,6 @@ fn add_local_records_the_path_beside_the_committed_manifest() {
     "local manifest: {local}"
   );
 
-  // And the session mounts it, saying where it came from.
   let listed = compostbin(&project.home, &project.project_dir, &["ls"]);
   let stdout = String::from_utf8_lossy(&listed.stdout);
   assert!(
@@ -285,7 +276,6 @@ fn add_local_records_the_path_beside_the_committed_manifest() {
 #[test]
 fn ls_without_a_manifest_names_the_missing_file() {
   let temp = TempDir::new().expect("temp dir");
-
   let home = home(&temp);
 
   let output = compostbin(&home, &home, &["ls"]);

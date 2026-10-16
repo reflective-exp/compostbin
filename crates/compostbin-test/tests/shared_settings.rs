@@ -1,17 +1,10 @@
 #![cfg(feature = "integration")]
-//! `[claude]`: the host's own Claude, copied into the session's home.
-//!
-//! What the user maintains once — their house style, their settings, their
-//! skills — and expects to find in every container. The copy is the host's to
-//! make, so the test for it is whether the guest ends up holding it.
 
 use compostbin_core::manifest::USER_CONFIG_PATH;
 use compostbin_core::session::CLAUDE_HOME_TARGET;
 use compostbin_core::session::settings::HOST_CLAUDE_SETTINGS;
 use compostbin_test::{Project, stderr};
 
-/// The host's `~/.claude`, as a developer's would be: the settings every
-/// session gets, and a `widgets` directory only configuration can ask for.
 fn with_a_host_home(name: &str) -> Project {
   let project = Project::new(name);
   let home = project.home().join(".claude");
@@ -68,8 +61,6 @@ shared = ["widgets"]
   );
 }
 
-/// What the developer wants in every session, named once rather than in each
-/// project's manifest.
 #[test]
 fn user_config_can_share_more() {
   let project = with_a_host_home("cbt-shared-user");
@@ -83,8 +74,6 @@ fn user_config_can_share_more() {
   );
 }
 
-/// The host copy is authoritative, so a shared directory is replaced rather
-/// than merged: a skill deleted on the host disappears from the session too.
 #[test]
 fn host_copy_wins() {
   let project = with_a_host_home("cbt-shared-host");
@@ -100,8 +89,6 @@ fn host_copy_wins() {
   );
 }
 
-/// Copying into the session's home happens on the host, before the container:
-/// the notice is what tells the user their settings went in.
 #[test]
 fn says_what_it_shared() {
   let project = with_a_host_home("cbt-shared-notice");
@@ -115,8 +102,6 @@ fn says_what_it_shared() {
   );
 }
 
-/// Nothing to share is ordinary — a fresh machine, or CI — and must not stop a
-/// session starting.
 #[test]
 fn no_host_home_still_works() {
   let project = Project::new("cbt-shared-none");

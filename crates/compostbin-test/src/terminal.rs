@@ -1,11 +1,3 @@
-//! A pseudo-terminal, for the half of compostbin that only exists when the
-//! caller has one.
-//!
-//! `exec -t`, `compostbin shell`, and a `tty = true` host command all decide
-//! what to do by asking whether this process's stdin and stdout are terminals.
-//! A test process's are pipes, so none of those paths is reachable without a
-//! terminal of the test's own — which is what this is.
-
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -13,27 +5,17 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::JoinHandle;
 
-/// What this terminal reports as its size. Nothing here reads it, but the 0x0 a
-/// fresh pty would otherwise report makes anything drawing a UI behave oddly.
+/// A fresh pty reports 0x0, which makes anything drawing a UI misbehave.
 const COLUMNS: u16 = 120;
 const ROWS: u16 = 40;
 
-/// A command running on a terminal of its own.
-///
-/// Both ends of the pty matter: the command's three descriptors are the slave,
-/// and the test reads and writes the master. What comes back is one stream, not
-/// two — a terminal is one device, so a command's stdout and stderr arrive
-/// interleaved on it, and that is the point of running one here.
 pub struct Terminal {
-  /// Taken by [`Terminal::finish`]; whatever is left when this is dropped is
-  /// killed, since the process on the other end owns a container.
   child: Option<Child>,
   master: File,
   reader: Option<JoinHandle<String>>,
 }
 
 impl Terminal {
-  /// Runs `command` with a terminal on all three of its descriptors.
   pub fn attach(mut command: Command) -> Self {
     let (master, slave) = open();
 
@@ -42,9 +24,8 @@ impl Terminal {
       .stdout(stdio(&slave))
       .stderr(stdio(&slave));
 
-    // SAFETY: pre_exec runs between fork and exec, where only async-signal-safe
-    // calls are allowed; setsid and ioctl are. By then stdin is already the
-    // slave, so it is what becomes the controlling terminal.
+    // SAFETY: setsid and ioctl are async-signal-safe; stdin is already the
+    // slave by now, so it becomes the controlling terminal.
     unsafe {
       command.pre_exec(|| {
         if libc::setsid() < 0 {
@@ -60,9 +41,7 @@ impl Terminal {
     }
 
     let child = command.spawn().expect("the command should start");
-    // Dropped as soon as the child has its own: a read of the master blocks
-    // while any copy of the slave is open, ours included, so keeping one would
-    // mean never seeing the end of the output.
+    // The master never reports end of output while any copy of the slave is open.
     drop(slave);
 
     let duplicate = File::from(master.try_clone().expect("duplicate the terminal"));
@@ -74,13 +53,11 @@ impl Terminal {
     }
   }
 
-  /// Types a line, as a person at this terminal would.
   pub fn send(&mut self, line: &str) {
     writeln!(self.master, "{line}").expect("write to the terminal");
     self.master.flush().expect("flush the terminal");
   }
 
-  /// Waits for the command and reports everything the terminal showed.
   pub fn finish(mut self) -> (String, ExitStatus) {
     let status = self
       .child
@@ -89,8 +66,6 @@ impl Terminal {
       .wait()
       .expect("the command should finish");
 
-    // Joined after the wait, not before: the reader ends when the last slave
-    // closes, which is when the command exits.
     let shown = self
       .reader
       .take()
@@ -103,9 +78,6 @@ impl Terminal {
 }
 
 impl Drop for Terminal {
-  /// Killing what is left matters more here than for a plain child: the process
-  /// on the other end of this terminal owns a container, which would otherwise
-  /// outlive the test as a VM nothing is going to stop.
   fn drop(&mut self) {
     if let Some(mut child) = self.child.take() {
       let _ = child.kill();
@@ -114,11 +86,9 @@ impl Drop for Terminal {
   }
 }
 
-/// A fresh pty, as its master and slave.
 fn open() -> (OwnedFd, OwnedFd) {
   let mut master = 0;
   let mut slave = 0;
-  // `*mut` in the signature even though openpty only reads it.
   let mut size = libc::winsize {
     ws_row: ROWS,
     ws_col: COLUMNS,
@@ -148,10 +118,8 @@ fn open() -> (OwnedFd, OwnedFd) {
   (master, slave)
 }
 
-/// openpty cannot open its descriptors close-on-exec, so this does. Otherwise
-/// the command would inherit the master as well as its three copies of the
-/// slave, as would anything else spawned meanwhile — and a stray slave keeps
-/// the reader from ever seeing the end of the output.
+/// openpty cannot open close-on-exec, and a slave leaked into another process
+/// keeps the reader from ever seeing the end of the output.
 fn close_on_exec(descriptor: &OwnedFd) {
   // SAFETY: F_SETFD on a descriptor we own touches nothing but its flags.
   let set = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
@@ -167,10 +135,8 @@ fn stdio(slave: &OwnedFd) -> Stdio {
   Stdio::from(slave.try_clone().expect("duplicate the terminal"))
 }
 
-/// Reads the terminal until the command has closed it.
-///
-/// A master whose last slave has gone reports that as end of file on some
-/// systems and as `EIO` on others; both mean the command is done.
+/// A master whose last slave has closed reports end of file on some systems
+/// and `EIO` on others.
 fn drain(mut terminal: File) -> String {
   let mut shown = Vec::new();
   let mut chunk = [0; 4096];

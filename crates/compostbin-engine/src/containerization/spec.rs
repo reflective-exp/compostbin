@@ -1,20 +1,9 @@
-//! Turning compostbin's specs into what `containerization_framework` takes.
-//!
-//! Everything compostbin decides and the framework does not: which host
-//! variables an `Inherit` resolves against, how a session is laid onto the VM,
-//! and what a builder container is called.
-
 use super::nat;
 use crate::model::{EnvVar, Resources, RunSpec};
 use containerization_framework::containerization::container::{Mount, linux_container};
 use containerization_framework::containerization::vm::VMResources;
 use std::path::Path;
 
-/// `NAME=VALUE`.
-///
-/// An `Inherit` unset on the host is dropped, not passed empty, so the guest
-/// can tell unset from empty. This is the only place the host environment is
-/// read; the framework crate takes values already resolved.
 pub fn environment(env: &[EnvVar]) -> Vec<String> {
   env
     .iter()
@@ -27,20 +16,17 @@ pub fn environment(env: &[EnvVar]) -> Vec<String> {
     .collect()
 }
 
-/// The guest's working directory; `/` when none is declared.
 pub fn working_directory(workdir: Option<&Path>) -> String {
   workdir.map_or_else(|| "/".to_string(), |path| path.display().to_string())
 }
 
-/// A virtiofs share, read-only if declared so.
 pub fn share(source: &Path, destination: impl Into<String>, readonly: bool) -> Mount {
   let options: &[&str] = if readonly { &["ro"] } else { &[] };
 
   Mount::share(source.display().to_string(), destination, options, &[])
 }
 
-/// The container's limits plus a core and the guest kernel's memory, so the
-/// container gets all it was given.
+/// Adds a core and the guest kernel's memory so the container gets its full allocation.
 pub fn vm(resources: Resources) -> VMResources {
   VMResources {
     cpus: resources.cpus + 1,
@@ -48,8 +34,6 @@ pub fn vm(resources: Resources) -> VMResources {
   }
 }
 
-/// A session's container, on its own address, over the configuration the
-/// manager seeded from its image.
 pub fn configure(
   spec: &RunSpec,
 ) -> impl FnOnce(&mut linux_container::Configuration) -> Result<(), containerization_framework::Error> + Send + 'static
@@ -69,7 +53,7 @@ pub fn configure(
     configuration.cpus = resources.cpus;
     configuration.memory_in_bytes = resources.memory_in_bytes;
     configuration.process.arguments = arguments;
-    // Last, so a variable the session sets beats the image's.
+    // Appended so the session's variables override the image's.
     configuration
       .process
       .environment_variables
@@ -82,8 +66,7 @@ pub fn configure(
   }
 }
 
-/// The builder container's id (and store directory). Random, so concurrent
-/// builds never share a rootfs; short, as Containerization caps ids at 64.
+/// Random so concurrent builds never share a rootfs; Containerization caps ids at 64 characters.
 pub fn builder_name() -> Result<String, getrandom::Error> {
   let mut bytes = [0u8; 4];
   getrandom::fill(&mut bytes)?;
@@ -148,7 +131,6 @@ mod tests {
     }
   }
 
-  /// What the manager seeds from an image declaring `PATH`, then the spec.
   fn configured() -> linux_container::Configuration {
     let mut configuration = linux_container::Configuration::default();
     configuration.process.environment_variables = vec!["PATH=/usr/bin".to_string()];

@@ -1,6 +1,3 @@
-//! Fakes for the traits here, so code generic over them can be tested without
-//! an engine.
-
 use crate::builder::Builder;
 use crate::engine::{Engine, Listener};
 use crate::error::EngineError;
@@ -13,11 +10,8 @@ use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// What a posed engine reports as its version.
 pub const VERSION: &str = "fake engine 1.0";
 
-/// A recorded call, carrying the spec itself so tests assert on what the
-/// caller composed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Call {
   Exec(ExecSpec),
@@ -30,7 +24,6 @@ pub enum Call {
   Version,
 }
 
-/// The calls a fake has been given, in order.
 #[derive(Debug)]
 struct Calls<C> {
   recorded: RefCell<Vec<C>>,
@@ -45,7 +38,6 @@ impl<C> Default for Calls<C> {
 }
 
 impl<C: Clone> Calls<C> {
-  /// Every recorded call, in order.
   fn all(&self) -> Vec<C> {
     self.recorded.borrow().clone()
   }
@@ -55,19 +47,14 @@ impl<C: Clone> Calls<C> {
   }
 }
 
-/// An `Engine` that runs nothing and records what it was asked.
 #[derive(Debug, Default)]
 pub struct RecordingEngine {
   calls: Calls<Call>,
-  /// Each port `listen` was asked for, until its listener finishes.
   listening: RefCell<HashMap<u32, Arc<Doorway>>>,
-  /// The containers posed as running, plus every one `run` has started.
   running: RefCell<Vec<String>>,
-  /// The images posed as unpacked, plus every one `run` has unpacked.
   unpacked: RefCell<Vec<String>>,
-  /// `None` poses an engine that cannot say what images exist.
+  /// `None` makes `images` fail.
   images: Option<Vec<String>>,
-  /// The blob every image is posed as missing.
   missing: Option<String>,
   exit_code: i32,
 }
@@ -77,7 +64,6 @@ impl RecordingEngine {
     Self::default()
   }
 
-  /// Poses an engine running exactly these containers.
   pub fn with_running(containers: &[&str]) -> Self {
     Self {
       running: RefCell::new(containers.iter().copied().map(str::to_string).collect()),
@@ -85,7 +71,6 @@ impl RecordingEngine {
     }
   }
 
-  /// Poses an engine that has already unpacked these images.
   pub fn with_unpacked(images: &[&str]) -> Self {
     Self {
       unpacked: RefCell::new(images.iter().copied().map(str::to_string).collect()),
@@ -93,7 +78,6 @@ impl RecordingEngine {
     }
   }
 
-  /// Poses a working engine holding exactly these images.
   pub fn with_images(images: &[&str]) -> Self {
     Self {
       images: Some(images.iter().copied().map(str::to_string).collect()),
@@ -101,7 +85,6 @@ impl RecordingEngine {
     }
   }
 
-  /// Poses a store holding these images, each missing the blob `digest`.
   pub fn missing_content(images: &[&str], digest: &str) -> Self {
     Self {
       missing: Some(digest.to_string()),
@@ -109,7 +92,6 @@ impl RecordingEngine {
     }
   }
 
-  /// Poses an engine whose every `exec` exits with this code.
   pub fn exiting_with(code: i32) -> Self {
     Self {
       exit_code: code,
@@ -121,8 +103,7 @@ impl RecordingEngine {
     self.calls.all()
   }
 
-  /// Connects to `port` as the guest would, handing the other end to whoever
-  /// listens there. Refused when nothing does, as a real guest would be.
+  /// Connects to `port` as the guest; `ConnectionRefused` when nothing listens there.
   pub fn connect(&self, port: u32) -> io::Result<UnixStream> {
     let refused = || io::Error::from(io::ErrorKind::ConnectionRefused);
     let doorway = self
@@ -144,9 +125,6 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
   mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// One posed port: [`RecordingEngine::connect`] sends through it, and a
-/// [`ChannelListener`] receives. Finishing drops the only sender, which ends the
-/// wait on the other side.
 #[derive(Debug)]
 struct Doorway {
   sender: Mutex<Option<Sender<OwnedFd>>>,
@@ -238,14 +216,12 @@ impl Engine for RecordingEngine {
   }
 }
 
-/// What a posed builder has been asked to do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BuildCall {
   Build(BuildPlan),
   Provision,
 }
 
-/// A `Builder` that builds nothing and keeps the plans it was given.
 #[derive(Debug, Default)]
 pub struct RecordingBuilder {
   calls: Calls<BuildCall>,
@@ -256,12 +232,10 @@ impl RecordingBuilder {
     Self::default()
   }
 
-  /// Everything asked of it, in order.
   pub fn calls(&self) -> Vec<BuildCall> {
     self.calls.all()
   }
 
-  /// Every plan given, in call order.
   pub fn plans(&self) -> Vec<BuildPlan> {
     self
       .calls

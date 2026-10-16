@@ -2,18 +2,14 @@ use crate::error::{At, CredentialError};
 use std::path::Path;
 use std::process::Command;
 
-/// Where Claude looks for its OAuth token inside its home directory.
 pub const CREDENTIALS_FILE_NAME: &str = ".credentials.json";
-/// The Keychain item the host's Claude Code writes its token to.
 pub const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
-/// A place to read the host's Claude token from. `Ok(None)` — no such entry — is
-/// not an error: the session may authenticate by API key.
+/// `Ok(None)` means no entry, which is not an error since the session may use an API key.
 pub trait CredentialSource {
   fn read(&self) -> Result<Option<String>, CredentialError>;
 }
 
-/// Holds whatever token a test gives it; `None` is a Keychain with nothing in it.
 #[cfg(test)]
 pub(crate) struct FakeSource(pub Option<String>);
 
@@ -26,7 +22,7 @@ impl CredentialSource for FakeSource {
 
 pub struct Keychain;
 
-/// `security` exits 44 when the item is simply absent, which is not a failure.
+/// `security` exits 44 when the item is absent.
 const KEYCHAIN_ITEM_NOT_FOUND: i32 = 44;
 
 impl CredentialSource for Keychain {
@@ -50,12 +46,8 @@ impl CredentialSource for Keychain {
   }
 }
 
-/// Copies the host's Claude token into the bind-mounted Claude home, only when
-/// none is there already: the container refreshes its own token into that same
-/// file, and it may be newer than the Keychain's.
-///
-/// Returns whether a token was wanted and the Keychain had none, the one
-/// outcome the caller has to say something about.
+/// Never overwrites an existing token, which the container may have refreshed past the Keychain's.
+/// Returns true when a token was wanted and the Keychain had none.
 pub fn seed(claude_home: &Path, enabled: bool, source: &impl CredentialSource) -> Result<bool, CredentialError> {
   let destination = claude_home.join(CREDENTIALS_FILE_NAME);
 

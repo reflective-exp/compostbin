@@ -1,5 +1,3 @@
-//! Creating the container, attaching to it, and cleaning up after it.
-
 use crate::error::{At, SessionError};
 use crate::host::{self, PortEvent};
 use crate::image;
@@ -12,23 +10,16 @@ use compostbin_engine::error::EngineError;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// What `run` attaches.
 const CLAUDE: &str = "claude";
 
-/// The process attached to the session, the guest user it runs as, and whether
-/// it gets a terminal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Process {
-  /// The command and its arguments.
   pub argv: Vec<String>,
-  /// Whether the guest process gets a terminal, which it can only have if the
-  /// caller has one to give.
   pub tty: bool,
   pub user: String,
 }
 
 impl Process {
-  /// What `run` attaches: Claude, on a terminal whenever the caller has one.
   pub fn claude(arguments: Vec<String>) -> Self {
     Self {
       argv: std::iter::once(CLAUDE.to_string())
@@ -39,19 +30,17 @@ impl Process {
     }
   }
 
-  /// What `exec` attaches: a command of the caller's own, reading and writing
-  /// the caller's streams unless it asked for a terminal.
   pub fn command(argv: Vec<String>, tty: bool, user: String) -> Self {
     Self { argv, tty, user }
   }
 
-  /// Only Claude needs setup to succeed; anything else may be debugging it.
+  /// Only Claude requires setup to succeed, since another process may be debugging it.
   fn needs_setup(&self) -> bool {
     self.argv.first().is_some_and(|command| command == CLAUDE)
   }
 }
 
-/// Best effort: a log that cannot be written must not take a port down with it.
+/// Ignores errors so a failed log write cannot stop the relay.
 fn append_to_log(log: &Path, event: &PortEvent) {
   use std::io::Write;
 
@@ -61,13 +50,11 @@ fn append_to_log(log: &Path, event: &PortEvent) {
 }
 
 impl Session {
-  /// Creates the container and records what it was created with. One step,
-  /// because `doctor` can say nothing about unrecorded mounts.
+  /// Always records the spec, since `doctor` relies on the record.
   fn create(&self, engine: &impl Engine, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
     let spec = self.run_spec();
 
-    // A boot from an image missing a blob fails naming the image's own digest,
-    // whichever blob it was.
+    // Booting with a missing blob would fail naming the image's digest, not the blob's.
     if let Some(digest) = engine.missing_content(&spec.image)? {
       return Err(
         EngineError::unavailable(
@@ -78,17 +65,13 @@ impl Session {
       );
     }
 
-    // Said first: the unpack is the slow part of a first run, and a silent wait
-    // looks like a hang.
     if !engine.is_unpacked(&spec.image)? {
       notify(Notice::Unpacking(spec.image.clone()));
     }
 
-    // Every create mounts a briefing rendered from the manifest as it reads now.
     briefing::write(&self.managed_settings(), &self.manifest, &self.config_path())?;
 
-    // Every guest client that could still be waiting on a response died with the
-    // container this one replaces, so their leftovers are now provably nobody's.
+    // Safe only here: every client that could own a leftover died with the replaced container.
     if let Some(spool) = self.spool() {
       spool.sweep()?;
     }
@@ -101,27 +84,13 @@ impl Session {
     Ok(())
   }
 
-  /// Whether the container is up, and so whether `run` will attach rather than
-  /// create. Anything whose work belongs to creation (relaying the ports, above
-  /// all) must ask first.
+  /// Work that belongs to creation, such as relaying ports, must check this first.
   pub fn is_running(&self, engine: &impl Engine) -> bool {
     engine.is_running(&self.container_name())
   }
 
-  /// Attaches `process` to the session, creating the container first unless it
-  /// is already running, and returns the process's exit code.
-  ///
-  /// A second `run` joins the session rather than replacing it, and does
-  /// nothing else: the host command agent, the port relay, and the cleanup on
-  /// exit belong to the process that created the container. Only that process
-  /// holds the VM the guest's ports connect to, and a joiner cleaning up as it
-  /// left would empty a spool still being served.
-  ///
-  /// The creator owns the container, Claude or not: when it exits, so does
-  /// everything that joined.
-  ///
-  /// Attaching leaves the record alone. It describes the running container, not
-  /// the manifest as it reads now, and `doctor` checks the gap between them.
+  /// Joining a running container only execs: the agent, port relay, record, and exit cleanup belong to
+  /// the creator, which holds the VM.
   pub fn run(
     &self,
     engine: &impl Engine,
@@ -138,15 +107,7 @@ impl Session {
     self.launch(engine, process, notify)
   }
 
-  /// Seeds Claude's token and shares the host's settings into Claude's home: a
-  /// mount source, so reachable whether or not the container is up. Beyond the
-  /// defaults, shares what the user's config and the manifest name; a profile
-  /// replaces only the manifest.
-  ///
-  /// Created first, because the mount needs it whether or not there was
-  /// anything to put in it: a host with no `~/.claude` and no Keychain entry
-  /// would otherwise leave the container with a mount source that does not
-  /// exist, which it cannot create for itself.
+  /// Claude's home is created even when empty, because the guest cannot create a missing mount source.
   fn prepare(&self, credentials: &impl CredentialSource, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
     let home = self.claude_home();
     std::fs::create_dir_all(&home).at(&home)?;
@@ -175,14 +136,7 @@ impl Session {
     Ok(())
   }
 
-  /// Creates the container and serves it until `process` exits.
-  ///
-  /// The ports are listened for as soon as the VM is up, before setup or the
-  /// attach can use them. The agent and the relay then run beside the attach,
-  /// and the flag stops them as soon as it returns.
-  ///
-  /// Threads rather than a process of their own: the VM the guest connects to
-  /// is this process's, and dies with it.
+  /// The agent and relay are threads because the VM the guest connects to dies with this process.
   fn launch(
     &self,
     engine: &impl Engine,
@@ -230,8 +184,6 @@ impl Session {
       code
     })?;
 
-    // Best effort: a killed session leaves the spool behind, which is what
-    // `compostbin clean` is for.
     if let Err(error) = self.clean_after_exit() {
       notify(Notice::CleanupFailed(error));
     }
@@ -239,11 +191,7 @@ impl Session {
     Ok(code)
   }
 
-  /// Runs `[container] setup`, stopping at the first failing line. Returns its
-  /// exit code if `process` needs setup, else 0.
-  ///
-  /// Called once the host agent and relay are up, so a line may use them. Same
-  /// shell as `[image] run`.
+  /// Returns the first failing line's code if `process` needs setup, else 0.
   fn set_up(
     &self,
     engine: &impl Engine,
@@ -323,7 +271,6 @@ mod tests {
     );
   }
 
-  /// A shell can start the session as well as Claude can.
   #[test]
   fn run_creates_a_container_for_another_process() {
     let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -347,7 +294,6 @@ mod tests {
     assert_eq!(session.process_spec(&root_shell()).user, Some("root".to_string()));
   }
 
-  /// Another session's container is not this one: `run` creates its own.
   #[test]
   fn run_creates_a_container_that_is_not_running() {
     let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -367,7 +313,6 @@ mod tests {
     );
   }
 
-  /// Booting it would fail naming some other digest.
   #[test]
   fn run_refuses_an_image_missing_a_blob_naming_it() {
     let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -392,7 +337,6 @@ mod tests {
     );
   }
 
-  /// Only an image's first run unpacks it, and only that one says so.
   #[test]
   fn run_says_when_it_unpacks_the_image_first() {
     let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -455,7 +399,6 @@ mod tests {
     );
   }
 
-  /// The creator already set it up.
   #[test]
   fn joining_a_running_session_sets_nothing_up() {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -488,7 +431,6 @@ mod tests {
     assert_eq!(engine.calls().last(), Some(&Call::Exec(session.setup_spec("false"))));
   }
 
-  /// A shell may be there to find out why setup fails.
   #[test]
   fn failed_setup_still_starts_another_process() {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -515,8 +457,6 @@ mod tests {
     );
   }
 
-  /// Declared ports are listened for once the container exists, and before
-  /// anything is attached that could use them.
   #[test]
   fn run_listens_for_the_ports_before_attaching() {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -537,7 +477,6 @@ mod tests {
     assert!(Some(listened) < position(&claude(&session)));
   }
 
-  /// Only the creator holds the VM, so only it can listen.
   #[test]
   fn joining_a_running_session_listens_for_nothing() {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -569,9 +508,6 @@ mod tests {
     assert_eq!(said.into_inner().expect("lock"), ["NotInKeychain"]);
   }
 
-  /// The mount source has to exist before the container does, and what it holds
-  /// is rendered from the manifest this create ran with — an edited manifest
-  /// reaches the session it creates, not the one after.
   #[test]
   fn creating_the_container_writes_the_briefing() {
     let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -592,8 +528,6 @@ mod tests {
     );
   }
 
-  /// What `doctor`'s stale-mount check reads: the container's real mount set,
-  /// which the manifest stops describing once edited.
   #[test]
   fn records_the_mounts_the_container_was_created_with() {
     let (temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -607,7 +541,6 @@ mod tests {
       .expect("run must have written a record");
     assert_eq!(recorded, Record::of(&session.mounts(), &session.manifest.host.ports));
 
-    // The container still has the mounts it was created with.
     session.manifest.paths.push(PathEntry {
       local: false,
       readonly: false,
@@ -623,8 +556,6 @@ mod tests {
     );
   }
 
-  /// A killed client's leftovers go when its container is replaced, not while
-  /// that container is still up.
   #[test]
   fn creating_a_container_sweeps_the_last_ones_leftovers() {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -648,7 +579,6 @@ mod tests {
     assert!(!orphan.exists(), "a replaced container's are");
   }
 
-  /// The same edit, once the container has actually been recreated.
   #[test]
   fn recreating_the_container_records_the_new_mounts() {
     let (temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
@@ -661,7 +591,6 @@ mod tests {
       source: base.join("vendor").display().to_string(),
       target: None,
     });
-    // The first session has exited, taking its container with it.
     run(&session, &RecordingEngine::new());
 
     let recorded = Record::load_if_present(&session.mount_record())

@@ -1,28 +1,15 @@
-//! Where compostbin puts a guest on the NAT network.
-//!
-//! Virtualization.framework's built-in NAT hands out no leases — the guest
-//! agent sets its address directly — so something has to allocate, and that is
-//! compostbin's choice rather than the framework's.
+//! Virtualization.framework's NAT hands out no leases, so guest addresses are allocated here.
 
 use containerization_framework::containerization::network::{DNS, Interface, NATInterface};
 use containerization_framework::containerization_extras::address::{CIDRv4, IPv4Address};
 
-/// Gateway of Virtualization.framework's built-in NAT (macOS shared networking).
-///
-/// Not vmnet: that needs privileges, hence a privileged helper. NAT needs only
-/// the virtualization entitlement.
+/// Virtualization.framework's built-in NAT, which unlike vmnet needs no privileges.
 pub const GATEWAY: &str = "192.168.64.1";
 const PREFIX: u32 = 24;
-/// `.1` is the gateway and `.255` the broadcast; guests live between these.
 const FIRST_HOST: u32 = 2;
 const LAST_HOST: u32 = 250;
 
-/// The interface a session's guest joins the network through.
-///
-/// Static because the interface requires an address up front. Hashed from the
-/// session name: stable per session, distinct between concurrent sessions.
-///
-/// Collisions with other hosts on the shared network go undetected.
+/// The address is hashed from `name`; collisions with other hosts on the network go undetected.
 pub fn interface(name: &str) -> Result<Interface, containerization_framework::Error> {
   Ok(Interface::Nat(NATInterface::new(
     CIDRv4::parse(&address(name))?,
@@ -30,7 +17,6 @@ pub fn interface(name: &str) -> Result<Interface, containerization_framework::Er
   )))
 }
 
-/// Names resolve through the gateway, which forwards to the host's resolver.
 pub fn dns() -> DNS {
   DNS {
     nameservers: vec![GATEWAY.to_string()],
@@ -39,7 +25,6 @@ pub fn dns() -> DNS {
 }
 
 fn address(name: &str) -> String {
-  // FNV-1a: short and well spread.
   let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
 
   for byte in name.as_bytes() {

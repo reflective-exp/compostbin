@@ -1,8 +1,3 @@
-//! Which host paths a session can see, and where they land in the guest.
-//!
-//! `paths` turns manifest strings into host paths; `danger` decides which of
-//! those should not be mounted at all.
-
 pub mod danger;
 pub mod paths;
 
@@ -10,20 +5,13 @@ use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Everything the session mounts lands under this guest directory, so no host
-/// path (username, directory layout) is visible inside the container.
 pub const WORKSPACE_TARGET: &str = "/workspace";
 
-/// Why a host path is in the workspace, as `ls` explains it.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Origin {
-  /// A `[[paths]]` entry.
   Explicit,
-  /// A `[[paths]]` entry from the uncommitted local manifest.
   Local,
-  /// The directory `compostbin` was invoked in.
   Project,
-  /// A `[workspace] roots` entry.
   Root,
 }
 
@@ -46,47 +34,33 @@ pub struct Entry {
   pub readonly: bool,
 }
 
-/// A host symlink inside a mounted tree whose target lies outside every mounted
-/// tree: live on the host, dangling in the container.
+/// A symlink in a mounted tree whose target is outside every mounted tree.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Escape {
   pub link: PathBuf,
   pub target: PathBuf,
 }
 
-/// `link -> target`, which is all `doctor` says about one.
 impl fmt::Display for Escape {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(formatter, "{} -> {}", self.link.display(), self.target.display())
   }
 }
 
-/// What a walk of the mounted trees found. A root with a `target/` or
-/// `node_modules` under it can take a minute to walk, so the walk stops at a
-/// limit and sets `exhausted` rather than reporting a clean tree it never
-/// finished reading.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Escapes {
   pub escapes: Vec<Escape>,
+  /// The walk hit its limit before finishing.
   pub exhausted: bool,
 }
 
-/// The host paths a session exposes, each with the `/workspace` path it appears
-/// at in the guest.
-///
-/// Each entry is its own bind mount, not a symlink into one mounted session
-/// directory, since a host symlink pointing out of a mounted tree dangles in
-/// the container. Mounts are fixed at creation, so adding a path requires
-/// recreating the container.
+/// Each entry is a separate bind mount, because a symlink out of a mounted tree dangles in the container.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Workspace {
   entries: Vec<Entry>,
 }
 
 impl Workspace {
-  /// Adds `host` under a `/workspace` name derived from its basename, or at
-  /// `target` when one was declared. A repeated basename is suffixed (`libfoo`,
-  /// `libfoo-2`), so both can be mounted.
   pub fn push(&mut self, host: impl Into<PathBuf>, target: Option<PathBuf>, origin: Origin, readonly: bool) {
     let host = host.into();
     let guest = match target {
@@ -106,8 +80,6 @@ impl Workspace {
     &self.entries
   }
 
-  /// The guest path for a host path in or under one of the entries, or `None`
-  /// when nothing mounted covers it.
   pub fn guest_path(&self, host: &Path) -> Option<PathBuf> {
     self.entries.iter().find_map(|entry| {
       host
@@ -117,11 +89,6 @@ impl Workspace {
     })
   }
 
-  /// Every symlink in a mounted tree that escapes every mounted tree.
-  ///
-  /// Symlinks are never followed, which guards against cycles and matches what
-  /// the container sees. A link broken on the host too is skipped: it is not a
-  /// divergence.
   pub fn escaping_symlinks(&self, limit: usize) -> Escapes {
     let mut found = Escapes::default();
     let mut budget = limit;
@@ -160,7 +127,6 @@ impl Workspace {
     found
   }
 
-  /// Each mounted tree once, dropping entries nested in or repeating another.
   fn outermost(&self) -> BTreeSet<PathBuf> {
     self
       .entries
@@ -176,8 +142,6 @@ impl Workspace {
       .collect()
   }
 
-  /// `<basename>`, or `<basename>-2`, `-3`, … if taken. A path with no basename
-  /// (`/`) is named `root`; `doctor` flags mounting it anyway.
   fn unique_name(&self, host: &Path) -> String {
     let base = host
       .file_name()
@@ -207,8 +171,7 @@ mod tests {
   use super::*;
   use tempfile::TempDir;
 
-  /// A canonical temp root, so macOS's `/var` -> `/private/var` symlink does not
-  /// turn every path in these assertions into an escape.
+  /// Canonical, because macOS's `/var` is a symlink to `/private/var`.
   fn temp_root() -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("temp dir");
     let root = temp.path().canonicalize().expect("canonical temp root");
@@ -287,8 +250,6 @@ mod tests {
     );
   }
 
-  /// The project, or a `[[paths]]` entry, often sits inside a root; its links
-  /// are reported once.
   #[test]
   fn walks_a_nested_entry_once() {
     let (_temp, root) = temp_root();
