@@ -62,7 +62,7 @@ pub fn build(session: &Session, builder: &impl Builder, cache: bool) -> Result<(
 }
 
 /// In build order. Writes the build context first, since the plans' cache keys hash it.
-pub fn plans(session: &Session) -> Result<Vec<BuildPlan>, ImageError> {
+fn plans(session: &Session) -> Result<Vec<BuildPlan>, ImageError> {
   let context = context(session.resolver());
   std::fs::create_dir_all(&context).at(&context)?;
 

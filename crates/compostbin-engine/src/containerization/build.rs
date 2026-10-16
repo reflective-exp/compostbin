@@ -45,10 +45,17 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
   let environment = oci::merge(oci::strings(&base_config, "Env"), &plan.environment);
 
   let snapshots = Snapshots::at(store.build_cache());
-  let keys = salted(keys, &base, plan);
+  let keys = Salted::new(
+    keys,
+    &base.digest(),
+    ROOTFS_SIZE_IN_BYTES,
+    plan.user.as_deref(),
+    plan.workdir.as_deref(),
+  );
 
   if plan.cache
-    && let Some(descriptor) = cached(&content, &snapshots, &keys)
+    && let Some(descriptor) = snapshots.image(&keys.image)
+    && oci::holds(&content, &descriptor)
   {
     note(&format!("{} is already built", plan.tag));
     images.create(&image::Description::new(&plan.tag, descriptor))?;
@@ -94,34 +101,6 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
   snapshots.evict();
 
   Ok(())
-}
-
-/// Whether a cached build of `plan` would run no step.
-pub fn is_built(store: &Store, plan: &BuildPlan, keys: Keys) -> Result<bool, EngineError> {
-  let (content, images) = store.content()?;
-  let base = match images.get(&plan.base, false) {
-    Err(error) if error.is_code(Code::NotFound) => return Ok(false),
-    base => base?,
-  };
-  let keys = salted(keys, &base, plan);
-
-  Ok(cached(&content, &Snapshots::at(store.build_cache()), &keys).is_some())
-}
-
-fn salted(keys: Keys, base: &Image, plan: &BuildPlan) -> Salted {
-  Salted::new(
-    keys,
-    &base.digest(),
-    ROOTFS_SIZE_IN_BYTES,
-    plan.user.as_deref(),
-    plan.workdir.as_deref(),
-  )
-}
-
-fn cached(content: &LocalContentStore, snapshots: &Snapshots, keys: &Salted) -> Option<Descriptor> {
-  snapshots
-    .image(&keys.image)
-    .filter(|descriptor| oci::holds(content, descriptor))
 }
 
 /// Returns the index of the first step to run.

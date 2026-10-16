@@ -1,6 +1,6 @@
 #![cfg_attr(feature = "strict", deny(warnings))]
-//! Integration tests need a built base image: run `compostbin build`, then
-//! `cargo nextest run --features compostbin-test/integration`.
+//! Run with `cargo nextest run --features compostbin-test/integration`; its
+//! setup script builds the base image the tests boot.
 
 #[cfg(feature = "integration")]
 mod lock;
@@ -32,6 +32,6 @@ pub use crate::project::{Project, Running};
 #[cfg(feature = "integration")]
 pub use crate::signing::signed_binary;
 #[cfg(feature = "integration")]
-pub use crate::store::{REMOVE_AFTER, prepare, remove_after};
+pub use crate::store::prepare;
 #[cfg(feature = "integration")]
 pub use crate::terminal::Terminal;

@@ -1,37 +1,39 @@
 use crate::output::{stderr, stdout};
 use crate::project::Project;
-use compostbin_core::image::{self, IMAGE_STORE};
-use compostbin_core::session::Session;
-use compostbin_engine::containerization::{FrameworkBuilder, FrameworkEngine, Store};
-use compostbin_engine::engine::Engine;
+use crate::signing::target_dir;
+use compostbin_core::image::IMAGE_STORE;
 use std::ffi::CString;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::Command;
 
 const SUITE_CACHE_VAR: &str = "COMPOSTBIN_TEST_CACHE";
-pub const REMOVE_AFTER: &str = "--remove-after";
-const RUN_POLL: Duration = Duration::from_secs(1);
+const SUITES: &str = "compostbin-test";
 
-/// Runs once as nextest's setup script; nextest has no teardown, so a detached
-/// process removes the suite directory after nextest exits.
+/// Runs once as nextest's setup script. Nextest has no teardown, so each run's
+/// directory is named for its nextest pid and removed by a later run once that
+/// pid has exited.
 pub fn prepare() {
-  let suite = tempfile::Builder::new()
-    .prefix("compostbin-test-")
-    .tempdir()
-    .expect("create the suite's directory")
-    .keep();
-  remove_once_exited(nextest_pid(), &suite);
+  let suites = target_dir().join(SUITES);
+  std::fs::create_dir_all(&suites).expect("create the suites' directory");
+  remove_finished(&suites);
+
+  let suite = suites.join(nextest_pid().to_string());
+  std::fs::create_dir(&suite).expect("create the suite's directory");
 
   let cache = suite.join("cache");
-  clone(&real_cache(), &cache);
+  seed(&cache);
   export(SUITE_CACHE_VAR, &cache);
 
   let project = Project::sharing_cache("cbt-prepare", &cache);
-  assert_bootable(&project.session());
+
+  let output = project.compostbin(&["build"]);
+  assert!(
+    output.status.success(),
+    "the base image should build: {}",
+    stderr(&output)
+  );
 
   let output = project.guest("true");
   assert!(
@@ -39,15 +41,6 @@ pub fn prepare() {
     "the base image should unpack and boot: {}",
     stderr(&output)
   );
-}
-
-pub fn remove_after(pid: libc::pid_t, directory: &Path) {
-  // SAFETY: signal 0 delivers nothing; it only asks whether `pid` exists.
-  while unsafe { libc::kill(pid, 0) } == 0 {
-    std::thread::sleep(RUN_POLL);
-  }
-
-  let _ = std::fs::remove_dir_all(directory);
 }
 
 pub(crate) fn suite_cache() -> PathBuf {
@@ -60,13 +53,19 @@ pub(crate) fn suite_cache() -> PathBuf {
   })
 }
 
-pub(crate) fn clone(source: &Path, destination: &Path) {
-  assert!(
-    source.is_dir(),
-    "no image store at {}; run `compostbin build` first",
-    source.display()
-  );
+/// Starts from the developer's cache when there is one, so the build only runs
+/// the steps this checkout changed.
+fn seed(cache: &Path) {
+  let real = real_cache();
 
+  if real.is_dir() {
+    clone(&real, cache);
+  } else {
+    std::fs::create_dir(cache).expect("create the suite's cache");
+  }
+}
+
+pub(crate) fn clone(source: &Path, destination: &Path) {
   let c_path = |path: &Path| CString::new(path.as_os_str().as_bytes()).expect("a path without a NUL");
   let (source_c, destination_c) = (c_path(source), c_path(destination));
 
@@ -83,19 +82,21 @@ pub(crate) fn clone(source: &Path, destination: &Path) {
   );
 }
 
-/// Its own process group so Ctrl-C doesn't stop it, and no inherited streams so
-/// nextest isn't left waiting on them.
-fn remove_once_exited(pid: libc::pid_t, directory: &Path) {
-  Command::new(std::env::current_exe().expect("prepare-store has a path"))
-    .arg(REMOVE_AFTER)
-    .arg(pid.to_string())
-    .arg(directory)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .process_group(0)
-    .spawn()
-    .expect("start the process that cleans up after the run");
+fn remove_finished(suites: &Path) {
+  let entries = std::fs::read_dir(suites).expect("list the suites' directory");
+
+  for entry in entries.flatten() {
+    let running = entry
+      .file_name()
+      .to_str()
+      .and_then(|name| name.parse::<libc::pid_t>().ok())
+      // SAFETY: signal 0 delivers nothing; it only asks whether `pid` exists.
+      .is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0);
+
+    if !running {
+      let _ = std::fs::remove_dir_all(entry.path());
+    }
+  }
 }
 
 /// Searches ancestors, not just the parent, since the script may run under
@@ -131,33 +132,6 @@ fn export(name: &str, value: &Path) {
     .expect("open nextest's environment file");
 
   writeln!(file, "{name}={}", value.display()).expect("write nextest's environment file");
-}
-
-fn assert_bootable(session: &Session) {
-  let store = Store::at(image::store(session.resolver()));
-
-  if let Err(error) = store.ready() {
-    panic!("{error}; run `compostbin build`");
-  }
-
-  let wanted = &session.manifest.project.image;
-
-  match FrameworkEngine::new(session.sessions_dir(), store.clone()).missing_content(wanted) {
-    Ok(None) => {}
-    Ok(Some(digest)) => panic!("{wanted} is missing blob {digest}; run `compostbin build`"),
-    Err(error) => panic!("{error}; run `compostbin build`"),
-  }
-
-  let builder = FrameworkBuilder::new(store);
-  let plans = image::plans(session).unwrap_or_else(|error| panic!("{error}"));
-
-  for plan in plans {
-    match builder.is_built(&plan) {
-      Ok(true) => {}
-      Ok(false) => panic!("{} is out of date with this checkout; run `compostbin build`", plan.tag),
-      Err(error) => panic!("{error}; run `compostbin build`"),
-    }
-  }
 }
 
 fn real_cache() -> PathBuf {

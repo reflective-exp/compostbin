@@ -346,16 +346,16 @@ medic shipit            # all of the above, then a release build, then push
 
 `crates/compostbin-test` starts real sessions: each test writes a manifest,
 runs `compostbin exec` against a project of its own, and asserts on what the
-guest saw. They are behind a feature, since they need a built base image and
-several minutes of VMs:
+guest saw. They are behind a feature, since they take several minutes of VMs:
 
 ``` sh
-compostbin build
 cargo nextest run --features compostbin-test/integration
 ```
 
-Each test gets a temporary `HOME`, so its session state, Claude home and shared
-settings are its own; only the image store is borrowed from
-`~/.cache/compostbin`, which is what makes them quick. The binary under test is
+First, nextest's setup script copies `~/.cache/compostbin`, if present, into a
+suite-owned directory and runs `compostbin build` there, so the image matches
+the checkout and only changed steps rebuild. Each test gets a temporary `HOME`
+holding a copy of that cache, so its session state, Claude home and shared
+settings are its own. The binary under test is
 copied to `target/<profile>/compostbin-signed` and signed there, because a test
 run rebuilds `compostbin` and a rebuild drops the entitlement.

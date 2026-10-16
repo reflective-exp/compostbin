@@ -218,7 +218,7 @@ impl Engine for RecordingEngine {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BuildCall {
-  Build(BuildPlan),
+  Build(Box<BuildPlan>),
   Provision,
 }
 
@@ -242,7 +242,7 @@ impl RecordingBuilder {
       .all()
       .into_iter()
       .filter_map(|call| match call {
-        BuildCall::Build(plan) => Some(plan),
+        BuildCall::Build(plan) => Some(*plan),
         BuildCall::Provision => None,
       })
       .collect()
@@ -251,7 +251,7 @@ impl RecordingBuilder {
 
 impl Builder for RecordingBuilder {
   fn build(&self, plan: &BuildPlan) -> Result<(), EngineError> {
-    self.calls.record(BuildCall::Build(plan.clone()));
+    self.calls.record(BuildCall::Build(Box::new(plan.clone())));
     Ok(())
   }
 

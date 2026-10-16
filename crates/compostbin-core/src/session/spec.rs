@@ -228,7 +228,7 @@ mod tests {
       session
         .mounts()
         .iter()
-        .any(|mount| mount.target == PathBuf::from(GUEST_SPOOL_TARGET)),
+        .any(|mount| mount.target == Path::new(GUEST_SPOOL_TARGET)),
       "the clipboard is served through the spool"
     );
   }
@@ -287,7 +287,7 @@ mod tests {
       !session()
         .mounts()
         .iter()
-        .any(|mount| mount.source == PathBuf::from(spool)),
+        .any(|mount| mount.source == Path::new(spool)),
       "an undeclared channel must not be mounted: {:?}",
       session().mounts()
     );

@@ -752,16 +752,16 @@ tty = true
 
     assert_eq!(manifest.workspace.roots, ["~/workspace"]);
 
-    assert_eq!(manifest.paths[0].readonly, true);
+    assert!(manifest.paths[0].readonly);
     assert_eq!(manifest.paths[0].source, "~/.cargo/registry");
     assert_eq!(manifest.paths[0].target, None);
-    assert_eq!(manifest.paths[1].readonly, false);
+    assert!(!manifest.paths[1].readonly);
     assert_eq!(manifest.paths[1].source, "~/code/vendor/libfoo");
     assert_eq!(manifest.paths[1].target.as_deref(), Some("~/code/vendor/libfoo"));
     assert_eq!(manifest.paths.len(), 2);
 
     assert_eq!(manifest.claude.home, None);
-    assert_eq!(manifest.claude.seed_from_keychain, true);
+    assert!(manifest.claude.seed_from_keychain);
     assert_eq!(manifest.claude.shared, ["widgets"]);
 
     assert_eq!(manifest.image.packages, ["jq"]);
@@ -884,7 +884,7 @@ source = "~/a-first"
       manifest.claude.home, None,
       "an unset home is what makes the session's home per project"
     );
-    assert_eq!(manifest.claude.seed_from_keychain, true);
+    assert!(manifest.claude.seed_from_keychain);
     assert_eq!(
       manifest.claude.shared,
       [] as [String; 0],

@@ -202,7 +202,7 @@ mod tests {
 
     assert_eq!(outcome, AddOutcome::NeedsRestart);
     assert_eq!(session.manifest.paths[1].source, "/Users/user/vendor/libfoo");
-    assert_eq!(session.manifest.paths[1].readonly, true);
+    assert!(session.manifest.paths[1].readonly);
     assert_eq!(session.manifest.paths[1].target, None);
     assert!(
       session.mounts().contains(&Mount {
@@ -212,7 +212,7 @@ mod tests {
       }),
       "the added path must become a mount"
     );
-    assert_eq!(session.manifest.paths[1].local, false, "add records a shared path");
+    assert!(!session.manifest.paths[1].local, "add records a shared path");
   }
 
   #[test]
@@ -226,7 +226,7 @@ mod tests {
       .workspace()
       .entries()
       .iter()
-      .find(|entry| entry.host == PathBuf::from("/Users/user/vendor/libfoo"))
+      .find(|entry| entry.host == Path::new("/Users/user/vendor/libfoo"))
       .expect("the local path should be mounted")
       .clone();
     assert_eq!(entry.origin, Origin::Local);

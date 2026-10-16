@@ -15,8 +15,8 @@ checks = [
 [audit]
 checks = [
   {name = "rust: audit", shell = "cargo audit", verbose = true},
-  {name = "rust: check", shell = "cargo check --features strict --color always", remedy = "cargo fix --allow-dirty"},
-  {name = "rust: clippy", shell = "cargo clippy -- -D warnings", remedy = "cargo clippy --fix --allow-dirty"},
+  {name = "rust: check", shell = "cargo check --workspace --all-targets --features strict,integration --color always", remedy = "cargo fix --allow-dirty"},
+  {name = "rust: clippy", shell = "cargo clippy --workspace --all-targets --features integration -- -D warnings", remedy = "cargo clippy --fix --allow-dirty"},
   {check = "rust", command = "format-check"},
 ]
 

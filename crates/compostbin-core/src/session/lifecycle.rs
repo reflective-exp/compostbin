@@ -355,7 +355,7 @@ mod tests {
       said.into_inner().expect("unpoisoned")
     };
 
-    assert_eq!(unpacking(&RecordingEngine::new()), [image.clone()]);
+    assert_eq!(unpacking(&RecordingEngine::new()), std::slice::from_ref(&image));
     assert_eq!(
       unpacking(&RecordingEngine::with_unpacked(&[&image])),
       Vec::<String>::new()
