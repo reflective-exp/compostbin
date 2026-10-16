@@ -2,7 +2,7 @@ use crate::output::{stderr, stdout};
 use crate::project::Project;
 use compostbin_core::image::{self, IMAGE_STORE};
 use compostbin_core::session::Session;
-use compostbin_engine::containerization::{FrameworkEngine, Store};
+use compostbin_engine::containerization::{FrameworkBuilder, FrameworkEngine, Store};
 use compostbin_engine::engine::Engine;
 use std::ffi::CString;
 use std::io::Write;
@@ -142,10 +142,21 @@ fn assert_bootable(session: &Session) {
 
   let wanted = &session.manifest.project.image;
 
-  match FrameworkEngine::new(session.sessions_dir(), store).missing_content(wanted) {
+  match FrameworkEngine::new(session.sessions_dir(), store.clone()).missing_content(wanted) {
     Ok(None) => {}
     Ok(Some(digest)) => panic!("{wanted} is missing blob {digest}; run `compostbin build`"),
     Err(error) => panic!("{error}; run `compostbin build`"),
+  }
+
+  let builder = FrameworkBuilder::new(store);
+  let plans = image::plans(session).unwrap_or_else(|error| panic!("{error}"));
+
+  for plan in plans {
+    match builder.is_built(&plan) {
+      Ok(true) => {}
+      Ok(false) => panic!("{} is out of date with this checkout; run `compostbin build`", plan.tag),
+      Err(error) => panic!("{error}; run `compostbin build`"),
+    }
   }
 }
 

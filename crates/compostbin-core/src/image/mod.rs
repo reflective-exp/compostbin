@@ -53,6 +53,16 @@ const GUEST_SCRIPTS: [(&str, &str); 3] = [
 pub fn build(session: &Session, builder: &impl Builder, cache: bool) -> Result<(), ImageError> {
   builder.provision()?;
 
+  for mut plan in plans(session)? {
+    plan.cache = cache;
+    builder.build(&plan)?;
+  }
+
+  Ok(())
+}
+
+/// In build order. Writes the build context first, since the plans' cache keys hash it.
+pub fn plans(session: &Session) -> Result<Vec<BuildPlan>, ImageError> {
   let context = context(session.resolver());
   std::fs::create_dir_all(&context).at(&context)?;
 
@@ -61,17 +71,11 @@ pub fn build(session: &Session, builder: &impl Builder, cache: bool) -> Result<(
     std::fs::write(&path, contents).at(&path)?;
   }
 
-  let mut base = base_plan(session);
-  base.cache = cache;
-
-  builder.build(&base)?;
-
-  if let Some(mut plan) = project_plan(session) {
-    plan.cache = cache;
-    builder.build(&plan)?;
-  }
-
-  Ok(())
+  Ok(
+    std::iter::once(base_plan(session))
+      .chain(project_plan(session))
+      .collect(),
+  )
 }
 
 fn built_by() -> BTreeMap<String, String> {

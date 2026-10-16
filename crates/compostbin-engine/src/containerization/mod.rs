@@ -405,6 +405,10 @@ impl FrameworkBuilder {
   pub fn new(store: Store) -> Self {
     Self { store }
   }
+
+  pub fn is_built(&self, plan: &BuildPlan) -> Result<bool, EngineError> {
+    build::is_built(&self.store, plan, cache::keys(plan)?)
+  }
 }
 
 impl Builder for FrameworkBuilder {
