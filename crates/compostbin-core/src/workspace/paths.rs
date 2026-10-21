@@ -1,7 +1,11 @@
 use crate::error::{At, PathError};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+pub const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
+
 pub struct PathResolver {
+  claude_config_dir: Option<PathBuf>,
   cwd: PathBuf,
   home: PathBuf,
 }
@@ -9,9 +13,26 @@ pub struct PathResolver {
 impl PathResolver {
   pub fn new(cwd: impl Into<PathBuf>, home: impl Into<PathBuf>) -> Self {
     Self {
+      claude_config_dir: None,
       cwd: cwd.into(),
       home: home.into(),
     }
+  }
+
+  /// Like Claude Code, takes an empty value as unset and a relative one from the current directory.
+  pub fn with_claude_config_dir(mut self, dir: Option<&OsStr>) -> Self {
+    self.claude_config_dir = dir
+      .filter(|dir| !dir.is_empty())
+      .map(|dir| self.cwd.join(dir));
+    self
+  }
+
+  /// The host's Claude home: `CLAUDE_CONFIG_DIR` if set, else `~/.claude`.
+  pub fn claude_home(&self) -> PathBuf {
+    self
+      .claude_config_dir
+      .clone()
+      .unwrap_or_else(|| self.home.join(".claude"))
   }
 
   pub fn from_env() -> Result<Self, PathError> {
@@ -23,7 +44,7 @@ impl PathResolver {
       )
     })?;
 
-    Ok(Self::new(cwd, home))
+    Ok(Self::new(cwd, home).with_claude_config_dir(std::env::var_os(CLAUDE_CONFIG_DIR).as_deref()))
   }
 
   pub fn canonicalize(&self, raw: &str) -> Result<PathBuf, PathError> {
@@ -105,6 +126,33 @@ mod tests {
     assert_eq!(
       resolver.resolve("~/.local/state/compostbin"),
       Path::new(&home).join(".local/state/compostbin")
+    );
+  }
+
+  #[test]
+  fn finds_claude_home_under_home_by_default() {
+    assert_eq!(resolver().claude_home(), Path::new("/Users/user/.claude"));
+    assert_eq!(
+      resolver()
+        .with_claude_config_dir(Some(OsStr::new("")))
+        .claude_home(),
+      Path::new("/Users/user/.claude")
+    );
+  }
+
+  #[test]
+  fn finds_claude_home_in_the_config_dir() {
+    assert_eq!(
+      resolver()
+        .with_claude_config_dir(Some(OsStr::new("/Users/user/.claude-work")))
+        .claude_home(),
+      Path::new("/Users/user/.claude-work")
+    );
+    assert_eq!(
+      resolver()
+        .with_claude_config_dir(Some(OsStr::new("claude")))
+        .claude_home(),
+      Path::new("/Users/user/workspace/compostbin/claude")
     );
   }
 

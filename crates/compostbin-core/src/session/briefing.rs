@@ -12,7 +12,8 @@ pub const MANAGED_SETTINGS_DIR: &str = "managed";
 pub const MANAGED_SETTINGS_FILE: &str = "managed-settings.json";
 pub const BRIEFING_FILE: &str = "session-context.txt";
 
-/// Claude adds a `SessionStart` hook's stdout to its context.
+/// Claude adds a `SessionStart` hook's stdout to its context. The hook drains its stdin first:
+/// exiting with Claude's payload unread can fail Claude's write with EPIPE.
 pub fn managed_settings() -> String {
   format!(
     r#"{{
@@ -22,7 +23,7 @@ pub fn managed_settings() -> String {
         "hooks": [
           {{
             "type": "command",
-            "command": "cat {MANAGED_SETTINGS_TARGET}/{BRIEFING_FILE}"
+            "command": "cat >/dev/null; cat {MANAGED_SETTINGS_TARGET}/{BRIEFING_FILE}"
           }}
         ]
       }}
@@ -155,7 +156,7 @@ mod tests {
 
     assert!(settings.contains("\"SessionStart\""), "{settings}");
     assert!(
-      settings.contains("\"command\": \"cat /etc/claude-code/session-context.txt\""),
+      settings.contains("\"command\": \"cat >/dev/null; cat /etc/claude-code/session-context.txt\""),
       "the hook must print the file the same mount carries: {settings}"
     );
   }

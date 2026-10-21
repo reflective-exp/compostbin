@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Honor the host's `CLAUDE_CONFIG_DIR`: share settings from it, install skills
+  into it, and seed credentials from the Keychain item Claude Code names after
+  it.
+- Drain the `SessionStart` hook's stdin before printing the briefing.
+
 ## v0.17.0
 
 - Update containerization-framework to v0.10.0.

@@ -7,8 +7,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
-pub const HOST_CLAUDE_HOME: &str = "~/.claude";
-
 pub const HOST_CLAUDE_SETTINGS: [&str; 4] = ["CLAUDE.md", "agents", "settings.json", "skills"];
 
 /// Bounds the copy so a symlink loop under `~/.claude` terminates.

@@ -1,4 +1,5 @@
 use crate::error::{At, CredentialError};
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Command;
 
@@ -8,6 +9,7 @@ pub const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 /// `Ok(None)` means no entry, which is not an error since the session may use an API key.
 pub trait CredentialSource {
   fn read(&self) -> Result<Option<String>, CredentialError>;
+  fn service(&self) -> &str;
 }
 
 #[cfg(test)]
@@ -18,17 +20,50 @@ impl CredentialSource for FakeSource {
   fn read(&self) -> Result<Option<String>, CredentialError> {
     Ok(self.0.clone())
   }
+
+  fn service(&self) -> &str {
+    KEYCHAIN_SERVICE
+  }
 }
 
-pub struct Keychain;
+pub struct Keychain {
+  service: String,
+}
+
+/// Claude Code names the item after the host's `CLAUDE_CONFIG_DIR` whenever it is set, even to
+/// the default, hashing the value as written: `~/.claude` and its realpath name different items.
+impl From<Option<&OsStr>> for Keychain {
+  fn from(config_dir: Option<&OsStr>) -> Self {
+    use sha2::{Digest, Sha256};
+    use unicode_normalization::UnicodeNormalization;
+
+    let service = match config_dir.filter(|dir| !dir.is_empty()) {
+      None => KEYCHAIN_SERVICE.to_string(),
+      Some(dir) => {
+        let normalized: String = dir.to_string_lossy().nfc().collect();
+        let suffix: String = Sha256::digest(normalized.as_bytes())[..4]
+          .iter()
+          .map(|byte| format!("{byte:02x}"))
+          .collect();
+        format!("{KEYCHAIN_SERVICE}-{suffix}")
+      }
+    };
+
+    Self { service }
+  }
+}
 
 /// `security` exits 44 when the item is absent.
 const KEYCHAIN_ITEM_NOT_FOUND: i32 = 44;
 
 impl CredentialSource for Keychain {
+  fn service(&self) -> &str {
+    &self.service
+  }
+
   fn read(&self) -> Result<Option<String>, CredentialError> {
     let output = Command::new("security")
-      .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
+      .args(["find-generic-password", "-s", &self.service, "-w"])
       .output()
       .map_err(CredentialError::Security)?;
 
@@ -90,6 +125,33 @@ mod tests {
 
   fn credentials_path(home: &TempDir) -> PathBuf {
     claude_home(home).join(CREDENTIALS_FILE_NAME)
+  }
+
+  fn keychain(config_dir: Option<&str>) -> Keychain {
+    Keychain::from(config_dir.map(OsStr::new))
+  }
+
+  #[test]
+  fn reads_the_default_item_without_a_config_dir() {
+    assert_eq!(keychain(None).service(), KEYCHAIN_SERVICE);
+    assert_eq!(keychain(Some("")).service(), KEYCHAIN_SERVICE);
+  }
+
+  #[test]
+  fn suffixes_the_item_with_the_config_dir_hash() {
+    // printf '%s' /Users/me/.claude-work | shasum -a 256
+    assert_eq!(
+      keychain(Some("/Users/me/.claude-work")).service(),
+      "Claude Code-credentials-1e91dd84"
+    );
+  }
+
+  #[test]
+  fn hashes_the_config_dir_in_composed_form() {
+    assert_eq!(
+      keychain(Some("/Users/me/cafe\u{301}")).service(),
+      keychain(Some("/Users/me/caf\u{e9}")).service()
+    );
   }
 
   #[test]

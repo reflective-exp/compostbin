@@ -17,6 +17,10 @@ shared             = ["commands"]
 - `home` (one per project): the host directory holding the session's
   `~/.claude`. Shared between projects, `--continue` resumes whichever ran last.
 
+When the host sets `CLAUDE_CONFIG_DIR`, that directory stands in for
+`~/.claude` here and for `compostbin install`, and the token comes from the
+Keychain item Claude Code keeps for it.
+
 ## Global configuration
 
 `~/.config/compostbin/config.toml` applies to every session, whichever manifest

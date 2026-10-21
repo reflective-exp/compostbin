@@ -127,7 +127,7 @@ impl Session {
       .chain(self.manifest.claude.shared.iter().cloned())
       .collect();
 
-    let shared = settings::share(&self.resolver.resolve(settings::HOST_CLAUDE_HOME), &home, &extra)?;
+    let shared = settings::share(&self.resolver.claude_home(), &home, &extra)?;
 
     if !shared.is_empty() {
       notify(Notice::Shared(shared));

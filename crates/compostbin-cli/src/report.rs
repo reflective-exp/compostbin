@@ -1,7 +1,7 @@
 use crate::engine::select;
+use crate::session::keychain;
 use compostbin_core::doctor::{self, Check, Status};
 use compostbin_core::session::Session;
-use compostbin_core::session::credentials::Keychain;
 use std::error::Error;
 use std::fmt;
 
@@ -9,7 +9,7 @@ pub fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
   let checks = doctor::diagnose(
     session,
     &select(session)?,
-    &Keychain,
+    &keychain(),
     std::env::var_os("ANTHROPIC_API_KEY").is_some(),
   );
 

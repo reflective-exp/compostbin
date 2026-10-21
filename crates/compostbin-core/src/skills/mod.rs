@@ -1,6 +1,5 @@
 use crate::error::{At, PathError};
 use crate::manifest::PROFILES_DIR;
-use crate::session::settings::HOST_CLAUDE_HOME;
 use crate::workspace::paths::PathResolver;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -85,7 +84,7 @@ pub fn plan(resolver: &PathResolver) -> Result<Vec<Change>, PathError> {
     });
   }
 
-  changes.extend(plan_skills(&resolver.resolve(HOST_CLAUDE_HOME).join("skills"))?);
+  changes.extend(plan_skills(&resolver.claude_home().join("skills"))?);
 
   Ok(changes)
 }

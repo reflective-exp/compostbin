@@ -1,7 +1,7 @@
 use super::{Check, Status, check, listed};
 use crate::host::served_commands;
 use crate::session::Session;
-use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialSource, KEYCHAIN_SERVICE};
+use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialSource};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
@@ -90,12 +90,19 @@ pub fn credentials(session: &Session, source: &impl CredentialSource, api_key_pr
   }
 
   match source.read() {
-    Ok(Some(_)) => check("credentials", Status::Ok, format!("{KEYCHAIN_SERVICE} in the Keychain")),
+    Ok(Some(_)) => check(
+      "credentials",
+      Status::Ok,
+      format!("{} in the Keychain", source.service()),
+    ),
     Ok(None) | Err(_) if api_key_present => check("credentials", Status::Ok, "ANTHROPIC_API_KEY is set"),
     Ok(None) => check(
       "credentials",
       Status::Fail,
-      format!("no {KEYCHAIN_SERVICE} entry and no ANTHROPIC_API_KEY; the session cannot authenticate"),
+      format!(
+        "no {} entry and no ANTHROPIC_API_KEY; the session cannot authenticate",
+        source.service()
+      ),
     ),
     Err(error) => check("credentials", Status::Fail, error.to_string()),
   }

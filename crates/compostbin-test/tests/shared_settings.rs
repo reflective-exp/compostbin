@@ -96,7 +96,10 @@ fn says_what_it_shared() {
   let output = project.guest("true");
 
   assert!(
-    stderr(&output).contains(&format!("shared from ~/.claude: {}", HOST_CLAUDE_SETTINGS.join(", "))),
+    stderr(&output).contains(&format!(
+      "shared from the host's Claude home: {}",
+      HOST_CLAUDE_SETTINGS.join(", ")
+    )),
     "stderr: {}",
     stderr(&output)
   );
