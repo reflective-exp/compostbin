@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.17.0
+
 - Update containerization-framework to v0.10.0.
 - Boot the Containerization 0.53.0 init image.
 - Also read `[container]` from `.config/compostbin.local.toml`. Each key it
