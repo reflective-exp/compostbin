@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.18.0
+
 - Honor the host's `CLAUDE_CONFIG_DIR`: share settings from it, install skills
   into it, and seed credentials from the Keychain item Claude Code names after
   it.
