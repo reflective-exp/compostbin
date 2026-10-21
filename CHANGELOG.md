@@ -6,6 +6,9 @@
   into it, and seed credentials from the Keychain item Claude Code names after
   it.
 - Drain the `SessionStart` hook's stdin before printing the briefing.
+- Update deps:
+  - Closing a terminal attached to an existing container no longer aborts the
+    parent session.
 
 ## v0.17.0
 
