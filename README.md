@@ -51,7 +51,7 @@ It also creates an empty `~/.config/compostbin/profiles` for
 
 `compostbin init` writes a default `.config/compostbin.toml`, meant to be checked
 in; see [Configuration](#configuration). Uncommitted settings go in
-`.config/compostbin.local.toml`; see [Mounts](docs/manifest/mounts.md#local-configuration).
+`.config/compostbin.local.toml`; see [Local overrides](docs/manifest/local.md).
 
 ### build
 
@@ -188,8 +188,9 @@ on the host. Every key is described in `docs/manifest`:
 - [Host access](docs/manifest/host.md): host commands, the clipboard, ports
 - [The container and its image](docs/manifest/container.md): `[project]`,
   `[container]`, `[image]`
-- [Mounts](docs/manifest/mounts.md): `[[paths]]`, `[workspace]`, and the
-  uncommitted `.config/compostbin.local.toml`
+- [Mounts](docs/manifest/mounts.md): `[[paths]]`, `[workspace]`
+- [Local overrides](docs/manifest/local.md): the uncommitted
+  `.config/compostbin.local.toml`
 - [Claude](docs/manifest/claude.md): signing in, and what is copied from
   `~/.claude`, per project or for every project in
   `~/.config/compostbin/config.toml`

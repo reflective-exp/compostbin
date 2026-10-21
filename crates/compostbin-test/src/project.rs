@@ -74,10 +74,10 @@ impl Project {
     manifest.project.name = Some(self.name.clone());
 
     if !declares_cpus {
-      manifest.container.cpus = TEST_CPUS;
+      manifest.shared_container_mut().cpus = TEST_CPUS;
     }
     if !declares_memory {
-      manifest.container.memory = TEST_MEMORY;
+      manifest.shared_container_mut().memory = TEST_MEMORY;
     }
 
     manifest

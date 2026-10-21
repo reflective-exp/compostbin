@@ -271,8 +271,8 @@ mod tests {
   #[test]
   fn the_session_memory_does_not_reach_the_build() {
     let (_home, mut session) = temp_session("", "project");
-    session.manifest.container.cpus = 16;
-    session.manifest.container.memory = crate::manifest::Memory::gibibytes(16);
+    session.manifest.shared_container_mut().cpus = 16;
+    session.manifest.shared_container_mut().memory = crate::manifest::Memory::gibibytes(16);
     session.manifest.image.packages = vec!["jq".to_string()];
     let builder = RecordingBuilder::new();
 

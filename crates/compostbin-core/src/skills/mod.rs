@@ -28,6 +28,10 @@ const SKILLS: &[Skill] = &[Skill {
       include_str!(concat!(env!("COMPOSTBIN_DOCS_DIR"), "/manifest/host.md")),
     ),
     (
+      "references/local.md",
+      include_str!(concat!(env!("COMPOSTBIN_DOCS_DIR"), "/manifest/local.md")),
+    ),
+    (
       "references/mounts.md",
       include_str!(concat!(env!("COMPOSTBIN_DOCS_DIR"), "/manifest/mounts.md")),
     ),
@@ -158,10 +162,7 @@ fn files_under(dir: &Path) -> Result<Vec<PathBuf>, PathError> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::manifest::{
-    ClaudeConfig, ContainerConfig, HostCommand, HostConfig, ImageConfig, Manifest, Memory, PathEntry, ProjectConfig,
-    WorkspaceConfig,
-  };
+  use crate::manifest::Manifest;
   use tempfile::TempDir;
 
   fn manifest_skill() -> &'static Skill {
@@ -295,61 +296,11 @@ mod tests {
       .collect()
   }
 
-  /// No `..Default::default()`, so a new manifest field fails to compile here
-  /// until it is documented.
-  fn every_key() -> Manifest {
-    Manifest {
-      claude: ClaudeConfig {
-        home: Some("~/home".to_string()),
-        seed_from_keychain: true,
-        shared: vec!["agents".to_string()],
-      },
-      container: ContainerConfig {
-        cpus: 4,
-        env: vec!["TOKEN".to_string()],
-        memory: Memory::gibibytes(8),
-        setup: vec!["true".to_string()],
-      },
-      host: HostConfig {
-        clipboard: true,
-        concurrency: 8,
-        ports: vec![7001],
-        commands: [(
-          "test".to_string(),
-          HostCommand {
-            arguments: true,
-            argv: vec!["true".to_string()],
-            deny: vec!["-Z".to_string()],
-            tty: true,
-          },
-        )]
-        .into(),
-      },
-      image: ImageConfig {
-        packages: vec!["jq".to_string()],
-        run: vec!["true".to_string()],
-        run_as_root: vec!["true".to_string()],
-      },
-      paths: vec![PathEntry {
-        local: false,
-        readonly: true,
-        source: "~/src".to_string(),
-        target: Some("/src".to_string()),
-      }],
-      project: ProjectConfig {
-        image: "image".to_string(),
-        name: Some("name".to_string()),
-      },
-      workspace: WorkspaceConfig {
-        roots: vec!["~/workspace".to_string()],
-      },
-    }
-  }
-
   #[test]
   fn the_manifest_docs_describe_every_key() {
     let docs = manifest_text();
-    let toml::Value::Table(tables) = toml::Value::try_from(every_key()).expect("manifest should serialize") else {
+    let toml::Value::Table(tables) = toml::Value::try_from(Manifest::every_key()).expect("manifest should serialize")
+    else {
       panic!("a manifest is a table");
     };
 

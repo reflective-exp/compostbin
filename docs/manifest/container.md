@@ -32,6 +32,8 @@ setup  = ["direnv allow"]
 - `setup` (`[]`): shell lines run as `claude` in the project directory when the
   container is created, before Claude. A failing line stops the session.
 
+[Local overrides](local.md) may replace any of these.
+
 ## [image]
 
 This project's additions to the shared base. Any entry means a derived image,

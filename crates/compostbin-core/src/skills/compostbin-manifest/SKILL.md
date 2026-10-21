@@ -33,5 +33,6 @@ Read the file for the table being edited:
 - `references/host.md`: `[host.commands.<name>]`, `[host]` (clipboard,
   concurrency, ports)
 - `references/container.md`: `[project]`, `[container]`, `[image]`
-- `references/mounts.md`: `[[paths]]`, `[workspace]`, `compostbin.local.toml`
+- `references/local.md`: `compostbin.local.toml`
+- `references/mounts.md`: `[[paths]]`, `[workspace]`
 - `references/claude.md`: `[claude]`

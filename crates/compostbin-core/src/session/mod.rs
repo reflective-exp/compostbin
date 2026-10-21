@@ -253,7 +253,7 @@ mod tests {
   fn a_profile_replaces_the_projects_manifest() {
     let (_temp, session) = profiled("[container]\ncpus = 6\n", "code/api");
 
-    assert_eq!(session.manifest.container.cpus, 6);
+    assert_eq!(session.manifest.container().cpus, 6);
     assert_eq!(session.config_path(), "~/.config/compostbin/profiles/rust.toml");
   }
 
@@ -267,7 +267,7 @@ mod tests {
     let session = Session::load(None, PathResolver::new(&project_dir, temp.path()), &project_dir)
       .expect("the manifest should load");
 
-    assert_eq!(session.manifest.container.cpus, 1);
+    assert_eq!(session.manifest.container().cpus, 1);
     assert_eq!(session.config_path(), MANIFEST_RELATIVE_PATH);
   }
 

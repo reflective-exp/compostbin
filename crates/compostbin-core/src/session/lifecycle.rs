@@ -198,7 +198,7 @@ impl Session {
     process: &Process,
     notify: &(dyn Fn(Notice) + Sync),
   ) -> Result<i32, SessionError> {
-    for line in &self.manifest.container.setup {
+    for line in &self.manifest.container().setup {
       let code = engine.exec(&self.setup_spec(line))?;
 
       if code != 0 {
@@ -384,7 +384,7 @@ mod tests {
   #[test]
   fn run_sets_up_a_new_container_before_starting_claude() {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
-    session.manifest.container.setup = vec!["./bin/setup".to_string(), "true".to_string()];
+    session.manifest.shared_container_mut().setup = vec!["./bin/setup".to_string(), "true".to_string()];
     let engine = RecordingEngine::new();
 
     run(&session, &engine);
@@ -402,7 +402,7 @@ mod tests {
   #[test]
   fn joining_a_running_session_sets_nothing_up() {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
-    session.manifest.container.setup = vec!["./bin/setup".to_string()];
+    session.manifest.shared_container_mut().setup = vec!["./bin/setup".to_string()];
     let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
     run(&session, &engine);
@@ -414,7 +414,7 @@ mod tests {
   #[test]
   fn failed_setup_does_not_start_claude() {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
-    session.manifest.container.setup = vec!["false".to_string(), "true".to_string()];
+    session.manifest.shared_container_mut().setup = vec!["false".to_string(), "true".to_string()];
     let engine = RecordingEngine::exiting_with(3);
     let said = std::sync::Mutex::new(Vec::new());
 
@@ -434,7 +434,7 @@ mod tests {
   #[test]
   fn failed_setup_still_starts_another_process() {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
-    session.manifest.container.setup = vec!["false".to_string(), "true".to_string()];
+    session.manifest.shared_container_mut().setup = vec!["false".to_string(), "true".to_string()];
     let engine = RecordingEngine::exiting_with(3);
     let said = std::sync::Mutex::new(Vec::new());
 

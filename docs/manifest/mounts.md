@@ -32,13 +32,4 @@ roots = ["~/workspace"]
   `/workspace/<basename>`. Empty by default, so mounting a whole workspace is
   opt-in. A path inside a root is already mounted; `add` records nothing for it.
 
-## Local configuration
-
-`.config/compostbin.local.toml` holds mounts one developer wants that the
-project should not commit; add it to `.gitignore`. It accepts only
-`[[paths]]`. `compostbin add --local` writes there.
-
-``` toml
-[[paths]]
-source = "~/code/vendor/libfoo"
-```
+Uncommitted paths go in [local overrides](local.md).

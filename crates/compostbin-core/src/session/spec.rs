@@ -93,14 +93,16 @@ impl Session {
   fn inherited_env(&self) -> Vec<EnvVar> {
     self
       .manifest
-      .container
+      .container()
       .env
-      .iter()
-      .map(|name| EnvVar::Inherit(name.clone()))
+      .into_iter()
+      .map(EnvVar::Inherit)
       .collect()
   }
 
   pub(super) fn run_spec(&self) -> RunSpec {
+    let container = self.manifest.container();
+
     RunSpec {
       arguments: self.process(),
       env: self.inherited_env(),
@@ -108,8 +110,8 @@ impl Session {
       mounts: self.mounts(),
       name: self.container_name(),
       resources: Resources {
-        cpus: self.manifest.container.cpus,
-        memory_in_bytes: self.manifest.container.memory.bytes(),
+        cpus: container.cpus,
+        memory_in_bytes: container.memory.bytes(),
       },
       workdir: Some(self.workdir()),
     }

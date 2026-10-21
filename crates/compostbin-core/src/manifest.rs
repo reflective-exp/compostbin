@@ -16,11 +16,13 @@ pub const USER_CONFIG_PATH: &str = "~/.config/compostbin/config.toml";
 #[serde(default, deny_unknown_fields)]
 pub struct Manifest {
   pub claude: ClaudeConfig,
-  pub container: ContainerConfig,
+  container: ContainerConfig,
   #[serde(skip_serializing_if = "HostConfig::is_empty")]
   pub host: HostConfig,
   #[serde(skip_serializing_if = "ImageConfig::is_empty")]
   pub image: ImageConfig,
+  #[serde(skip)]
+  local_container: ContainerOverrides,
   #[serde(
     serialize_with = "PathEntry::serialize_shared",
     skip_serializing_if = "PathEntry::none_shared"
@@ -43,10 +45,19 @@ impl Manifest {
     }
   }
 
-  /// Includes the paths from the local manifest beside it, if any.
+  /// Includes the local manifest beside it, if any.
   pub fn load(path: &Path) -> Result<Self, ManifestError> {
     let mut manifest = Self::parse(path)?;
-    manifest.paths.extend(Self::parse_local(&local_path(path))?);
+
+    if let Some(local) = LocalManifest::load_if_present(&local_path(path))? {
+      manifest.local_container = local.container;
+      manifest.paths.extend(
+        local
+          .paths
+          .into_iter()
+          .map(|entry| PathEntry { local: true, ..entry }),
+      );
+    }
 
     Ok(manifest)
   }
@@ -55,23 +66,26 @@ impl Manifest {
     parse_toml(path, &std::fs::read_to_string(path).at(path)?)
   }
 
-  fn parse_local(path: &Path) -> Result<Vec<PathEntry>, ManifestError> {
-    let Some(local) = LocalManifest::load_if_present(path)? else {
-      return Ok(Vec::new());
-    };
+  pub fn container(&self) -> ContainerConfig {
+    let shared = &self.container;
+    let local = &self.local_container;
 
-    Ok(
-      local
-        .paths
-        .into_iter()
-        .map(|entry| PathEntry { local: true, ..entry })
-        .collect(),
-    )
+    ContainerConfig {
+      cpus: local.cpus.unwrap_or(shared.cpus),
+      env: local.env.clone().unwrap_or_else(|| shared.env.clone()),
+      memory: local.memory.unwrap_or(shared.memory),
+      setup: local.setup.clone().unwrap_or_else(|| shared.setup.clone()),
+    }
+  }
+
+  pub fn shared_container_mut(&mut self) -> &mut ContainerConfig {
+    &mut self.container
   }
 
   fn save_local(&self, manifest_path: &Path) -> Result<(), ManifestError> {
     let path = local_path(manifest_path);
     let local = LocalManifest {
+      container: self.local_container.clone(),
       paths: self
         .paths
         .iter()
@@ -80,7 +94,7 @@ impl Manifest {
         .collect(),
     };
 
-    if local.paths.is_empty() {
+    if local.is_empty() {
       return match std::fs::remove_file(&path).at(&path) {
         Err(error) if !error.is_not_found() => Err(error.into()),
         _ => Ok(()),
@@ -154,8 +168,19 @@ pub struct UserClaudeConfig {
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct LocalManifest {
-  #[serde(serialize_with = "PathEntry::serialize_sorted_by_source")]
+  #[serde(skip_serializing_if = "ContainerOverrides::is_empty")]
+  container: ContainerOverrides,
+  #[serde(
+    serialize_with = "PathEntry::serialize_sorted_by_source",
+    skip_serializing_if = "Vec::is_empty"
+  )]
   paths: Vec<PathEntry>,
+}
+
+impl LocalManifest {
+  fn is_empty(&self) -> bool {
+    self.container.is_empty() && self.paths.is_empty()
+  }
 }
 
 fn local_path(manifest_path: &Path) -> PathBuf {
@@ -184,7 +209,7 @@ impl Default for ClaudeConfig {
   }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ContainerConfig {
   pub cpus: u32,
@@ -203,6 +228,25 @@ impl Default for ContainerConfig {
       memory: DEFAULT_CONTAINER_MEMORY,
       setup: Vec::new(),
     }
+  }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct ContainerOverrides {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  cpus: Option<u32>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  env: Option<Vec<String>>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  memory: Option<Memory>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  setup: Option<Vec<String>>,
+}
+
+impl ContainerOverrides {
+  fn is_empty(&self) -> bool {
+    self.cpus.is_none() && self.env.is_none() && self.memory.is_none() && self.setup.is_none()
   }
 }
 
@@ -399,6 +443,61 @@ impl Default for ProjectConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct WorkspaceConfig {
   pub roots: Vec<String>,
+}
+
+#[cfg(test)]
+impl Manifest {
+  /// No `..Default::default()`, so a new manifest field fails to compile here
+  /// until it is documented.
+  pub(crate) fn every_key() -> Self {
+    Self {
+      claude: ClaudeConfig {
+        home: Some("~/home".to_string()),
+        seed_from_keychain: true,
+        shared: vec!["agents".to_string()],
+      },
+      container: ContainerConfig {
+        cpus: 4,
+        env: vec!["TOKEN".to_string()],
+        memory: Memory::gibibytes(8),
+        setup: vec!["true".to_string()],
+      },
+      host: HostConfig {
+        clipboard: true,
+        concurrency: 8,
+        ports: vec![7001],
+        commands: [(
+          "test".to_string(),
+          HostCommand {
+            arguments: true,
+            argv: vec!["true".to_string()],
+            deny: vec!["-Z".to_string()],
+            tty: true,
+          },
+        )]
+        .into(),
+      },
+      image: ImageConfig {
+        packages: vec!["jq".to_string()],
+        run: vec!["true".to_string()],
+        run_as_root: vec!["true".to_string()],
+      },
+      local_container: ContainerOverrides::default(),
+      paths: vec![PathEntry {
+        local: false,
+        readonly: true,
+        source: "~/src".to_string(),
+        target: Some("/src".to_string()),
+      }],
+      project: ProjectConfig {
+        image: "image".to_string(),
+        name: Some("name".to_string()),
+      },
+      workspace: WorkspaceConfig {
+        roots: vec!["~/workspace".to_string()],
+      },
+    }
+  }
 }
 
 #[cfg(test)]
@@ -709,15 +808,64 @@ tty = true
   }
 
   #[test]
-  fn a_local_manifest_takes_paths_only() {
+  fn local_container_keys_replace_the_shared_ones() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
+    let manifest: Manifest = toml::from_str(FULL_MANIFEST).expect("manifest should parse");
+    manifest.save(&path).expect("save should succeed");
+    std::fs::write(local_path(&path), "[container]\ncpus = 8\nenv = [\"OTHER_TOKEN\"]\n")
+      .expect("local manifest should write");
+
+    let loaded = Manifest::load(&path).expect("load should succeed");
+    let container = loaded.container();
+
+    assert_eq!(container.cpus, 8);
+    assert_eq!(container.env, ["OTHER_TOKEN"]);
+    assert_eq!(container.memory, Memory::gibibytes(8));
+    assert_eq!(container.setup, ["./bin/setup"]);
+  }
+
+  #[test]
+  fn local_container_keys_stay_out_of_the_shared_manifest() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
+    let manifest: Manifest = toml::from_str(FULL_MANIFEST).expect("manifest should parse");
+    manifest.save(&path).expect("save should succeed");
+    let local = "[container]\ncpus = 8\nmemory = \"16G\"\n";
+    std::fs::write(local_path(&path), local).expect("local manifest should write");
+    let mut loaded = Manifest::load(&path).expect("load should succeed");
+
+    loaded.save(&path).expect("save should succeed");
+    assert_eq!(
+      std::fs::read_to_string(&path).expect("manifest should exist"),
+      EXPECTED_RENDERING
+    );
+
+    loaded.paths.push(PathEntry {
+      local: true,
+      readonly: false,
+      source: "~/scratch".to_string(),
+      target: None,
+    });
+    loaded.save_local(&path).expect("save should succeed");
+    loaded.paths.retain(|entry| !entry.local);
+    loaded.save_local(&path).expect("save should succeed");
+    assert_eq!(
+      std::fs::read_to_string(local_path(&path)).expect("local overrides should survive"),
+      local
+    );
+  }
+
+  #[test]
+  fn a_local_manifest_takes_container_and_paths_only() {
     let temp = TempDir::new().expect("temp dir");
     let path = temp.path().join(MANIFEST_RELATIVE_PATH);
     Manifest::default()
       .save(&path)
       .expect("save should succeed");
-    std::fs::write(local_path(&path), "[container]\ncpus = 8\n").expect("local manifest should write");
+    std::fs::write(local_path(&path), "[host]\nclipboard = true\n").expect("local manifest should write");
 
-    let error = Manifest::load(&path).expect_err("anything but paths should be refused");
+    let error = Manifest::load(&path).expect_err("anything else should be refused");
 
     assert!(
       error.to_string().contains("compostbin.local.toml"),
