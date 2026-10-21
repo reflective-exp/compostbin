@@ -11,13 +11,11 @@ use super::{nat, note, spec};
 use crate::error::EngineError;
 use crate::model::BuildPlan;
 use containerization_framework::containerization::container::container_manager::CreateWithRootfsOptions;
-use containerization_framework::containerization::container::{
-  ContainerManager, FilesystemOperation, LinuxContainer, linux_container,
-};
+use containerization_framework::containerization::container::{ContainerManager, LinuxContainer, linux_container};
 use containerization_framework::containerization::image::image_store::PullOptions;
 use containerization_framework::containerization::image::{self, EXT4Unpacker, Image, ImageStore};
 use containerization_framework::containerization::process::LinuxProcessConfiguration;
-use containerization_framework::containerization::vm::{Kernel, SystemPlatform};
+use containerization_framework::containerization::vm::{FilesystemOperation, Kernel, SystemPlatform};
 use containerization_framework::containerization_error::Code;
 use containerization_framework::containerization_ext4::ext4::EXT4Reader;
 use containerization_framework::containerization_oci::content::LocalContentStore;
