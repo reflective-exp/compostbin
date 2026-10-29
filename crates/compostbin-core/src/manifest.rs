@@ -3,6 +3,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use toml::{Table, Value};
 
 const DEFAULT_CONTAINER_CPUS: u32 = 4;
 const DEFAULT_CONTAINER_MEMORY: Memory = Memory::gibibytes(8);
@@ -19,16 +20,14 @@ pub struct Manifest {
   #[serde(skip_serializing_if = "ClaudeConfig::is_default")]
   pub claude: ClaudeConfig,
   #[serde(skip_serializing_if = "ContainerConfig::is_default")]
-  container: ContainerConfig,
+  pub container: ContainerConfig,
   #[serde(skip_serializing_if = "HostConfig::is_empty")]
   pub host: HostConfig,
   #[serde(skip_serializing_if = "ImageConfig::is_empty")]
   pub image: ImageConfig,
-  #[serde(skip)]
-  local_container: ContainerOverrides,
   #[serde(
-    serialize_with = "PathEntry::serialize_shared",
-    skip_serializing_if = "PathEntry::none_shared"
+    serialize_with = "PathEntry::serialize_sorted_by_source",
+    skip_serializing_if = "Vec::is_empty"
   )]
   pub paths: Vec<PathEntry>,
   pub project: ProjectConfig,
@@ -53,72 +52,81 @@ impl Manifest {
     }
   }
 
-  /// Includes the local manifest beside it, if any.
+  /// Includes the local manifest beside it, if any. Each key it sets replaces the shared one,
+  /// tables merging key by key down to a whole host command, and its `[[paths]]` are added.
   pub fn load(path: &Path) -> Result<Self, ManifestError> {
-    let mut manifest = Self::parse(path)?;
+    let mut shared = read_table(path)?;
+    let local_path = local_path(path);
 
-    if let Some(local) = LocalManifest::load_if_present(&local_path(path))? {
-      manifest.local_container = local.container;
-      manifest.paths.extend(
-        local
-          .paths
-          .into_iter()
-          .map(|entry| PathEntry { local: true, ..entry }),
-      );
-    }
+    let Some(mut local) = Table::load_if_present(&local_path)? else {
+      return from_table(path, shared);
+    };
+
+    // Parsed alone too, so a mistake in it names its own file.
+    let local_paths = from_table::<Self>(&local_path, local.clone())?.paths;
+    local.remove(PATHS_KEY);
+    overlay(&mut shared, local, &[]);
+
+    let mut manifest: Self = from_table(path, shared)?;
+    manifest.paths.extend(
+      local_paths
+        .into_iter()
+        .map(|entry| PathEntry { local: true, ..entry }),
+    );
 
     Ok(manifest)
   }
 
   pub fn parse(path: &Path) -> Result<Self, ManifestError> {
-    parse_toml(path, &std::fs::read_to_string(path).at(path)?)
+    from_table(path, read_table(path)?)
   }
+}
 
-  pub fn container(&self) -> ContainerConfig {
-    let shared = &self.container;
-    let local = &self.local_container;
+const PATHS_KEY: &str = "paths";
 
-    ContainerConfig {
-      cpus: local.cpus.unwrap_or(shared.cpus),
-      env: local.env.clone().unwrap_or_else(|| shared.env.clone()),
-      memory: local.memory.unwrap_or(shared.memory),
-      setup: local.setup.clone().unwrap_or_else(|| shared.setup.clone()),
+/// A partial host command could not stand alone, so a local one replaces the shared one whole.
+const WHOLE_ENTRIES: &[&str] = &["host", "commands"];
+
+fn overlay(shared: &mut Table, local: Table, at: &[&str]) {
+  for (key, value) in local {
+    let nested: Vec<&str> = at.iter().copied().chain([key.as_str()]).collect();
+
+    match (shared.get_mut(&key), value) {
+      (Some(Value::Table(base)), Value::Table(over)) if at != WHOLE_ENTRIES => overlay(base, over, &nested),
+      (_, value) => {
+        shared.insert(key.clone(), value);
+      }
     }
   }
+}
 
-  pub fn shared_container_mut(&mut self) -> &mut ContainerConfig {
-    &mut self.container
-  }
+/// Edits only the file `entry` belongs in, keeping every other key that file sets.
+pub fn record_path(manifest_path: &Path, entry: &PathEntry) -> Result<(), ManifestError> {
+  let path = if entry.local {
+    local_path(manifest_path)
+  } else {
+    manifest_path.to_path_buf()
+  };
 
-  fn save_local(&self, manifest_path: &Path) -> Result<(), ManifestError> {
-    let path = local_path(manifest_path);
-    let local = LocalManifest {
-      container: self.local_container.clone(),
-      paths: self
-        .paths
-        .iter()
-        .filter(|entry| entry.local)
-        .cloned()
-        .collect(),
-    };
+  let mut table = Table::load_if_present(&path)?.unwrap_or_default();
+  let mut paths: Vec<PathEntry> = match table.remove(PATHS_KEY) {
+    Some(recorded) => recorded.try_into().map_err(|source| ManifestError::Parse {
+      path: path.clone(),
+      source,
+    })?,
+    None => Vec::new(),
+  };
 
-    if local.is_empty() {
-      return match std::fs::remove_file(&path).at(&path) {
-        Err(error) if !error.is_not_found() => Err(error.into()),
-        _ => Ok(()),
-      };
-    }
+  paths.push(entry.clone());
+  paths.sort_by(|left, right| left.source.cmp(&right.source));
 
-    local.save(&path)
-  }
+  let rendered = Value::try_from(paths).map_err(|source| ManifestError::Render {
+    path: path.clone(),
+    source,
+  })?;
+  table.insert(PATHS_KEY.to_string(), rendered);
 
-  pub fn save_to(&self, manifest_path: &Path, local: bool) -> Result<(), ManifestError> {
-    if local {
-      self.save_local(manifest_path)
-    } else {
-      self.save(manifest_path)
-    }
-  }
+  table.save(&path)
 }
 
 pub fn profile_path(name: &str) -> String {
@@ -157,8 +165,19 @@ fn parse_toml<T: DeserializeOwned>(path: &Path, text: &str) -> Result<T, Manifes
   })
 }
 
+fn read_table(path: &Path) -> Result<Table, ManifestError> {
+  parse_toml(path, &std::fs::read_to_string(path).at(path)?)
+}
+
+fn from_table<T: DeserializeOwned>(path: &Path, table: Table) -> Result<T, ManifestError> {
+  table.try_into().map_err(|source| ManifestError::Parse {
+    path: path.to_path_buf(),
+    source,
+  })
+}
+
 impl TomlFile for Manifest {}
-impl TomlFile for LocalManifest {}
+impl TomlFile for Table {}
 impl TomlFile for UserConfig {}
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -171,24 +190,6 @@ pub struct UserConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct UserClaudeConfig {
   pub shared: Vec<String>,
-}
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-struct LocalManifest {
-  #[serde(skip_serializing_if = "ContainerOverrides::is_empty")]
-  container: ContainerOverrides,
-  #[serde(
-    serialize_with = "PathEntry::serialize_sorted_by_source",
-    skip_serializing_if = "Vec::is_empty"
-  )]
-  paths: Vec<PathEntry>,
-}
-
-impl LocalManifest {
-  fn is_empty(&self) -> bool {
-    self.container.is_empty() && self.paths.is_empty()
-  }
 }
 
 fn local_path(manifest_path: &Path) -> PathBuf {
@@ -260,25 +261,6 @@ impl ContainerConfig {
 
   fn is_default_memory(memory: &Memory) -> bool {
     *memory == DEFAULT_CONTAINER_MEMORY
-  }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-struct ContainerOverrides {
-  #[serde(skip_serializing_if = "Option::is_none")]
-  cpus: Option<u32>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  env: Option<Vec<String>>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  memory: Option<Memory>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  setup: Option<Vec<String>>,
-}
-
-impl ContainerOverrides {
-  fn is_empty(&self) -> bool {
-    self.cpus.is_none() && self.env.is_none() && self.memory.is_none() && self.setup.is_none()
   }
 }
 
@@ -431,7 +413,7 @@ impl ImageConfig {
   }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathEntry {
   #[serde(skip)]
@@ -445,21 +427,10 @@ pub struct PathEntry {
 }
 
 impl PathEntry {
-  fn sort_by_source(mut entries: Vec<&PathEntry>) -> Vec<&PathEntry> {
-    entries.sort_by(|left, right| left.source.cmp(&right.source));
-    entries
-  }
-
   fn serialize_sorted_by_source<S: Serializer>(entries: &[PathEntry], serializer: S) -> Result<S::Ok, S::Error> {
-    Self::sort_by_source(entries.iter().collect()).serialize(serializer)
-  }
-
-  fn serialize_shared<S: Serializer>(entries: &[PathEntry], serializer: S) -> Result<S::Ok, S::Error> {
-    Self::sort_by_source(entries.iter().filter(|entry| !entry.local).collect()).serialize(serializer)
-  }
-
-  fn none_shared(entries: &[PathEntry]) -> bool {
-    entries.iter().all(|entry| entry.local)
+    let mut sorted: Vec<&PathEntry> = entries.iter().collect();
+    sorted.sort_by(|left, right| left.source.cmp(&right.source));
+    sorted.serialize(serializer)
   }
 }
 
@@ -529,7 +500,6 @@ impl Manifest {
         run: vec!["true".to_string()],
         run_as_root: vec!["true".to_string()],
       },
-      local_container: ContainerOverrides::default(),
       paths: vec![PathEntry {
         local: false,
         readonly: true,
@@ -772,148 +742,148 @@ tty = true
     assert_eq!(local.len(), 1);
     assert_eq!(local[0].source, "~/scratch");
     assert!(local[0].readonly);
-
-    loaded.save(&path).expect("save should succeed");
-    let rendered = std::fs::read_to_string(&path).expect("manifest should exist");
-    assert!(
-      !rendered.contains("~/scratch"),
-      "a local path must not reach the committed manifest: {rendered}"
-    );
-    assert_eq!(rendered, EXPECTED_RENDERING);
   }
 
-  #[test]
-  fn renders_no_paths_when_every_one_is_local() {
-    let mut manifest = Manifest::default();
-    manifest.paths.push(PathEntry {
-      local: true,
-      readonly: false,
-      source: "~/scratch".to_string(),
-      target: None,
-    });
-
-    let rendered = toml::to_string(&manifest).expect("should serialize");
-
-    assert!(!rendered.contains("paths"), "{rendered}");
-  }
-
-  #[test]
-  fn save_to_writes_only_the_file_the_new_entry_belongs_to() {
+  fn shared_and_local(shared: &str, local: &str) -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("temp dir");
     let path = temp.path().join(MANIFEST_RELATIVE_PATH);
-    let mut manifest = Manifest::default();
-    manifest.save(&path).expect("save should succeed");
-    let committed = std::fs::read_to_string(&path).expect("manifest should exist");
-    manifest.paths.push(PathEntry {
-      local: true,
-      readonly: false,
-      source: "~/scratch".to_string(),
-      target: None,
-    });
-
-    manifest.save_to(&path, true).expect("save should succeed");
-
-    assert_eq!(std::fs::read_to_string(&path).expect("manifest"), committed);
-    assert!(
-      std::fs::read_to_string(local_path(&path))
-        .expect("local manifest should exist")
-        .contains("~/scratch")
-    );
+    std::fs::create_dir_all(path.parent().expect("manifest dir")).expect("create manifest dir");
+    std::fs::write(&path, shared).expect("manifest should write");
+    std::fs::write(local_path(&path), local).expect("local manifest should write");
+    (temp, path)
   }
 
   #[test]
-  fn saves_local_paths_to_their_own_file() {
-    let temp = TempDir::new().expect("temp dir");
-    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
-    let mut manifest: Manifest = toml::from_str(FULL_MANIFEST).expect("manifest should parse");
-    manifest.save(&path).expect("save should succeed");
-    manifest.paths.push(PathEntry {
-      local: true,
-      readonly: false,
-      source: "~/scratch".to_string(),
-      target: None,
-    });
+  fn local_keys_replace_the_shared_ones_in_every_table() {
+    let (_temp, path) = shared_and_local(
+      FULL_MANIFEST,
+      r#"
+[claude]
+keychain = false
 
-    manifest.save_local(&path).expect("save should succeed");
+[container]
+cpus = 8
+env  = ["OTHER_TOKEN"]
 
-    let reloaded = Manifest::load(&path).expect("load should succeed");
-    assert_eq!(reloaded.paths.len(), 3);
-    assert!(
-      reloaded
-        .paths
-        .iter()
-        .any(|entry| entry.local && entry.source == "~/scratch")
+[host]
+clipboard = true
+
+[image]
+packages = ["ripgrep"]
+
+[project]
+image = "mine:latest"
+
+[workspace]
+roots = ["~/elsewhere"]
+"#,
     );
-
-    manifest.paths.retain(|entry| !entry.local);
-    manifest.save_local(&path).expect("save should succeed");
-    assert!(!local_path(&path).exists());
-  }
-
-  #[test]
-  fn local_container_keys_replace_the_shared_ones() {
-    let temp = TempDir::new().expect("temp dir");
-    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
-    let manifest: Manifest = toml::from_str(FULL_MANIFEST).expect("manifest should parse");
-    manifest.save(&path).expect("save should succeed");
-    std::fs::write(local_path(&path), "[container]\ncpus = 8\nenv = [\"OTHER_TOKEN\"]\n")
-      .expect("local manifest should write");
 
     let loaded = Manifest::load(&path).expect("load should succeed");
-    let container = loaded.container();
 
-    assert_eq!(container.cpus, 8);
-    assert_eq!(container.env, ["OTHER_TOKEN"]);
-    assert_eq!(container.memory, Memory::gibibytes(8));
-    assert_eq!(container.setup, ["./bin/setup"]);
+    assert!(!loaded.claude.keychain);
+    assert_eq!(
+      loaded.claude.shared,
+      ["widgets"],
+      "a key left out keeps the shared value"
+    );
+    assert_eq!(loaded.container.cpus, 8);
+    assert_eq!(
+      loaded.container.env,
+      ["OTHER_TOKEN"],
+      "a list is replaced, not extended"
+    );
+    assert_eq!(loaded.container.memory, Memory::gibibytes(8));
+    assert_eq!(loaded.container.setup, ["./bin/setup"]);
+    assert!(loaded.host.clipboard);
+    assert_eq!(loaded.image.packages, ["ripgrep"]);
+    assert_eq!(loaded.image.run_as_root, ["install -d -o claude /opt/vendor"]);
+    assert_eq!(loaded.project.image, "mine:latest");
+    assert_eq!(loaded.project.name.as_deref(), Some("compostbin"));
+    assert_eq!(loaded.workspace.roots, ["~/elsewhere"]);
   }
 
   #[test]
-  fn local_container_keys_stay_out_of_the_shared_manifest() {
-    let temp = TempDir::new().expect("temp dir");
-    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
-    let manifest: Manifest = toml::from_str(FULL_MANIFEST).expect("manifest should parse");
-    manifest.save(&path).expect("save should succeed");
-    let local = "[container]\ncpus = 8\nmemory = \"16G\"\n";
-    std::fs::write(local_path(&path), local).expect("local manifest should write");
-    let mut loaded = Manifest::load(&path).expect("load should succeed");
-
-    loaded.save(&path).expect("save should succeed");
-    assert_eq!(
-      std::fs::read_to_string(&path).expect("manifest should exist"),
-      EXPECTED_RENDERING
+  fn a_local_host_command_replaces_the_shared_one_whole() {
+    let (_temp, path) = shared_and_local(
+      HOST_MANIFEST,
+      "[host.commands.test]\nargv = [\"just\", \"test\"]\n\n[host.commands.lint]\nargv = [\"just\", \"lint\"]\n",
     );
 
-    loaded.paths.push(PathEntry {
-      local: true,
-      readonly: false,
-      source: "~/scratch".to_string(),
-      target: None,
-    });
-    loaded.save_local(&path).expect("save should succeed");
-    loaded.paths.retain(|entry| !entry.local);
-    loaded.save_local(&path).expect("save should succeed");
-    assert_eq!(
-      std::fs::read_to_string(local_path(&path)).expect("local overrides should survive"),
-      local
-    );
+    let loaded = Manifest::load(&path).expect("load should succeed");
+    let commands = &loaded.host.commands;
+
+    assert_eq!(commands["test"].argv, ["just", "test"]);
+    assert!(!commands["test-one"].argv.is_empty(), "an unnamed command stays");
+    assert!(commands.contains_key("lint"));
   }
 
   #[test]
-  fn a_local_manifest_takes_container_and_paths_only() {
-    let temp = TempDir::new().expect("temp dir");
-    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
-    Manifest::default()
-      .save(&path)
-      .expect("save should succeed");
-    std::fs::write(local_path(&path), "[host]\nclipboard = true\n").expect("local manifest should write");
+  fn a_mistake_in_the_local_manifest_names_it() {
+    let (_temp, path) = shared_and_local(
+      "[project]\nimage = \"compostbin/base:latest\"\n",
+      "[container]\ncpu = 8\n",
+    );
 
-    let error = Manifest::load(&path).expect_err("anything else should be refused");
+    let error = Manifest::load(&path).expect_err("an unknown key should be refused");
 
     assert!(
       error.to_string().contains("compostbin.local.toml"),
       "error should name the local manifest: {error}"
     );
+  }
+
+  #[test]
+  fn records_a_path_in_only_the_file_it_belongs_to() {
+    let local = "[claude]\nkeychain = true\n";
+    let (_temp, path) = shared_and_local(FULL_MANIFEST, local);
+    let entry = |local| PathEntry {
+      local,
+      readonly: false,
+      source: "~/scratch".to_string(),
+      target: None,
+    };
+
+    record_path(&path, &entry(true)).expect("record should succeed");
+
+    assert_eq!(std::fs::read_to_string(&path).expect("manifest"), FULL_MANIFEST);
+    let rewritten = std::fs::read_to_string(local_path(&path)).expect("local manifest");
+    assert!(
+      rewritten.contains("keychain = true"),
+      "a key set to its default still overrides the shared manifest: {rewritten}"
+    );
+
+    record_path(&path, &entry(false)).expect("record should succeed");
+
+    let loaded = Manifest::load(&path).expect("load should succeed");
+    let scratch: Vec<bool> = loaded
+      .paths
+      .iter()
+      .filter(|entry| entry.source == "~/scratch")
+      .map(|entry| entry.local)
+      .collect();
+    assert_eq!(scratch, [false, true]);
+  }
+
+  #[test]
+  fn records_a_path_beside_host_commands() {
+    let (_temp, path) = shared_and_local(&format!("[host]\nconcurrency = 2\n{HOST_MANIFEST}"), "");
+
+    record_path(
+      &path,
+      &PathEntry {
+        local: false,
+        readonly: true,
+        source: "~/scratch".to_string(),
+        target: None,
+      },
+    )
+    .expect("record should succeed");
+
+    let loaded = Manifest::load(&path).expect("the rewritten manifest should load");
+    assert_eq!(loaded.host.concurrency, 2);
+    assert!(loaded.host.commands.contains_key("test"));
+    assert_eq!(loaded.paths.len(), 1);
   }
 
   #[test]

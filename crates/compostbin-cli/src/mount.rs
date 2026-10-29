@@ -1,4 +1,4 @@
-use compostbin_core::manifest::MANIFEST_RELATIVE_PATH;
+use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, record_path};
 use compostbin_core::session::{AddOutcome, CLAUDE_HOME_TARGET, Session};
 use compostbin_core::workspace::danger::danger;
 use compostbin_core::workspace::paths::PathResolver;
@@ -30,10 +30,8 @@ pub fn add(
       println!("{} is already mounted under {}", canonical.display(), root.display());
       Ok(0)
     }
-    AddOutcome::NeedsRestart => {
-      session
-        .manifest
-        .save_to(&project_dir.join(MANIFEST_RELATIVE_PATH), local)?;
+    AddOutcome::NeedsRestart(entry) => {
+      record_path(&project_dir.join(MANIFEST_RELATIVE_PATH), &entry)?;
       println!(
         "{} recorded; exit the running session and `compostbin run -- --continue` to mount it",
         canonical.display()

@@ -4,8 +4,11 @@
 
 - With `keychain`, save the session's Claude token back to the Keychain when a
   login or refresh in the container leaves it newer than the Keychain's.
-- `init` writes only `[project] image` and `name`. Rewriting the manifest, as
-  `add` does, drops every key set to its default.
+- `init` writes only `[project] image` and `name`.
+- `.config/compostbin.local.toml` takes every manifest key, not only
+  `[container]` and `[[paths]]`.
+- `add` changes only the file it records in, keeping the other keys that file
+  sets.
 
 ### Breaking
 

@@ -49,7 +49,7 @@ pub enum Notice {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AddOutcome {
   AlreadyMounted { root: PathBuf },
-  NeedsRestart,
+  NeedsRestart(PathEntry),
 }
 
 pub struct Session {
@@ -104,14 +104,15 @@ impl Session {
       };
     }
 
-    self.manifest.paths.push(PathEntry {
+    let entry = PathEntry {
       local,
       readonly,
       source: path.display().to_string(),
       target: None,
-    });
+    };
+    self.manifest.paths.push(entry.clone());
 
-    AddOutcome::NeedsRestart
+    AddOutcome::NeedsRestart(entry)
   }
 
   pub fn resolver(&self) -> &PathResolver {
@@ -197,7 +198,7 @@ mod tests {
 
     let outcome = session.add(Path::new("/Users/user/vendor/libfoo"), true, false);
 
-    assert_eq!(outcome, AddOutcome::NeedsRestart);
+    assert_eq!(outcome, AddOutcome::NeedsRestart(session.manifest.paths[1].clone()));
     assert_eq!(session.manifest.paths[1].source, "/Users/user/vendor/libfoo");
     assert!(session.manifest.paths[1].readonly);
     assert_eq!(session.manifest.paths[1].target, None);
@@ -250,7 +251,7 @@ mod tests {
   fn a_profile_replaces_the_projects_manifest() {
     let (_temp, session) = profiled("[container]\ncpus = 6\n", "code/api");
 
-    assert_eq!(session.manifest.container().cpus, 6);
+    assert_eq!(session.manifest.container.cpus, 6);
     assert_eq!(session.config_path(), "~/.config/compostbin/profiles/rust.toml");
   }
 
@@ -264,7 +265,7 @@ mod tests {
     let session = Session::load(None, PathResolver::new(&project_dir, temp.path()), &project_dir)
       .expect("the manifest should load");
 
-    assert_eq!(session.manifest.container().cpus, 1);
+    assert_eq!(session.manifest.container.cpus, 1);
     assert_eq!(session.config_path(), MANIFEST_RELATIVE_PATH);
   }
 
