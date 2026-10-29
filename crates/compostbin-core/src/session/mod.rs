@@ -14,7 +14,9 @@ pub use crate::session::spec::{CLAUDE_HOME_TARGET, CLIPBOARD_DISPLAY};
 
 use crate::error::{ManifestError, PathError};
 use crate::host::PortEvent;
-use crate::manifest::{MANIFEST_RELATIVE_PATH, Manifest, PathEntry, profile_path};
+use crate::manifest::{
+  MANIFEST_RELATIVE_PATH, Manifest, PathEntry, TomlFile, USER_CONFIG_PATH, UserConfig, profile_path,
+};
 use crate::workspace::paths::{PathResolver, root_containing};
 use crate::workspace::{Origin, Workspace};
 use std::path::{Path, PathBuf};
@@ -57,6 +59,7 @@ pub struct Session {
   profile: Option<String>,
   project_dir: PathBuf,
   resolver: PathResolver,
+  pub user: UserConfig,
 }
 
 impl Session {
@@ -66,6 +69,7 @@ impl Session {
       profile: None,
       project_dir: project_dir.into(),
       resolver,
+      user: UserConfig::default(),
     }
   }
 
@@ -80,12 +84,14 @@ impl Session {
       Some(name) => Manifest::parse(&resolver.resolve(&profile_path(name)))?,
       None => Manifest::load(&project_dir.join(MANIFEST_RELATIVE_PATH))?,
     };
+    let user = UserConfig::load_if_present(&resolver.resolve(USER_CONFIG_PATH))?.unwrap_or_default();
 
     Ok(Self {
       manifest,
       profile: profile.map(str::to_string),
       project_dir,
       resolver,
+      user,
     })
   }
 

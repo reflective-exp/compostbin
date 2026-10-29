@@ -192,9 +192,8 @@ on the host. Every key is described in `docs/manifest`:
 - [Mounts](docs/manifest/mounts.md): `[[paths]]`, `[workspace]`
 - [Local overrides](docs/manifest/local.md): the uncommitted
   `.config/compostbin.local.toml`
-- [Claude](docs/manifest/claude.md): signing in, and what is copied from
-  `~/.claude`, per project or for every project in
-  `~/.config/compostbin/config.toml`
+- [Claude](docs/manifest/claude.md): what is copied from `~/.claude`, and the
+  global `~/.config/compostbin/config.toml`, where Keychain sign-in is turned on
 
 ### Profiles
 

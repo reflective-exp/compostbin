@@ -60,8 +60,7 @@ impl Project {
     project
   }
 
-  /// Disables Keychain seeding, which would block an ad-hoc signed binary on a
-  /// prompt, and defaults to a small machine so parallel sessions don't swap.
+  /// Defaults to a small machine so parallel sessions don't swap.
   pub fn manifest(&self, body: &str) {
     let declared: toml::Table = toml::from_str(body).expect("the manifest body should parse");
     let declares_cpus = declares(&declared, "cpus");
@@ -70,7 +69,6 @@ impl Project {
       .try_into()
       .expect("the manifest body should be a manifest");
 
-    manifest.claude.keychain = false;
     manifest.project.name = Some(self.name.clone());
 
     if !declares_cpus {

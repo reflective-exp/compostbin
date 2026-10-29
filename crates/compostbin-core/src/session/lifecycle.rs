@@ -1,7 +1,7 @@
 use crate::error::{At, SessionError};
 use crate::host::{self, PortEvent};
 use crate::image;
-use crate::manifest::{TomlFile, USER_CONFIG_PATH, UserConfig};
+use crate::manifest::TomlFile;
 use crate::session::credentials::{self, CredentialStore};
 use crate::session::record::Record;
 use crate::session::{Notice, Session, briefing, settings};
@@ -112,19 +112,17 @@ impl Session {
     let home = self.claude_home();
     std::fs::create_dir_all(&home).at(&home)?;
 
-    if self.manifest.claude.keychain && credentials::seed(&home, credentials)? {
+    if self.user.claude.keychain && credentials::seed(&home, credentials)? {
       notify(Notice::NotInKeychain);
     }
 
-    let user_config = self.resolver.resolve(USER_CONFIG_PATH);
-    let user = UserConfig::load_if_present(&user_config)
-      .map_err(SessionError::Config)?
-      .unwrap_or_default();
-    let extra: Vec<String> = user
+    let extra: Vec<String> = self
+      .user
       .claude
       .shared
-      .into_iter()
-      .chain(self.manifest.claude.shared.iter().cloned())
+      .iter()
+      .chain(&self.manifest.claude.shared)
+      .cloned()
       .collect();
 
     let shared = settings::share(&self.resolver.claude_home(), &home, &extra)?;
@@ -176,7 +174,7 @@ impl Session {
         scope.spawn(|| host::relay(&bound, &stop, &log_port));
       }
 
-      if self.manifest.claude.keychain {
+      if self.user.claude.keychain {
         scope.spawn(|| credentials::watch(&self.claude_home(), credentials, &stop));
       }
 
@@ -247,8 +245,7 @@ mod tests {
 
   #[test]
   fn run_leaves_the_keychain_alone_when_it_is_off() {
-    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
-    session.manifest.claude.keychain = false;
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
     let store = FakeStore::from(r#"{"claudeAiOauth":{"expiresAt":1000}}"#);
 
     session
@@ -266,7 +263,8 @@ mod tests {
 
   #[test]
   fn run_saves_a_newer_session_token_to_the_keychain() {
-    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
+    session.user.claude.keychain = true;
     let newer = r#"{"claudeAiOauth":{"expiresAt":2000}}"#;
     std::fs::create_dir_all(session.claude_home()).expect("create claude home");
     std::fs::write(
@@ -546,7 +544,8 @@ mod tests {
 
   #[test]
   fn run_says_when_there_is_no_token_to_seed() {
-    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
+    session.user.claude.keychain = true;
     let said = std::sync::Mutex::new(Vec::new());
     let engine = RecordingEngine::with_unpacked(&[&session.run_spec().image]);
 

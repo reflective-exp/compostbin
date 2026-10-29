@@ -78,7 +78,7 @@ pub fn credentials(session: &Session, source: &impl CredentialStore, api_key_pre
     return check("credentials", Status::Ok, seeded.display().to_string());
   }
 
-  if !session.manifest.claude.keychain {
+  if !session.user.claude.keychain {
     if api_key_present {
       return check("credentials", Status::Ok, "ANTHROPIC_API_KEY is set");
     }

@@ -161,7 +161,7 @@ fn files_under(dir: &Path) -> Result<Vec<PathBuf>, PathError> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::manifest::Manifest;
+  use crate::manifest::{Manifest, UserConfig};
   use tempfile::TempDir;
 
   fn manifest_skill() -> &'static Skill {
@@ -341,7 +341,9 @@ mod tests {
 
     assert!(!examples.is_empty());
     for example in examples {
-      toml::from_str::<Manifest>(example).unwrap_or_else(|error| panic!("{example}\n{error}"));
+      if let Err(error) = toml::from_str::<Manifest>(example) {
+        toml::from_str::<UserConfig>(example).unwrap_or_else(|_| panic!("{example}\n{error}"));
+      }
     }
   }
 }

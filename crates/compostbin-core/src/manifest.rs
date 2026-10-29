@@ -35,10 +35,6 @@ pub struct Manifest {
   pub workspace: WorkspaceConfig,
 }
 
-fn is_true(value: &bool) -> bool {
-  *value
-}
-
 impl Manifest {
   pub fn named_after(project_dir: &Path) -> Self {
     Self {
@@ -189,6 +185,7 @@ pub struct UserConfig {
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UserClaudeConfig {
+  pub keychain: bool,
   pub shared: Vec<String>,
 }
 
@@ -196,27 +193,15 @@ fn local_path(manifest_path: &Path) -> PathBuf {
   manifest_path.with_extension("local.toml")
 }
 
-#[derive(Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClaudeConfig {
   /// Overrides the per-session default under `SESSIONS_DIR`.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub home: Option<String>,
-  #[serde(skip_serializing_if = "is_true")]
-  pub keychain: bool,
   /// `~/.claude` entries beyond the host settings every session already gets.
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub shared: Vec<String>,
-}
-
-impl Default for ClaudeConfig {
-  fn default() -> Self {
-    Self {
-      home: None,
-      keychain: true,
-      shared: Vec::new(),
-    }
-  }
 }
 
 impl ClaudeConfig {
@@ -471,7 +456,6 @@ impl Manifest {
     Self {
       claude: ClaudeConfig {
         home: Some("~/home".to_string()),
-        keychain: true,
         shared: vec!["agents".to_string()],
       },
       container: ContainerConfig {
@@ -545,8 +529,7 @@ source = "~/code/vendor/libfoo"
 target = "~/code/vendor/libfoo"
 
 [claude]
-keychain = true
-shared   = ["widgets"]
+shared = ["widgets"]
 
 [image]
 packages    = ["jq"]
@@ -759,7 +742,7 @@ tty = true
       FULL_MANIFEST,
       r#"
 [claude]
-keychain = false
+home = "~/elsewhere-home"
 
 [container]
 cpus = 8
@@ -781,7 +764,7 @@ roots = ["~/elsewhere"]
 
     let loaded = Manifest::load(&path).expect("load should succeed");
 
-    assert!(!loaded.claude.keychain);
+    assert_eq!(loaded.claude.home.as_deref(), Some("~/elsewhere-home"));
     assert_eq!(
       loaded.claude.shared,
       ["widgets"],
@@ -835,7 +818,7 @@ roots = ["~/elsewhere"]
 
   #[test]
   fn records_a_path_in_only_the_file_it_belongs_to() {
-    let local = "[claude]\nkeychain = true\n";
+    let local = "[container]\ncpus = 4\n";
     let (_temp, path) = shared_and_local(FULL_MANIFEST, local);
     let entry = |local| PathEntry {
       local,
@@ -849,7 +832,7 @@ roots = ["~/elsewhere"]
     assert_eq!(std::fs::read_to_string(&path).expect("manifest"), FULL_MANIFEST);
     let rewritten = std::fs::read_to_string(local_path(&path)).expect("local manifest");
     assert!(
-      rewritten.contains("keychain = true"),
+      rewritten.contains("cpus = 4"),
       "a key set to its default still overrides the shared manifest: {rewritten}"
     );
 
@@ -922,7 +905,6 @@ roots = ["~/elsewhere"]
     assert_eq!(manifest.paths.len(), 2);
 
     assert_eq!(manifest.claude.home, None);
-    assert!(manifest.claude.keychain);
     assert_eq!(manifest.claude.shared, ["widgets"]);
 
     assert_eq!(manifest.image.packages, ["jq"]);
@@ -938,9 +920,23 @@ roots = ["~/elsewhere"]
   }
 
   #[test]
+  fn user_config_turns_the_keychain_on() {
+    assert!(!UserConfig::default().claude.keychain);
+
+    let config: UserConfig = toml::from_str("[claude]\nkeychain = true\n").expect("config should parse");
+
+    assert!(config.claude.keychain);
+  }
+
+  #[test]
   fn user_config_refuses_project_settings() {
     assert!(toml::from_str::<UserConfig>("[container]\ncpus = 8\n").is_err());
-    assert!(toml::from_str::<UserConfig>("[claude]\nkeychain = false\n").is_err());
+    assert!(toml::from_str::<UserConfig>("[claude]\nhome = \"~/home\"\n").is_err());
+  }
+
+  #[test]
+  fn manifest_refuses_keychain() {
+    assert!(toml::from_str::<Manifest>("[claude]\nkeychain = true\n").is_err());
   }
 
   #[test]
@@ -963,14 +959,13 @@ roots = ["~/elsewhere"]
 
   #[test]
   fn renders_a_value_that_differs_from_its_default() {
-    let manifest: Manifest = toml::from_str(
-      "[claude]\nkeychain = false\n[container]\ncpus = 2\nmemory = \"4G\"\n[host]\nclipboard = true\nconcurrency = 2\n",
-    )
-    .expect("manifest should parse");
+    let manifest: Manifest =
+      toml::from_str("[container]\ncpus = 2\nmemory = \"4G\"\n[host]\nclipboard = true\nconcurrency = 2\n")
+        .expect("manifest should parse");
 
     let rendered = toml::to_string(&manifest).expect("manifest should serialize");
 
-    for line in ["keychain = false", "cpus = 2", "memory = \"4G\"", "concurrency = 2"] {
+    for line in ["cpus = 2", "memory = \"4G\"", "concurrency = 2"] {
       assert!(rendered.contains(line), "{line} should survive: {rendered}");
     }
   }
@@ -1067,7 +1062,6 @@ source = "~/a-first"
       manifest.claude.home, None,
       "an unset home is what makes the session's home per project"
     );
-    assert!(manifest.claude.keychain);
     assert_eq!(
       manifest.claude.shared,
       [] as [String; 0],

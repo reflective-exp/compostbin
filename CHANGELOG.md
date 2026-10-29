@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- With `keychain`, save the session's Claude token back to the Keychain when a
-  login or refresh in the container leaves it newer than the Keychain's.
+- Add `[claude] keychain` to `~/.config/compostbin/config.toml`, defaulted to
+  `false`. With `keychain`, save the session's Claude token back to the Keychain
+  when a login or refresh in the container leaves it newer than the Keychain's.
 - `init` writes only `[project] image` and `name`.
 - `.config/compostbin.local.toml` takes every manifest key, not only
   `[container]` and `[[paths]]`.
@@ -12,8 +13,7 @@
 
 ### Breaking
 
-- Rename `[claude] seed_from_keychain` to `keychain`. The old key is now an
-  error.
+- Remove `[claude] seed_from_keychain`.
 
 ## v0.18.0
 

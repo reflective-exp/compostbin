@@ -115,7 +115,6 @@ impl From<PathError> for ManifestError {
 
 #[derive(Debug)]
 pub enum SessionError {
-  Config(ManifestError),
   Credential(CredentialError),
   Engine(EngineError),
   Io(PathError),
@@ -125,7 +124,6 @@ pub enum SessionError {
 impl fmt::Display for SessionError {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Self::Config(error) => error.fmt(formatter),
       Self::Credential(error) => error.fmt(formatter),
       Self::Engine(error) => error.fmt(formatter),
       Self::Io(error) => error.fmt(formatter),
@@ -137,7 +135,6 @@ impl fmt::Display for SessionError {
 impl Error for SessionError {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match self {
-      Self::Config(error) => error.source(),
       Self::Credential(error) => error.source(),
       Self::Engine(error) => error.source(),
       Self::Io(error) => error.source(),

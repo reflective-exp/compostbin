@@ -81,14 +81,16 @@ mod tests {
     let base = home.path().canonicalize().expect("canonical temp");
     std::fs::create_dir_all(base.join("workspace")).expect("create root");
 
-    fixtures::session_at(
+    let mut session = fixtures::session_at(
       &base,
       &format!(
         "[claude]\nhome = \"{}\"\n\n[project]\nname = \"cb\"\n\n[workspace]\nroots = [{roots}]\n",
         base.join("claude-home").display()
       ),
       "project",
-    )
+    );
+    session.user.claude.keychain = true;
+    session
   }
 
   fn check<'a>(checks: &'a [Check], name: &str) -> &'a Check {
@@ -304,7 +306,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");
     let mut session = session(&home, &quoted(&base, "workspace"));
-    session.manifest.claude.keychain = false;
+    session.user.claude.keychain = false;
 
     let checks = diagnose(
       &session,
