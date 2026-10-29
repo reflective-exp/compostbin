@@ -26,10 +26,7 @@ fn directory_hash(dir: &Path) -> String {
   use sha2::{Digest, Sha256};
   use std::os::unix::ffi::OsStrExt;
 
-  Sha256::digest(dir.as_os_str().as_bytes())[..4]
-    .iter()
-    .map(|byte| format!("{byte:02x}"))
-    .collect()
+  crate::hex::encode(&Sha256::digest(dir.as_os_str().as_bytes())[..4])
 }
 
 /// Port events arrive here only until Claude attaches; after that the relay writes to `ports_log`.

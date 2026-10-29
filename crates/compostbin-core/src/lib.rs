@@ -3,6 +3,7 @@
 pub mod doctor;
 pub mod error;
 mod fs;
+mod hex;
 pub mod host;
 pub mod image;
 pub mod manifest;

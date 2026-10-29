@@ -1,7 +1,7 @@
 use super::{Check, Status, check, listed};
 use crate::host::served_commands;
 use crate::session::Session;
-use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialSource};
+use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialStore};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
@@ -71,7 +71,7 @@ fn answering(upstream: SocketAddr) -> bool {
   TcpStream::connect_timeout(&upstream, PROBE_TIMEOUT).is_ok()
 }
 
-pub fn credentials(session: &Session, source: &impl CredentialSource, api_key_present: bool) -> Check {
+pub fn credentials(session: &Session, source: &impl CredentialStore, api_key_present: bool) -> Check {
   let seeded = session.claude_home().join(CREDENTIALS_FILE_NAME);
 
   if seeded.exists() {

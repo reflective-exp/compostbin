@@ -3,7 +3,7 @@ mod host;
 mod mounts;
 
 use crate::session::Session;
-use crate::session::credentials::CredentialSource;
+use crate::session::credentials::CredentialStore;
 use compostbin_engine::engine::Engine;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,7 +25,7 @@ pub struct Check {
 pub fn diagnose(
   session: &Session,
   engine: &impl Engine,
-  credentials: &impl CredentialSource,
+  credentials: &impl CredentialStore,
   api_key_present: bool,
 ) -> Vec<Check> {
   let images = engine.images();
@@ -66,15 +66,15 @@ fn listed(name: &'static str, status: Status, detail: impl Into<String>, items: 
 mod tests {
   use super::*;
   use crate::manifest::TomlFile;
-  use crate::session::credentials::{CREDENTIALS_FILE_NAME, FakeSource};
+  use crate::session::credentials::{CREDENTIALS_FILE_NAME, FakeStore};
   use crate::session::fixtures;
   use crate::session::record::Record;
   use compostbin_engine::fake::RecordingEngine;
   use std::path::Path;
   use tempfile::TempDir;
 
-  fn in_keychain() -> FakeSource {
-    FakeSource(Some("token".to_string()))
+  fn in_keychain() -> FakeStore {
+    FakeStore::from("token")
   }
 
   fn session(home: &TempDir, roots: &str) -> Session {
@@ -276,7 +276,7 @@ mod tests {
     let checks = diagnose(
       &session(&home, &quoted(&base, "workspace")),
       &RecordingEngine::with_images(&["compostbin/base:latest"]),
-      &FakeSource(None),
+      &FakeStore::default(),
       true,
     );
 
@@ -292,7 +292,7 @@ mod tests {
     let checks = diagnose(
       &session(&home, &quoted(&base, "workspace")),
       &RecordingEngine::with_images(&["compostbin/base:latest"]),
-      &FakeSource(None),
+      &FakeStore::default(),
       false,
     );
 
@@ -333,7 +333,7 @@ mod tests {
     let checks = diagnose(
       &session(&home, &quoted(&base, "workspace")),
       &RecordingEngine::with_images(&["compostbin/base:latest"]),
-      &FakeSource(None),
+      &FakeStore::default(),
       false,
     );
 

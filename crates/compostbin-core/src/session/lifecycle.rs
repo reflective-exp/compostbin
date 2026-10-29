@@ -2,7 +2,7 @@ use crate::error::{At, SessionError};
 use crate::host::{self, PortEvent};
 use crate::image;
 use crate::manifest::{TomlFile, USER_CONFIG_PATH, UserConfig};
-use crate::session::credentials::{self, CredentialSource};
+use crate::session::credentials::{self, CredentialStore};
 use crate::session::record::Record;
 use crate::session::{Notice, Session, briefing, settings};
 use compostbin_engine::engine::Engine;
@@ -94,7 +94,7 @@ impl Session {
   pub fn run(
     &self,
     engine: &impl Engine,
-    credentials: &(impl CredentialSource + Sync),
+    credentials: &(impl CredentialStore + Sync),
     process: &Process,
     notify: &(dyn Fn(Notice) + Sync),
   ) -> Result<i32, SessionError> {
@@ -108,11 +108,11 @@ impl Session {
   }
 
   /// Claude's home is created even when empty, because the guest cannot create a missing mount source.
-  fn prepare(&self, credentials: &impl CredentialSource, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
+  fn prepare(&self, credentials: &impl CredentialStore, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
     let home = self.claude_home();
     std::fs::create_dir_all(&home).at(&home)?;
 
-    if credentials::seed(&home, self.manifest.claude.keychain, credentials)? {
+    if self.manifest.claude.keychain && credentials::seed(&home, credentials)? {
       notify(Notice::NotInKeychain);
     }
 
@@ -141,7 +141,7 @@ impl Session {
   fn launch(
     &self,
     engine: &impl Engine,
-    credentials: &(impl CredentialSource + Sync),
+    credentials: &(impl CredentialStore + Sync),
     process: &Process,
     notify: &(dyn Fn(Notice) + Sync),
   ) -> Result<i32, SessionError> {
@@ -225,7 +225,7 @@ mod tests {
   use super::*;
   use crate::host::Spool;
   use crate::manifest::{MANIFEST_RELATIVE_PATH, PathEntry};
-  use crate::session::credentials::FakeSource;
+  use crate::session::credentials::FakeStore;
   use crate::session::fixtures::{self, MANIFEST, PROJECT};
   use compostbin_engine::fake::{Call, RecordingEngine};
 
@@ -233,7 +233,7 @@ mod tests {
 
   fn run(session: &Session, engine: &RecordingEngine) -> i32 {
     session
-      .run(engine, &FakeSource(None), &Process::claude(Vec::new()), &quiet)
+      .run(engine, &FakeStore::default(), &Process::claude(Vec::new()), &quiet)
       .expect("run should succeed")
   }
 
@@ -243,6 +243,46 @@ mod tests {
 
   fn root_shell() -> Process {
     Process::command(vec!["bash".to_string()], true, "root".to_string())
+  }
+
+  #[test]
+  fn run_leaves_the_keychain_alone_when_it_is_off() {
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
+    session.manifest.claude.keychain = false;
+    let store = FakeStore::from(r#"{"claudeAiOauth":{"expiresAt":1000}}"#);
+
+    session
+      .run(&RecordingEngine::new(), &store, &root_shell(), &quiet)
+      .expect("run should succeed");
+
+    assert!(
+      !session
+        .claude_home()
+        .join(credentials::CREDENTIALS_FILE_NAME)
+        .exists()
+    );
+    assert_eq!(store.writes(), 0);
+  }
+
+  #[test]
+  fn run_saves_a_newer_session_token_to_the_keychain() {
+    let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
+    let newer = r#"{"claudeAiOauth":{"expiresAt":2000}}"#;
+    std::fs::create_dir_all(session.claude_home()).expect("create claude home");
+    std::fs::write(
+      session
+        .claude_home()
+        .join(credentials::CREDENTIALS_FILE_NAME),
+      newer,
+    )
+    .expect("write token");
+    let store = FakeStore::from(r#"{"claudeAiOauth":{"expiresAt":1000}}"#);
+
+    session
+      .run(&RecordingEngine::new(), &store, &root_shell(), &quiet)
+      .expect("run should succeed");
+
+    assert_eq!(store.kept().as_deref(), Some(newer));
   }
 
   #[test]
@@ -265,7 +305,7 @@ mod tests {
     let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
     session
-      .run(&engine, &FakeSource(None), &root_shell(), &quiet)
+      .run(&engine, &FakeStore::default(), &root_shell(), &quiet)
       .expect("run should succeed");
 
     assert_eq!(
@@ -283,7 +323,7 @@ mod tests {
     let engine = RecordingEngine::new();
 
     session
-      .run(&engine, &FakeSource(None), &root_shell(), &quiet)
+      .run(&engine, &FakeStore::default(), &root_shell(), &quiet)
       .expect("run should succeed");
 
     assert_eq!(
@@ -325,7 +365,7 @@ mod tests {
     let engine = RecordingEngine::missing_content(&[], "sha256:abc");
 
     let error = session
-      .run(&engine, &FakeSource(None), &Process::claude(Vec::new()), &quiet)
+      .run(&engine, &FakeStore::default(), &Process::claude(Vec::new()), &quiet)
       .expect_err("a damaged image should not boot");
 
     assert!(
@@ -351,7 +391,7 @@ mod tests {
       let said = std::sync::Mutex::new(Vec::new());
 
       session
-        .run(engine, &FakeSource(None), &Process::claude(Vec::new()), &|notice| {
+        .run(engine, &FakeStore::default(), &Process::claude(Vec::new()), &|notice| {
           if let Notice::Unpacking(image) = notice {
             said.lock().expect("unpoisoned").push(image);
           }
@@ -376,7 +416,7 @@ mod tests {
     let process = Process::claude(vec!["--continue".to_string()]);
 
     session
-      .run(&engine, &FakeSource(None), &process, &quiet)
+      .run(&engine, &FakeStore::default(), &process, &quiet)
       .expect("run should succeed");
 
     assert_eq!(engine.calls().last(), Some(&Call::Exec(session.process_spec(&process))));
@@ -425,11 +465,16 @@ mod tests {
     let said = std::sync::Mutex::new(Vec::new());
 
     let code = session
-      .run(&engine, &FakeSource(None), &Process::claude(Vec::new()), &|notice| {
-        if let Notice::SetupFailed { line, code } = notice {
-          said.lock().expect("unpoisoned").push((line, code));
-        }
-      })
+      .run(
+        &engine,
+        &FakeStore::default(),
+        &Process::claude(Vec::new()),
+        &|notice| {
+          if let Notice::SetupFailed { line, code } = notice {
+            said.lock().expect("unpoisoned").push((line, code));
+          }
+        },
+      )
       .expect("run should succeed");
 
     assert_eq!(code, 3);
@@ -445,7 +490,7 @@ mod tests {
     let said = std::sync::Mutex::new(Vec::new());
 
     session
-      .run(&engine, &FakeSource(None), &root_shell(), &|notice| {
+      .run(&engine, &FakeStore::default(), &root_shell(), &|notice| {
         if let Notice::SetupFailed { line, code } = notice {
           said.lock().expect("unpoisoned").push((line, code));
         }
@@ -506,9 +551,12 @@ mod tests {
     let engine = RecordingEngine::with_unpacked(&[&session.run_spec().image]);
 
     session
-      .run(&engine, &FakeSource(None), &Process::claude(Vec::new()), &|notice| {
-        said.lock().expect("lock").push(format!("{notice:?}"))
-      })
+      .run(
+        &engine,
+        &FakeStore::default(),
+        &Process::claude(Vec::new()),
+        &|notice| said.lock().expect("lock").push(format!("{notice:?}")),
+      )
       .expect("run should succeed");
 
     assert_eq!(said.into_inner().expect("lock"), ["NotInKeychain"]);

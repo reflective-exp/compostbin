@@ -1,4 +1,5 @@
 use crate::error::{At, CredentialError};
+use crate::hex;
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
@@ -12,22 +13,49 @@ pub const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 const WATCH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// `Ok(None)` means no entry, which is not an error since the session may use an API key.
-pub trait CredentialSource {
+pub trait CredentialStore {
   fn read(&self) -> Result<Option<String>, CredentialError>;
   fn write(&self, secret: &str) -> Result<(), CredentialError>;
   fn service(&self) -> &str;
 }
 
 #[cfg(test)]
-pub(crate) struct FakeSource(pub Option<String>);
+#[derive(Default)]
+pub(crate) struct FakeStore {
+  kept: std::sync::Mutex<Option<String>>,
+  writes: std::sync::atomic::AtomicUsize,
+}
 
 #[cfg(test)]
-impl CredentialSource for FakeSource {
-  fn read(&self) -> Result<Option<String>, CredentialError> {
-    Ok(self.0.clone())
+impl From<&str> for FakeStore {
+  fn from(kept: &str) -> Self {
+    Self {
+      kept: std::sync::Mutex::new(Some(kept.to_string())),
+      ..Self::default()
+    }
+  }
+}
+
+#[cfg(test)]
+impl FakeStore {
+  pub(crate) fn kept(&self) -> Option<String> {
+    self.kept.lock().expect("store lock").clone()
   }
 
-  fn write(&self, _secret: &str) -> Result<(), CredentialError> {
+  pub(crate) fn writes(&self) -> usize {
+    self.writes.load(Ordering::Relaxed)
+  }
+}
+
+#[cfg(test)]
+impl CredentialStore for FakeStore {
+  fn read(&self) -> Result<Option<String>, CredentialError> {
+    Ok(self.kept())
+  }
+
+  fn write(&self, secret: &str) -> Result<(), CredentialError> {
+    *self.kept.lock().expect("store lock") = Some(secret.to_string());
+    self.writes.fetch_add(1, Ordering::Relaxed);
     Ok(())
   }
 
@@ -51,10 +79,7 @@ impl From<Option<&OsStr>> for Keychain {
       None => KEYCHAIN_SERVICE.to_string(),
       Some(dir) => {
         let normalized: String = dir.to_string_lossy().nfc().collect();
-        let suffix: String = Sha256::digest(normalized.as_bytes())[..4]
-          .iter()
-          .map(|byte| format!("{byte:02x}"))
-          .collect();
+        let suffix = hex::encode(&Sha256::digest(normalized.as_bytes())[..4]);
         format!("{KEYCHAIN_SERVICE}-{suffix}")
       }
     };
@@ -66,7 +91,7 @@ impl From<Option<&OsStr>> for Keychain {
 /// `security` exits 44 when the item is absent.
 const KEYCHAIN_ITEM_NOT_FOUND: i32 = 44;
 
-impl CredentialSource for Keychain {
+impl CredentialStore for Keychain {
   fn service(&self) -> &str {
     &self.service
   }
@@ -94,7 +119,7 @@ impl CredentialSource for Keychain {
   /// the login name, as Claude Code writes it, so `-U` updates its item rather than adding one.
   fn write(&self, secret: &str) -> Result<(), CredentialError> {
     let account = std::env::var("USER").map_err(|_| CredentialError::KeychainSave("USER is not set".to_string()))?;
-    let hex: String = secret.bytes().map(|byte| format!("{byte:02x}")).collect();
+    let hex = hex::encode(secret.as_bytes());
 
     let mut child = Command::new("security")
       .arg("-i")
@@ -136,19 +161,19 @@ fn expires_at(secret: &str) -> Option<u64> {
 }
 
 /// Copies the session's token to the Keychain unless the Keychain's expires no earlier, which
-/// keeps one session from replacing a token another has since refreshed. Returns whether it wrote.
-pub fn save(claude_home: &Path, store: &impl CredentialSource) -> Result<bool, CredentialError> {
+/// keeps one session from replacing a token another has since refreshed.
+pub fn save(claude_home: &Path, store: &impl CredentialStore) -> Result<(), CredentialError> {
   let path = claude_home.join(CREDENTIALS_FILE_NAME);
 
   let secret = match std::fs::read_to_string(&path) {
-    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
     read => read.at(&path)?,
   };
   let secret = secret.trim();
 
   // Unparsable when caught mid-write; the finished write changes the mtime again.
   let Some(expires) = expires_at(secret) else {
-    return Ok(false);
+    return Ok(());
   };
 
   if store
@@ -157,16 +182,15 @@ pub fn save(claude_home: &Path, store: &impl CredentialSource) -> Result<bool, C
     .and_then(expires_at)
     .is_some_and(|kept| kept >= expires)
   {
-    return Ok(false);
+    return Ok(());
   }
 
-  store.write(secret)?;
-  Ok(true)
+  store.write(secret)
 }
 
 /// Saves on starting too, catching a token left by a session killed before it could save, and
 /// checks once more on stopping.
-pub fn watch(claude_home: &Path, store: &impl CredentialSource, stop: &AtomicBool) {
+pub fn watch(claude_home: &Path, store: &impl CredentialStore, stop: &AtomicBool) {
   let path = claude_home.join(CREDENTIALS_FILE_NAME);
   let modified = || -> Option<SystemTime> {
     std::fs::metadata(&path)
@@ -194,84 +218,41 @@ pub fn watch(claude_home: &Path, store: &impl CredentialSource, stop: &AtomicBoo
 
 /// Never overwrites an existing token, which the container may have refreshed past the Keychain's.
 /// Returns true when a token was wanted and the Keychain had none.
-pub fn seed(claude_home: &Path, enabled: bool, source: &impl CredentialSource) -> Result<bool, CredentialError> {
+pub fn seed(claude_home: &Path, store: &impl CredentialStore) -> Result<bool, CredentialError> {
+  use std::os::unix::fs::OpenOptionsExt;
+
   let destination = claude_home.join(CREDENTIALS_FILE_NAME);
 
-  if !enabled || destination.exists() {
+  if destination.exists() {
     return Ok(false);
   }
 
-  let Some(secret) = source.read()? else {
+  let Some(secret) = store.read()? else {
     return Ok(true);
   };
 
   std::fs::create_dir_all(claude_home).at(claude_home)?;
-  std::fs::write(&destination, secret).at(&destination)?;
-  restrict_to_owner(&destination)?;
+  std::fs::File::options()
+    .write(true)
+    .create_new(true)
+    .mode(0o600)
+    .open(&destination)
+    .and_then(|mut file| file.write_all(secret.as_bytes()))
+    .at(&destination)?;
 
   Ok(false)
-}
-
-fn restrict_to_owner(path: &Path) -> Result<(), CredentialError> {
-  use std::os::unix::fs::PermissionsExt;
-
-  Ok(std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).at(path)?)
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
   use std::path::PathBuf;
-  use std::sync::Mutex;
-  use std::sync::atomic::AtomicUsize;
   use tempfile::TempDir;
 
   const SECRET: &str = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat-test"}}"#;
 
-  fn found() -> FakeSource {
-    FakeSource(Some(SECRET.to_string()))
-  }
-
   fn token(expires_at: u64) -> String {
     format!(r#"{{"claudeAiOauth":{{"accessToken":"sk-ant-oat-{expires_at}","expiresAt":{expires_at}}}}}"#)
-  }
-
-  struct Store {
-    kept: Mutex<Option<String>>,
-    writes: AtomicUsize,
-  }
-
-  impl Store {
-    fn holding(kept: Option<String>) -> Self {
-      Self {
-        kept: Mutex::new(kept),
-        writes: AtomicUsize::new(0),
-      }
-    }
-
-    fn kept(&self) -> Option<String> {
-      self.kept.lock().expect("store lock").clone()
-    }
-
-    fn writes(&self) -> usize {
-      self.writes.load(Ordering::Relaxed)
-    }
-  }
-
-  impl CredentialSource for Store {
-    fn read(&self) -> Result<Option<String>, CredentialError> {
-      Ok(self.kept())
-    }
-
-    fn write(&self, secret: &str) -> Result<(), CredentialError> {
-      *self.kept.lock().expect("store lock") = Some(secret.to_string());
-      self.writes.fetch_add(1, Ordering::Relaxed);
-      Ok(())
-    }
-
-    fn service(&self) -> &str {
-      KEYCHAIN_SERVICE
-    }
   }
 
   fn session_holds(home: &TempDir, secret: &str) {
@@ -318,7 +299,7 @@ mod tests {
   fn writes_the_keychain_secret_into_a_missing_claude_home() {
     let home = TempDir::new().expect("temp dir");
 
-    let missing = seed(&claude_home(&home), true, &found()).expect("seeding should succeed");
+    let missing = seed(&claude_home(&home), &FakeStore::from(SECRET)).expect("seeding should succeed");
 
     assert!(!missing);
     assert_eq!(
@@ -333,7 +314,7 @@ mod tests {
     std::fs::create_dir_all(claude_home(&home)).expect("create home");
     std::fs::write(credentials_path(&home), "newer").expect("write existing");
 
-    let missing = seed(&claude_home(&home), true, &FakeSource(None)).expect("seeding should succeed");
+    let missing = seed(&claude_home(&home), &FakeStore::default()).expect("seeding should succeed");
 
     assert!(!missing, "a token already there needs nothing from the Keychain");
     assert_eq!(
@@ -343,20 +324,10 @@ mod tests {
   }
 
   #[test]
-  fn writes_nothing_when_seeding_is_disabled() {
-    let home = TempDir::new().expect("temp dir");
-
-    let missing = seed(&claude_home(&home), false, &FakeSource(None)).expect("seeding should succeed");
-
-    assert!(!missing, "a disabled seed never asks the Keychain");
-    assert!(!credentials_path(&home).exists());
-  }
-
-  #[test]
   fn reports_a_missing_keychain_entry_without_failing() {
     let home = TempDir::new().expect("temp dir");
 
-    let missing = seed(&claude_home(&home), true, &FakeSource(None)).expect("seeding should succeed");
+    let missing = seed(&claude_home(&home), &FakeStore::default()).expect("seeding should succeed");
 
     assert!(missing);
     assert!(!credentials_path(&home).exists());
@@ -367,7 +338,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     let home = TempDir::new().expect("temp dir");
 
-    seed(&claude_home(&home), true, &found()).expect("seeding should succeed");
+    seed(&claude_home(&home), &FakeStore::from(SECRET)).expect("seeding should succeed");
 
     let mode = std::fs::metadata(credentials_path(&home))
       .expect("credentials should exist")
@@ -380,9 +351,9 @@ mod tests {
   fn saves_a_login_to_an_empty_keychain() {
     let home = TempDir::new().expect("temp dir");
     session_holds(&home, &token(2000));
-    let store = Store::holding(None);
+    let store = FakeStore::default();
 
-    assert!(save(&claude_home(&home), &store).expect("save should succeed"));
+    save(&claude_home(&home), &store).expect("save should succeed");
     assert_eq!(store.kept(), Some(token(2000)));
   }
 
@@ -390,9 +361,9 @@ mod tests {
   fn saves_a_token_that_outlasts_the_keychains() {
     let home = TempDir::new().expect("temp dir");
     session_holds(&home, &token(2000));
-    let store = Store::holding(Some(token(1000)));
+    let store = FakeStore::from(token(1000).as_str());
 
-    assert!(save(&claude_home(&home), &store).expect("save should succeed"));
+    save(&claude_home(&home), &store).expect("save should succeed");
     assert_eq!(store.kept(), Some(token(2000)));
   }
 
@@ -400,21 +371,21 @@ mod tests {
   fn keeps_a_keychain_token_refreshed_elsewhere() {
     let home = TempDir::new().expect("temp dir");
     session_holds(&home, &token(1000));
-    let store = Store::holding(Some(token(2000)));
+    let store = FakeStore::from(token(2000).as_str());
 
-    assert!(!save(&claude_home(&home), &store).expect("save should succeed"));
-    assert_eq!(store.kept(), Some(token(2000)));
+    save(&claude_home(&home), &store).expect("save should succeed");
+    assert_eq!(store.writes(), 0);
   }
 
   #[test]
   fn saves_nothing_without_a_readable_token() {
     let home = TempDir::new().expect("temp dir");
-    let store = Store::holding(None);
+    let store = FakeStore::default();
 
-    assert!(!save(&claude_home(&home), &store).expect("a missing file is not an error"));
+    save(&claude_home(&home), &store).expect("a missing file is not an error");
 
     session_holds(&home, r#"{"claudeAiOauth":{"accessTo"#);
-    assert!(!save(&claude_home(&home), &store).expect("a partial write is not an error"));
+    save(&claude_home(&home), &store).expect("a partial write is not an error");
     assert_eq!(store.writes(), 0);
   }
 
@@ -422,7 +393,7 @@ mod tests {
   fn watching_saves_a_token_left_before_it_started() {
     let home = TempDir::new().expect("temp dir");
     session_holds(&home, &token(2000));
-    let store = Store::holding(Some(token(1000)));
+    let store = FakeStore::from(token(1000).as_str());
 
     watch(&claude_home(&home), &store, &AtomicBool::new(true));
 
@@ -433,7 +404,7 @@ mod tests {
   fn watching_saves_a_token_written_while_it_runs() {
     let home = TempDir::new().expect("temp dir");
     session_holds(&home, &token(1000));
-    let store = Store::holding(None);
+    let store = FakeStore::default();
     let stop = AtomicBool::new(false);
 
     std::thread::scope(|scope| {

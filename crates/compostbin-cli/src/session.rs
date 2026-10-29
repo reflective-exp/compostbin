@@ -1,5 +1,5 @@
 use crate::engine::select;
-use compostbin_core::session::credentials::{CredentialSource, Keychain};
+use compostbin_core::session::credentials::{CredentialStore, Keychain};
 use compostbin_core::session::{Notice, Process, Session};
 use compostbin_core::workspace::paths::CLAUDE_CONFIG_DIR;
 use std::error::Error;
