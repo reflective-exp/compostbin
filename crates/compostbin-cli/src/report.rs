@@ -1,17 +1,43 @@
+use crate::cli::Config;
 use crate::engine::select;
 use crate::session::keychain;
 use compostbin_core::doctor::{self, Check, Status};
-use compostbin_core::session::Session;
+use compostbin_core::manifest::USER_CONFIG_PATH;
+use compostbin_core::workspace::paths::PathResolver;
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 
-pub fn report_diagnosis(session: &Session) -> Result<i32, Box<dyn Error>> {
-  let checks = doctor::diagnose(
-    session,
-    &select(session)?,
-    &keychain(),
-    std::env::var_os("ANTHROPIC_API_KEY").is_some(),
-  );
+/// Retired keys block loading the session, so they are checked and fixed first.
+pub fn report_diagnosis(
+  config: &Config,
+  resolver: PathResolver,
+  project_dir: &Path,
+  fix: bool,
+) -> Result<i32, Box<dyn Error>> {
+  let files = doctor::config::manifest_files(config.profile.as_deref(), &resolver, project_dir);
+  let retired = doctor::config::retired(&files)?;
+
+  if fix && !retired.is_empty() {
+    doctor::config::fix(&retired, &resolver.resolve(USER_CONFIG_PATH))?;
+  }
+
+  let configuration = doctor::config::configuration(&retired, fix);
+
+  if configuration.status == Status::Fail {
+    print!("{}", Diagnosis(&[configuration]));
+    return Ok(1);
+  }
+
+  let session = config.load(resolver, project_dir)?;
+  let checks: Vec<Check> = std::iter::once(configuration)
+    .chain(doctor::diagnose(
+      &session,
+      &select(&session)?,
+      &keychain(),
+      std::env::var_os("ANTHROPIC_API_KEY").is_some(),
+    ))
+    .collect();
 
   print!("{}", Diagnosis(&checks));
 

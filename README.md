@@ -72,6 +72,7 @@ base with those additions (language toolchains, private CAs, other tools). Witho
 
 `compostbin doctor` checks whether a session would work:
 
+- whether the manifest sets retired keys
 - what runs containers, and whether its image store can be read
 - whether the base image has been built
 - whether the session can authenticate
@@ -82,6 +83,11 @@ base with those additions (language toolchains, private CAs, other tools). Witho
 - whether a running container was started with the mounts the manifest now
   declares
 - the host commands the guest is allowed to run
+
+`compostbin doctor --fix` repairs fixable failures, not warnings. For now
+that is retired keys: `[claude] keychain` and `seed_from_keychain` move to
+`~/.config/compostbin/config.toml` as `[claude] keychain`. Rewriting a file
+drops its comments.
 
 ### run
 

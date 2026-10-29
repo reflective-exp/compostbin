@@ -189,7 +189,7 @@ pub struct UserClaudeConfig {
   pub shared: Vec<String>,
 }
 
-fn local_path(manifest_path: &Path) -> PathBuf {
+pub(crate) fn local_path(manifest_path: &Path) -> PathBuf {
   manifest_path.with_extension("local.toml")
 }
 

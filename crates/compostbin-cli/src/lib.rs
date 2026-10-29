@@ -40,7 +40,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
       Ok(0)
     }
 
-    Command::Doctor { config } => report::report_diagnosis(&config.load(resolver, &project_dir)?),
+    Command::Doctor { config, fix } => report::report_diagnosis(&config, resolver, &project_dir, fix),
 
     Command::Init => {
       let manifest_path = project_dir.join(MANIFEST_RELATIVE_PATH);

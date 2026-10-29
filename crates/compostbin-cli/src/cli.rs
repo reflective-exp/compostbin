@@ -48,6 +48,9 @@ pub enum Command {
   Doctor {
     #[command(flatten)]
     config: Config,
+    /// Repair fixable failures: retired configuration keys
+    #[arg(long)]
+    fix: bool,
   },
   /// Write a manifest with defaults
   Init,
@@ -218,6 +221,24 @@ mod tests {
       parse(&["compostbin", "ls"]),
       Command::Ls {
         config: Config::default()
+      }
+    );
+  }
+
+  #[test]
+  fn parses_doctor_with_fix() {
+    assert_eq!(
+      parse(&["compostbin", "doctor"]),
+      Command::Doctor {
+        config: Config::default(),
+        fix: false,
+      }
+    );
+    assert_eq!(
+      parse(&["compostbin", "doctor", "--fix"]),
+      Command::Doctor {
+        config: Config::default(),
+        fix: true,
       }
     );
   }

@@ -1,3 +1,4 @@
+pub mod config;
 mod engine;
 mod host;
 mod mounts;

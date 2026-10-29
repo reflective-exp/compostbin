@@ -8,6 +8,9 @@
   - Copy only the Claude login between the Keychain and the session, leaving
     each side's MCP tokens.
 - `doctor` fails credentials that hold no Claude login.
+- `doctor` fails a manifest setting a retired key, instead of erroring before
+  any check. `doctor --fix` moves `[claude] keychain` and `seed_from_keychain`
+  to `~/.config/compostbin/config.toml`.
 - `init` writes only `[project] image` and `name`.
 - `.config/compostbin.local.toml` takes every manifest key, not only
   `[container]` and `[[paths]]`.
