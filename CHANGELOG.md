@@ -5,6 +5,9 @@
 - Add `[claude] keychain` to `~/.config/compostbin/config.toml`, defaulted to
   `false`. With `keychain`, save the session's Claude token back to the Keychain
   when a login or refresh in the container leaves it newer than the Keychain's.
+  - Copy only the Claude login between the Keychain and the session, leaving
+    each side's MCP tokens.
+- `doctor` fails credentials that hold no Claude login.
 - `init` writes only `[project] image` and `name`.
 - `.config/compostbin.local.toml` takes every manifest key, not only
   `[container]` and `[[paths]]`.

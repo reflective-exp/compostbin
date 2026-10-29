@@ -73,8 +73,10 @@ mod tests {
   use std::path::Path;
   use tempfile::TempDir;
 
+  const LOGIN: &str = r#"{"claudeAiOauth":{"expiresAt":1000}}"#;
+
   fn in_keychain() -> FakeStore {
-    FakeStore::from("token")
+    FakeStore::from(LOGIN)
   }
 
   fn session(home: &TempDir, roots: &str) -> Session {
@@ -330,7 +332,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");
     std::fs::create_dir_all(base.join("claude-home")).expect("create claude home");
-    std::fs::write(base.join("claude-home").join(CREDENTIALS_FILE_NAME), "token").expect("write token");
+    std::fs::write(base.join("claude-home").join(CREDENTIALS_FILE_NAME), LOGIN).expect("write token");
 
     let checks = diagnose(
       &session(&home, &quoted(&base, "workspace")),
@@ -340,6 +342,27 @@ mod tests {
     );
 
     assert_eq!(check(&checks, "credentials").status, Status::Ok);
+  }
+
+  #[test]
+  fn fails_when_claude_home_and_the_keychain_are_logged_out() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+    std::fs::create_dir_all(base.join("claude-home")).expect("create claude home");
+    std::fs::write(
+      base.join("claude-home").join(CREDENTIALS_FILE_NAME),
+      r#"{"mcpOAuth":{}}"#,
+    )
+    .expect("write credentials");
+
+    let checks = diagnose(
+      &session(&home, &quoted(&base, "workspace")),
+      &RecordingEngine::with_images(&["compostbin/base:latest"]),
+      &FakeStore::from(r#"{"mcpOAuth":{}}"#),
+      false,
+    );
+
+    assert_eq!(check(&checks, "credentials").status, Status::Fail);
   }
 
   #[test]

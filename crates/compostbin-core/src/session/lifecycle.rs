@@ -2,7 +2,7 @@ use crate::error::{At, SessionError};
 use crate::host::{self, PortEvent};
 use crate::image;
 use crate::manifest::TomlFile;
-use crate::session::credentials::{self, CredentialStore};
+use crate::session::credentials::{self, CredentialStore, CredentialsFile};
 use crate::session::record::Record;
 use crate::session::{Notice, Session, briefing, settings};
 use compostbin_engine::engine::Engine;
@@ -112,8 +112,13 @@ impl Session {
     let home = self.claude_home();
     std::fs::create_dir_all(&home).at(&home)?;
 
-    if self.user.claude.keychain && credentials::seed(&home, credentials)? {
-      notify(Notice::NotInKeychain);
+    if self.user.claude.keychain {
+      let file = CredentialsFile::from(home.as_path());
+      credentials::sync(credentials, &file)?;
+
+      if !credentials::has_login(&file)? {
+        notify(Notice::NotInKeychain);
+      }
     }
 
     let extra: Vec<String> = self
@@ -281,6 +286,27 @@ mod tests {
       .expect("run should succeed");
 
     assert_eq!(store.kept().as_deref(), Some(newer));
+  }
+
+  #[test]
+  fn run_logs_a_logged_out_session_back_in_from_the_keychain() {
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
+    session.user.claude.keychain = true;
+    let path = session
+      .claude_home()
+      .join(credentials::CREDENTIALS_FILE_NAME);
+    std::fs::create_dir_all(session.claude_home()).expect("create claude home");
+    std::fs::write(&path, r#"{"mcpOAuth":{}}"#).expect("write logged-out credentials");
+    let store = FakeStore::from(r#"{"claudeAiOauth":{"expiresAt":1000}}"#);
+
+    session
+      .run(&RecordingEngine::new(), &store, &root_shell(), &quiet)
+      .expect("run should succeed");
+
+    assert_eq!(
+      std::fs::read_to_string(&path).expect("credentials should exist"),
+      r#"{"claudeAiOauth":{"expiresAt":1000},"mcpOAuth":{}}"#
+    );
   }
 
   #[test]

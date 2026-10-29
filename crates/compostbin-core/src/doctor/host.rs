@@ -1,7 +1,7 @@
 use super::{Check, Status, check, listed};
 use crate::host::served_commands;
 use crate::session::Session;
-use crate::session::credentials::{CREDENTIALS_FILE_NAME, CredentialStore};
+use crate::session::credentials::{self, CredentialStore, CredentialsFile};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
@@ -72,10 +72,10 @@ fn answering(upstream: SocketAddr) -> bool {
 }
 
 pub fn credentials(session: &Session, source: &impl CredentialStore, api_key_present: bool) -> Check {
-  let seeded = session.claude_home().join(CREDENTIALS_FILE_NAME);
+  let seeded = CredentialsFile::from(session.claude_home().as_path());
 
-  if seeded.exists() {
-    return check("credentials", Status::Ok, seeded.display().to_string());
+  if credentials::has_login(&seeded).unwrap_or(false) {
+    return check("credentials", Status::Ok, seeded.name());
   }
 
   if !session.user.claude.keychain {
@@ -89,19 +89,15 @@ pub fn credentials(session: &Session, source: &impl CredentialStore, api_key_pre
     );
   }
 
-  match source.read() {
-    Ok(Some(_)) => check(
-      "credentials",
-      Status::Ok,
-      format!("{} in the Keychain", source.service()),
-    ),
-    Ok(None) | Err(_) if api_key_present => check("credentials", Status::Ok, "ANTHROPIC_API_KEY is set"),
-    Ok(None) => check(
+  match credentials::has_login(source) {
+    Ok(true) => check("credentials", Status::Ok, format!("{} in the Keychain", source.name())),
+    Ok(false) | Err(_) if api_key_present => check("credentials", Status::Ok, "ANTHROPIC_API_KEY is set"),
+    Ok(false) => check(
       "credentials",
       Status::Fail,
       format!(
-        "no {} entry and no ANTHROPIC_API_KEY; the session cannot authenticate",
-        source.service()
+        "no login in {} and no ANTHROPIC_API_KEY; the session cannot authenticate",
+        source.name()
       ),
     ),
     Err(error) => check("credentials", Status::Fail, error.to_string()),

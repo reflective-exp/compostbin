@@ -13,7 +13,7 @@ fn notify(keychain: &Keychain, notice: Notice) {
   match notice {
     Notice::NotInKeychain => eprintln!(
       "no \"{}\" entry in the login Keychain; the session will need ANTHROPIC_API_KEY or an interactive login",
-      keychain.service()
+      keychain.name()
     ),
     Notice::Shared(names) => eprintln!("shared from the host's Claude home: {}", names.join(", ")),
     Notice::Port(event) => eprintln!("compostbin: {event}"),

@@ -28,11 +28,12 @@ keychain = true
 shared   = ["commands"]
 ```
 
-- `keychain` (`false`): signs the session in with the Claude Code token from
-  the host's login Keychain, and saves the session's token back whenever it
-  outlasts the Keychain's, so a login or refresh in the container reaches the
-  host. Otherwise, set `ANTHROPIC_API_KEY` or log in interactively once; the
-  login persists across sessions with the container's Claude home.
+- `keychain` (`false`): copies the Claude Code login between the host's login
+  Keychain and the session, toward whichever holds an older login or none, so a
+  session starts signed in and a login or refresh in the container reaches the
+  host. MCP tokens stay where they were made. Otherwise, set
+  `ANTHROPIC_API_KEY` or log in interactively once; the login persists across
+  sessions with the container's Claude home.
 - `shared` (`[]`): merges into the project's `[claude] shared`.
 
 Anything `settings.json` refers to by path must be reachable in the guest: the
