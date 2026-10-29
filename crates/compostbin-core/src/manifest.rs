@@ -12,10 +12,13 @@ pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
 pub const PROFILES_DIR: &str = "~/.config/compostbin/profiles";
 pub const USER_CONFIG_PATH: &str = "~/.config/compostbin/config.toml";
 
+/// Renders only what differs from the defaults, except `[project] image`.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Manifest {
+  #[serde(skip_serializing_if = "ClaudeConfig::is_default")]
   pub claude: ClaudeConfig,
+  #[serde(skip_serializing_if = "ContainerConfig::is_default")]
   container: ContainerConfig,
   #[serde(skip_serializing_if = "HostConfig::is_empty")]
   pub host: HostConfig,
@@ -29,7 +32,12 @@ pub struct Manifest {
   )]
   pub paths: Vec<PathEntry>,
   pub project: ProjectConfig,
+  #[serde(skip_serializing_if = "WorkspaceConfig::is_default")]
   pub workspace: WorkspaceConfig,
+}
+
+fn is_true(value: &bool) -> bool {
+  *value
 }
 
 impl Manifest {
@@ -187,12 +195,13 @@ fn local_path(manifest_path: &Path) -> PathBuf {
   manifest_path.with_extension("local.toml")
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClaudeConfig {
   /// Overrides the per-session default under `SESSIONS_DIR`.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub home: Option<String>,
+  #[serde(skip_serializing_if = "is_true")]
   pub keychain: bool,
   /// `~/.claude` entries beyond the host settings every session already gets.
   #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -209,11 +218,20 @@ impl Default for ClaudeConfig {
   }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+impl ClaudeConfig {
+  fn is_default(&self) -> bool {
+    *self == Self::default()
+  }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ContainerConfig {
+  #[serde(skip_serializing_if = "ContainerConfig::is_default_cpus")]
   pub cpus: u32,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
   pub env: Vec<String>,
+  #[serde(skip_serializing_if = "ContainerConfig::is_default_memory")]
   pub memory: Memory,
   /// Run as `claude` in the project directory when the container is created.
   #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -228,6 +246,20 @@ impl Default for ContainerConfig {
       memory: DEFAULT_CONTAINER_MEMORY,
       setup: Vec::new(),
     }
+  }
+}
+
+impl ContainerConfig {
+  fn is_default(&self) -> bool {
+    *self == Self::default()
+  }
+
+  fn is_default_cpus(cpus: &u32) -> bool {
+    *cpus == DEFAULT_CONTAINER_CPUS
+  }
+
+  fn is_default_memory(memory: &Memory) -> bool {
+    *memory == DEFAULT_CONTAINER_MEMORY
   }
 }
 
@@ -328,10 +360,12 @@ impl std::fmt::Display for Memory {
 pub struct HostConfig {
   #[serde(skip_serializing_if = "std::ops::Not::not")]
   pub clipboard: bool,
+  #[serde(skip_serializing_if = "HostConfig::is_default_concurrency")]
   pub concurrency: usize,
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub ports: Vec<u16>,
   /// Must stay last: TOML cannot express a bare value after a table.
+  #[serde(skip_serializing_if = "BTreeMap::is_empty")]
   pub commands: BTreeMap<String, HostCommand>,
 }
 
@@ -358,29 +392,36 @@ impl HostConfig {
   pub fn is_empty(&self) -> bool {
     !self.has_commands() && !self.has_ports()
   }
+
+  fn is_default_concurrency(concurrency: &usize) -> bool {
+    *concurrency == DEFAULT_HOST_CONCURRENCY
+  }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostCommand {
-  #[serde(default)]
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub arguments: bool,
   pub argv: Vec<String>,
   /// `--config` also refuses `--config=x`, and `-Z` also refuses `-Zx`.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub deny: Vec<String>,
   /// A pty merges stdout and stderr.
-  #[serde(default)]
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub tty: bool,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ImageConfig {
+  #[serde(skip_serializing_if = "Vec::is_empty")]
   pub packages: Vec<String>,
   /// Run as the `claude` user.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
   pub run: Vec<String>,
   /// Run as root, after `packages` and before `run`.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
   pub run_as_root: Vec<String>,
 }
 
@@ -395,7 +436,7 @@ impl ImageConfig {
 pub struct PathEntry {
   #[serde(skip)]
   pub local: bool,
-  #[serde(default)]
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub readonly: bool,
   pub source: String,
   /// A guest path; defaults to `/workspace/<basename>`.
@@ -443,6 +484,12 @@ impl Default for ProjectConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct WorkspaceConfig {
   pub roots: Vec<String>,
+}
+
+impl WorkspaceConfig {
+  fn is_default(&self) -> bool {
+    self.roots.is_empty()
+  }
 }
 
 #[cfg(test)]
@@ -538,13 +585,10 @@ run_as_root = ["install -d -o claude /opt/vendor"]
 "#;
 
   const EXPECTED_RENDERING: &str = r#"[claude]
-keychain = true
 shared = ["widgets"]
 
 [container]
-cpus = 4
 env = ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
-memory = "8G"
 setup = ["./bin/setup"]
 
 [image]
@@ -557,7 +601,6 @@ readonly = true
 source = "~/.cargo/registry"
 
 [[paths]]
-readonly = false
 source = "~/code/vendor/libfoo"
 target = "~/code/vendor/libfoo"
 
@@ -613,7 +656,7 @@ tty = true
 
     let rendered = toml::to_string(&manifest).expect("should serialize");
     assert!(
-      rendered.contains("[host]\nconcurrency = 8\nports = [7001, 7002]\n"),
+      rendered.starts_with("[host]\nports = [7001, 7002]\n\n[project]"),
       "a table declaring only ports must still render: {rendered}"
     );
   }
@@ -938,6 +981,28 @@ tty = true
       !rendered.contains("shared"),
       "the host's own settings are shared without being named: {rendered}"
     );
+  }
+
+  #[test]
+  fn renders_only_the_image_by_default() {
+    assert_eq!(
+      toml::to_string(&Manifest::default()).expect("manifest should serialize"),
+      "[project]\nimage = \"compostbin/base:latest\"\n"
+    );
+  }
+
+  #[test]
+  fn renders_a_value_that_differs_from_its_default() {
+    let manifest: Manifest = toml::from_str(
+      "[claude]\nkeychain = false\n[container]\ncpus = 2\nmemory = \"4G\"\n[host]\nclipboard = true\nconcurrency = 2\n",
+    )
+    .expect("manifest should parse");
+
+    let rendered = toml::to_string(&manifest).expect("manifest should serialize");
+
+    for line in ["keychain = false", "cpus = 2", "memory = \"4G\"", "concurrency = 2"] {
+      assert!(rendered.contains(line), "{line} should survive: {rendered}");
+    }
   }
 
   #[test]

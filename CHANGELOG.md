@@ -4,6 +4,8 @@
 
 - With `keychain`, save the session's Claude token back to the Keychain when a
   login or refresh in the container leaves it newer than the Keychain's.
+- `init` writes only `[project] image` and `name`. Rewriting the manifest, as
+  `add` does, drops every key set to its default.
 
 ### Breaking
 

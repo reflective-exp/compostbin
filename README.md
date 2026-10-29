@@ -49,8 +49,9 @@ It also creates an empty `~/.config/compostbin/profiles` for
 
 ### init
 
-`compostbin init` writes a default `.config/compostbin.toml`, meant to be checked
-in; see [Configuration](#configuration). Uncommitted settings go in
+`compostbin init` writes a `.config/compostbin.toml` naming the project and its
+image, meant to be checked in; every other key takes its default. See
+[Configuration](#configuration). Uncommitted settings go in
 `.config/compostbin.local.toml`; see [Local overrides](docs/manifest/local.md).
 
 ### build
