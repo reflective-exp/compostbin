@@ -78,14 +78,14 @@ pub fn credentials(session: &Session, source: &impl CredentialSource, api_key_pr
     return check("credentials", Status::Ok, seeded.display().to_string());
   }
 
-  if !session.manifest.claude.seed_from_keychain {
+  if !session.manifest.claude.keychain {
     if api_key_present {
       return check("credentials", Status::Ok, "ANTHROPIC_API_KEY is set");
     }
     return check(
       "credentials",
       Status::Fail,
-      "seed_from_keychain is off and no ANTHROPIC_API_KEY; the session cannot authenticate",
+      "keychain is off and no ANTHROPIC_API_KEY; the session cannot authenticate",
     );
   }
 

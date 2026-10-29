@@ -136,6 +136,7 @@ dependencies = [
  "compostbin-engine",
  "libc",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "toml",

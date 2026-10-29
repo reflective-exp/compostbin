@@ -94,7 +94,7 @@ impl Session {
   pub fn run(
     &self,
     engine: &impl Engine,
-    credentials: &impl CredentialSource,
+    credentials: &(impl CredentialSource + Sync),
     process: &Process,
     notify: &(dyn Fn(Notice) + Sync),
   ) -> Result<i32, SessionError> {
@@ -104,7 +104,7 @@ impl Session {
       return Ok(engine.exec(&self.process_spec(process))?);
     }
 
-    self.launch(engine, process, notify)
+    self.launch(engine, credentials, process, notify)
   }
 
   /// Claude's home is created even when empty, because the guest cannot create a missing mount source.
@@ -112,7 +112,7 @@ impl Session {
     let home = self.claude_home();
     std::fs::create_dir_all(&home).at(&home)?;
 
-    if credentials::seed(&home, self.manifest.claude.seed_from_keychain, credentials)? {
+    if credentials::seed(&home, self.manifest.claude.keychain, credentials)? {
       notify(Notice::NotInKeychain);
     }
 
@@ -136,10 +136,12 @@ impl Session {
     Ok(())
   }
 
-  /// The agent and relay are threads because the VM the guest connects to dies with this process.
+  /// The agent, relay and credential watcher are threads because the VM the guest connects to dies
+  /// with this process.
   fn launch(
     &self,
     engine: &impl Engine,
+    credentials: &(impl CredentialSource + Sync),
     process: &Process,
     notify: &(dyn Fn(Notice) + Sync),
   ) -> Result<i32, SessionError> {
@@ -172,6 +174,10 @@ impl Session {
 
       if !bound.is_empty() {
         scope.spawn(|| host::relay(&bound, &stop, &log_port));
+      }
+
+      if self.manifest.claude.keychain {
+        scope.spawn(|| credentials::watch(&self.claude_home(), credentials, &stop));
       }
 
       let code = match self.set_up(engine, process, notify) {

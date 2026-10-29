@@ -79,7 +79,7 @@ fn init_writes_a_manifest_named_after_the_directory() {
   assert_eq!(
     std::fs::read_to_string(project_dir.join(".config/compostbin.toml")).expect("manifest should exist"),
     r#"[claude]
-seed_from_keychain = true
+keychain = true
 
 [container]
 cpus = 4

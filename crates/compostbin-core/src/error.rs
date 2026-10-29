@@ -12,6 +12,7 @@ use std::path::PathBuf;
 pub enum CredentialError {
   Io(PathError),
   Keychain(String),
+  KeychainSave(String),
   Security(io::Error),
 }
 
@@ -20,6 +21,7 @@ impl fmt::Display for CredentialError {
     match self {
       Self::Io(error) => error.fmt(formatter),
       Self::Keychain(message) => write!(formatter, "reading the login Keychain: {message}"),
+      Self::KeychainSave(message) => write!(formatter, "saving to the login Keychain: {message}"),
       Self::Security(error) => write!(formatter, "running `security`: {error}"),
     }
   }
@@ -29,7 +31,7 @@ impl Error for CredentialError {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match self {
       Self::Io(error) => error.source(),
-      Self::Keychain(_) => None,
+      Self::Keychain(_) | Self::KeychainSave(_) => None,
       Self::Security(error) => Some(error),
     }
   }

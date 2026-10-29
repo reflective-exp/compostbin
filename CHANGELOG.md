@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- With `keychain`, save the session's Claude token back to the Keychain when a
+  login or refresh in the container leaves it newer than the Keychain's.
+
+### Breaking
+
+- Rename `[claude] seed_from_keychain` to `keychain`. The old key is now an
+  error.
+
 ## v0.18.0
 
 - Honor the host's `CLAUDE_CONFIG_DIR`: share settings from it, install skills

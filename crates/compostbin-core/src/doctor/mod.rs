@@ -304,7 +304,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");
     let mut session = session(&home, &quoted(&base, "workspace"));
-    session.manifest.claude.seed_from_keychain = false;
+    session.manifest.claude.keychain = false;
 
     let checks = diagnose(
       &session,
@@ -317,7 +317,7 @@ mod tests {
     assert!(
       check(&checks, "credentials")
         .detail
-        .contains("seed_from_keychain"),
+        .contains("keychain is off"),
       "detail should name the setting: {:?}",
       check(&checks, "credentials")
     );

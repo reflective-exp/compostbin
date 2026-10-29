@@ -70,7 +70,7 @@ impl Project {
       .try_into()
       .expect("the manifest body should be a manifest");
 
-    manifest.claude.seed_from_keychain = false;
+    manifest.claude.keychain = false;
     manifest.project.name = Some(self.name.clone());
 
     if !declares_cpus {

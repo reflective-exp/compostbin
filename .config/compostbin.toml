@@ -1,6 +1,3 @@
-[claude]
-seed_from_keychain = true
-
 [container]
 cpus = 4
 env = []

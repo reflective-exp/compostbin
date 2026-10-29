@@ -193,7 +193,7 @@ pub struct ClaudeConfig {
   /// Overrides the per-session default under `SESSIONS_DIR`.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub home: Option<String>,
-  pub seed_from_keychain: bool,
+  pub keychain: bool,
   /// `~/.claude` entries beyond the host settings every session already gets.
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub shared: Vec<String>,
@@ -203,7 +203,7 @@ impl Default for ClaudeConfig {
   fn default() -> Self {
     Self {
       home: None,
-      seed_from_keychain: true,
+      keychain: true,
       shared: Vec::new(),
     }
   }
@@ -453,7 +453,7 @@ impl Manifest {
     Self {
       claude: ClaudeConfig {
         home: Some("~/home".to_string()),
-        seed_from_keychain: true,
+        keychain: true,
         shared: vec!["agents".to_string()],
       },
       container: ContainerConfig {
@@ -528,8 +528,8 @@ source = "~/code/vendor/libfoo"
 target = "~/code/vendor/libfoo"
 
 [claude]
-seed_from_keychain = true
-shared             = ["widgets"]
+keychain = true
+shared   = ["widgets"]
 
 [image]
 packages    = ["jq"]
@@ -538,7 +538,7 @@ run_as_root = ["install -d -o claude /opt/vendor"]
 "#;
 
   const EXPECTED_RENDERING: &str = r#"[claude]
-seed_from_keychain = true
+keychain = true
 shared = ["widgets"]
 
 [container]
@@ -909,7 +909,7 @@ tty = true
     assert_eq!(manifest.paths.len(), 2);
 
     assert_eq!(manifest.claude.home, None);
-    assert!(manifest.claude.seed_from_keychain);
+    assert!(manifest.claude.keychain);
     assert_eq!(manifest.claude.shared, ["widgets"]);
 
     assert_eq!(manifest.image.packages, ["jq"]);
@@ -927,7 +927,7 @@ tty = true
   #[test]
   fn user_config_refuses_project_settings() {
     assert!(toml::from_str::<UserConfig>("[container]\ncpus = 8\n").is_err());
-    assert!(toml::from_str::<UserConfig>("[claude]\nseed_from_keychain = false\n").is_err());
+    assert!(toml::from_str::<UserConfig>("[claude]\nkeychain = false\n").is_err());
   }
 
   #[test]
@@ -1032,7 +1032,7 @@ source = "~/a-first"
       manifest.claude.home, None,
       "an unset home is what makes the session's home per project"
     );
-    assert!(manifest.claude.seed_from_keychain);
+    assert!(manifest.claude.keychain);
     assert_eq!(
       manifest.claude.shared,
       [] as [String; 0],

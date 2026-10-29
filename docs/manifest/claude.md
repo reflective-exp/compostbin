@@ -2,13 +2,15 @@
 
 ``` toml
 [claude]
-seed_from_keychain = true
-shared             = ["commands"]
+keychain = true
+shared   = ["commands"]
 ```
 
-- `seed_from_keychain` (`true`): signs the session in with the Claude Code token
-  from the host's login Keychain. Otherwise, set `ANTHROPIC_API_KEY` or log in
-  interactively once; the login persists with the Claude home.
+- `keychain` (`true`): signs the session in with the Claude Code token from the
+  host's login Keychain, and saves the session's token back whenever it
+  outlasts the Keychain's, so a login or refresh in the container reaches the
+  host. Otherwise, set `ANTHROPIC_API_KEY` or log in interactively once; the
+  login persists across sessions with the container's Claude home.
 - `shared` (`[]`): `~/.claude` entries copied from the host beyond `CLAUDE.md`,
   `agents`, `settings.json` and `skills`, which every session gets on every
   run. Each names a file or directory directly under `~/.claude`; links are
