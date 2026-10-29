@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.19.0
+
 - Add `[claude] keychain` to `~/.config/compostbin/config.toml`, defaulted to
   `false`. With `keychain`, save the session's Claude token back to the Keychain
   when a login or refresh in the container leaves it newer than the Keychain's.
