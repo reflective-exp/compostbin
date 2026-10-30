@@ -43,6 +43,7 @@ pub fn configure(
   let arguments = spec.arguments.clone();
   let environment = environment(&spec.env);
   let working_directory = working_directory(spec.workdir.as_deref());
+  let user = spec.user.clone();
   let mounts: Vec<Mount> = spec
     .mounts
     .iter()
@@ -59,6 +60,9 @@ pub fn configure(
       .environment_variables
       .extend(environment);
     configuration.process.working_directory = working_directory;
+    if let Some(user) = user {
+      configuration.process.user = super::build::user(Some(&user));
+    }
     configuration.interfaces = vec![nat::interface(&name)?];
     configuration.dns = Some(nat::dns());
     configuration.mounts.extend(mounts);
@@ -127,22 +131,35 @@ mod tests {
         cpus: 4,
         memory_in_bytes: 8 << 30,
       },
+      user: None,
       workdir: Some(PathBuf::from("/workspace")),
     }
   }
 
-  fn configured() -> linux_container::Configuration {
+  fn configured(spec: &RunSpec) -> linux_container::Configuration {
     let mut configuration = linux_container::Configuration::default();
     configuration.process.environment_variables = vec!["PATH=/usr/bin".to_string()];
+    configuration.process.user = super::super::build::user(Some("claude"));
 
-    configure(&run_spec())(&mut configuration).unwrap();
+    configure(spec)(&mut configuration).unwrap();
 
     configuration
   }
 
   #[test]
+  fn runs_the_main_process_as_the_images_user_unless_the_spec_names_one() {
+    assert_eq!(configured(&run_spec()).process.user.username, "claude");
+
+    let as_root = RunSpec {
+      user: Some("root".to_string()),
+      ..run_spec()
+    };
+    assert_eq!(configured(&as_root).process.user.username, "root");
+  }
+
+  #[test]
   fn boots_a_session_onto_its_own_nat_address() {
-    let configuration = configured();
+    let configuration = configured(&run_spec());
 
     assert_eq!(configuration.interfaces, [nat::interface("session-one").unwrap()]);
     assert_eq!(configuration.dns, Some(nat::dns()));
@@ -152,14 +169,14 @@ mod tests {
   #[test]
   fn adds_the_sessions_variables_after_the_images() {
     assert_eq!(
-      configured().process.environment_variables,
+      configured(&run_spec()).process.environment_variables,
       ["PATH=/usr/bin", "IS_SANDBOX=1"]
     );
   }
 
   #[test]
   fn adds_declared_mounts_after_the_standard_ones() {
-    let configuration = configured();
+    let configuration = configured(&run_spec());
     let standard = LinuxContainer::default_mounts();
     let (defaults, declared) = configuration.mounts.split_at(standard.len());
 
@@ -174,7 +191,7 @@ mod tests {
   fn sizes_the_vm_to_hold_the_whole_container() {
     let resources = run_spec().resources;
 
-    assert_eq!(configured().cpus, 4);
+    assert_eq!(configured(&run_spec()).cpus, 4);
     assert_eq!(vm(resources).cpus, 5);
     assert_eq!(
       vm(resources).memory_in_bytes,

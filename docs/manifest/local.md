@@ -19,5 +19,7 @@ source = "~/code/vendor/libfoo"
   Tables merge key by key, so `cpus` above leaves the manifest's `memory` alone.
 - `[host.commands.<name>]`: replaces the parent manifest's command of that name,
   without merging sub-keys.
+- `[host.sockets.<name>]`: merges key by key like any table, so it can set
+  just this machine's `source`, keeping the manifest's `target` and `mode`.
 - `[[paths]]`: added to the manifest's. `compostbin add --local` writes here.
   See [Mounts](mounts.md).

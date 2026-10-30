@@ -127,6 +127,8 @@ pub struct RunSpec {
   pub mounts: Vec<Mount>,
   pub name: String,
   pub resources: Resources,
+  /// The main process's; `None` is the image's default user.
+  pub user: Option<String>,
   pub workdir: Option<PathBuf>,
 }
 

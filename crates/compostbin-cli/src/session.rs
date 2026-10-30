@@ -1,6 +1,6 @@
 use crate::engine::select;
 use compostbin_core::session::credentials::{CredentialStore, Keychain};
-use compostbin_core::session::{Notice, Process, Session};
+use compostbin_core::session::{Notice, Process, SOCKETS_READY_TIMEOUT, Session};
 use compostbin_core::workspace::paths::CLAUDE_CONFIG_DIR;
 use std::error::Error;
 use std::io::IsTerminal;
@@ -18,6 +18,15 @@ fn notify(keychain: &Keychain, notice: Notice) {
     Notice::Shared(names) => eprintln!("shared from the host's Claude home: {}", names.join(", ")),
     Notice::Port(event) => eprintln!("compostbin: {event}"),
     Notice::Unpacking(image) => eprintln!("compostbin: unpacking {image}"),
+    Notice::SocketsNotReady(targets) => eprintln!(
+      "compostbin: sockets not ready after {}s: {}",
+      SOCKETS_READY_TIMEOUT.as_secs(),
+      targets
+        .iter()
+        .map(|target| target.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+    ),
     Notice::SetupFailed { line, code } => eprintln!("compostbin: setup `{line}` exited {code}"),
     Notice::AgentStopped(error) => eprintln!("compostbin: the host command agent stopped: {error}"),
     Notice::CleanupFailed(error) => eprintln!("compostbin: could not clean up after the session: {error}"),

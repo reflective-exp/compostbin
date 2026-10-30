@@ -1,8 +1,9 @@
 //! Written at creation because not every engine can report what a running container was created with.
 
-use crate::manifest::TomlFile;
+use crate::manifest::{HostConfig, HostSocket, TomlFile};
 use compostbin_engine::model::Mount;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 pub const RECORD_FILE: &str = "mounts.toml";
@@ -42,20 +43,35 @@ impl fmt::Display for RecordedMount {
 pub struct Record {
   pub mounts: Vec<RecordedMount>,
   pub ports: Vec<u16>,
+  /// As declared, before `~` is expanded.
+  pub sockets: BTreeMap<String, HostSocket>,
+}
+
+/// A socket as `doctor` names it.
+fn describe(name: &str, socket: &HostSocket) -> String {
+  format!(
+    "{} → {}, mode {}",
+    socket.target(name).display(),
+    socket.source,
+    socket.mode
+  )
 }
 
 impl TomlFile for Record {}
 
 impl Record {
-  pub fn of(mounts: &[Mount], ports: &[u16]) -> Self {
+  pub fn of(mounts: &[Mount], host: &HostConfig) -> Self {
     Self {
       mounts: mounts.iter().map(RecordedMount::from).collect(),
-      ports: ports.to_vec(),
+      ports: host.ports.clone(),
+      sockets: host.sockets.clone(),
     }
   }
 
   /// Mounts match by guest path, so a moved source is a change rather than a removal and an add.
-  pub fn drift(&self, wanted: &[Mount], ports: &[u16]) -> Drift {
+  /// Sockets match by name, for the same reason.
+  pub fn drift(&self, wanted: &[Mount], host: &HostConfig) -> Drift {
+    let ports = &host.ports;
     let mut drift = Drift {
       added_ports: ports
         .iter()
@@ -70,7 +86,26 @@ impl Record {
         .collect(),
       ..Drift::default()
     };
-    let wanted = Self::of(wanted, ports).mounts;
+
+    for (name, socket) in &host.sockets {
+      match self.sockets.get(name) {
+        None => drift.added_sockets.push(describe(name, socket)),
+        Some(recorded) if recorded != socket => drift.changed_sockets.push(format!(
+          "socket `{name}` is {} in the container, not {}",
+          describe(name, recorded),
+          describe(name, socket)
+        )),
+        Some(_) => {}
+      }
+    }
+    drift.removed_sockets = self
+      .sockets
+      .iter()
+      .filter(|(name, _)| !host.sockets.contains_key(*name))
+      .map(|(name, socket)| describe(name, socket))
+      .collect();
+
+    let wanted = Self::of(wanted, host).mounts;
 
     for mount in &wanted {
       match self
@@ -103,6 +138,10 @@ pub struct Drift {
   pub removed: Vec<String>,
   pub added_ports: Vec<u16>,
   pub removed_ports: Vec<u16>,
+  /// Sockets as `describe` names them.
+  pub added_sockets: Vec<String>,
+  pub removed_sockets: Vec<String>,
+  pub changed_sockets: Vec<String>,
 }
 
 impl Drift {
@@ -112,6 +151,9 @@ impl Drift {
       && self.removed.is_empty()
       && self.added_ports.is_empty()
       && self.removed_ports.is_empty()
+      && self.added_sockets.is_empty()
+      && self.removed_sockets.is_empty()
+      && self.changed_sockets.is_empty()
   }
 
   pub fn lines(&self) -> Vec<String> {
@@ -141,8 +183,27 @@ impl Drift {
         .iter()
         .map(move |port| format!("localhost:{port} — {reason}"))
     });
+    let sockets = [
+      (
+        "declared but not forwarded, so missing in the session",
+        &self.added_sockets,
+      ),
+      (
+        "forwarded but no longer declared, so still reachable",
+        &self.removed_sockets,
+      ),
+    ];
+    let sockets = sockets.into_iter().flat_map(|(reason, sockets)| {
+      sockets
+        .iter()
+        .map(move |socket| format!("{socket} — {reason}"))
+    });
 
-    mounts.chain(ports).collect()
+    mounts
+      .chain(ports)
+      .chain(sockets)
+      .chain(self.changed_sockets.iter().cloned())
+      .collect()
   }
 }
 
@@ -159,13 +220,84 @@ mod tests {
     }
   }
 
+  fn ports(ports: &[u16]) -> HostConfig {
+    HostConfig {
+      ports: ports.to_vec(),
+      ..HostConfig::default()
+    }
+  }
+
+  fn sockets(sockets: &[(&str, &str)]) -> HostConfig {
+    HostConfig {
+      sockets: sockets
+        .iter()
+        .map(|(name, source)| (name.to_string(), HostSocket::new(*source)))
+        .collect(),
+      ..HostConfig::default()
+    }
+  }
+
   fn recorded(mounts: &[Mount]) -> Record {
-    Record::of(mounts, &[])
+    Record::of(mounts, &HostConfig::default())
+  }
+
+  #[test]
+  fn a_socket_declared_since_the_container_started_has_drifted() {
+    let drift =
+      Record::of(&[], &sockets(&[("a", "/a.sock")])).drift(&[], &sockets(&[("a", "/a.sock"), ("b", "/b.sock")]));
+
+    assert_eq!(drift.added_sockets, ["/run/compostbin/sockets/b → /b.sock, mode 0660"]);
+    assert_eq!(
+      drift.lines(),
+      ["/run/compostbin/sockets/b → /b.sock, mode 0660 — declared but not forwarded, so missing in the session"]
+    );
+  }
+
+  #[test]
+  fn a_socket_dropped_from_the_manifest_is_still_reachable() {
+    let drift = Record::of(&[], &sockets(&[("a", "/a.sock")])).drift(&[], &HostConfig::default());
+
+    assert_eq!(
+      drift.removed_sockets,
+      ["/run/compostbin/sockets/a → /a.sock, mode 0660"]
+    );
+    assert!(drift.lines()[0].contains("still reachable"), "{drift:?}");
+  }
+
+  #[test]
+  fn a_socket_changed_in_any_way_reads_as_one_change() {
+    let recorded = Record::of(&[], &sockets(&[("a", "/old.sock")]));
+    let mut moved = sockets(&[("a", "/old.sock")]);
+    moved.sockets.get_mut("a").expect("a socket").target = Some("/run/a.sock".into());
+
+    for wanted in [sockets(&[("a", "/new.sock")]), moved] {
+      let drift = recorded.drift(&[], &wanted);
+
+      assert!(
+        drift.added_sockets.is_empty() && drift.removed_sockets.is_empty(),
+        "{drift:?}"
+      );
+      assert_eq!(drift.changed_sockets.len(), 1, "{drift:?}");
+    }
+
+    assert_eq!(
+      recorded.drift(&[], &sockets(&[("a", "/new.sock")])).lines(),
+      [
+        "socket `a` is /run/compostbin/sockets/a → /old.sock, mode 0660 in the container, not /run/compostbin/sockets/a → /new.sock, mode 0660"
+      ]
+    );
+  }
+
+  #[test]
+  fn a_record_from_before_sockets_reads_as_none() {
+    let record: Record = toml::from_str("mounts = []\nports = [7001]\n").expect("an old record should parse");
+
+    assert!(record.drift(&[], &ports(&[7001])).is_empty());
   }
 
   #[test]
   fn a_port_declared_since_the_container_started_has_drifted() {
-    let drift = Record::of(&[], &[7001]).drift(&[], &[7001, 7002]);
+    let drift = Record::of(&[], &ports(&[7001])).drift(&[], &ports(&[7001, 7002]));
 
     assert_eq!(drift.added_ports, [7002]);
     assert_eq!(
@@ -176,7 +308,7 @@ mod tests {
 
   #[test]
   fn a_port_dropped_from_the_manifest_is_still_reachable() {
-    let drift = Record::of(&[], &[7001]).drift(&[], &[]);
+    let drift = Record::of(&[], &ports(&[7001])).drift(&[], &HostConfig::default());
 
     assert_eq!(drift.removed_ports, [7001]);
     assert!(drift.lines()[0].contains("still reachable"), "{drift:?}");
@@ -184,14 +316,22 @@ mod tests {
 
   #[test]
   fn a_recorded_port_that_is_still_declared_has_not_drifted() {
-    assert!(Record::of(&[], &[7001]).drift(&[], &[7001]).is_empty());
+    assert!(
+      Record::of(&[], &ports(&[7001]))
+        .drift(&[], &ports(&[7001]))
+        .is_empty()
+    );
   }
 
   #[test]
   fn an_unchanged_manifest_has_not_drifted() {
     let mounts = [mount("/host/a", "/workspace/a"), mount("/host/b", "/workspace/b")];
 
-    assert!(recorded(&mounts).drift(&mounts, &[]).is_empty());
+    assert!(
+      recorded(&mounts)
+        .drift(&mounts, &HostConfig::default())
+        .is_empty()
+    );
   }
 
   #[test]
@@ -199,7 +339,7 @@ mod tests {
     let started = [mount("/host/a", "/workspace/a")];
     let wanted = [mount("/host/a", "/workspace/a"), mount("/host/b", "/workspace/b")];
 
-    let drift = recorded(&started).drift(&wanted, &[]);
+    let drift = recorded(&started).drift(&wanted, &HostConfig::default());
 
     assert_eq!(drift.added, ["/host/b -> /workspace/b"]);
     assert!(drift.changed.is_empty() && drift.removed.is_empty(), "{drift:?}");
@@ -220,7 +360,7 @@ mod tests {
     ];
     let wanted = [mount("/host/a", "/workspace/a")];
 
-    let drift = recorded(&started).drift(&wanted, &[]);
+    let drift = recorded(&started).drift(&wanted, &HostConfig::default());
 
     assert_eq!(drift.removed, ["/host/secret -> /workspace/secret"]);
     assert!(
@@ -231,7 +371,8 @@ mod tests {
 
   #[test]
   fn a_mount_whose_source_moved_reads_as_one_change() {
-    let drift = recorded(&[mount("/host/old", "/workspace/a")]).drift(&[mount("/host/new", "/workspace/a")], &[]);
+    let drift = recorded(&[mount("/host/old", "/workspace/a")])
+      .drift(&[mount("/host/new", "/workspace/a")], &HostConfig::default());
 
     assert!(drift.added.is_empty() && drift.removed.is_empty(), "{drift:?}");
     assert_eq!(drift.changed.len(), 1);
@@ -250,7 +391,7 @@ mod tests {
     }];
     let wanted = [mount("/host/registry", "/workspace/registry")];
 
-    let drift = recorded(&started).drift(&wanted, &[]);
+    let drift = recorded(&started).drift(&wanted, &HostConfig::default());
 
     assert_eq!(
       drift.changed.len(),
@@ -266,13 +407,13 @@ mod tests {
     let path = temp.path().join("session").join(RECORD_FILE);
     let mounts = [mount("/host/a", "/workspace/a")];
 
-    Record::of(&mounts, &[])
+    Record::of(&mounts, &sockets(&[("mcp", "~/mcp.sock")]))
       .save(&path)
       .expect("save should succeed");
 
     assert_eq!(
       Record::load_if_present(&path).expect("load should succeed"),
-      Some(Record::of(&mounts, &[])),
+      Some(Record::of(&mounts, &sockets(&[("mcp", "~/mcp.sock")]))),
       "the record must survive the process that wrote it"
     );
   }

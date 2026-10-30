@@ -1,8 +1,9 @@
 use super::{Check, Status, check, listed};
-use crate::host::served_commands;
+use crate::host::{Forward, Upstream, served_commands};
 use crate::session::Session;
 use crate::session::credentials::{self, CredentialStore, CredentialsFile};
-use std::net::{SocketAddr, TcpStream};
+use std::net::TcpStream;
+use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 /// Loopback answers at once; this only bounds a service that accepts nothing.
@@ -41,34 +42,56 @@ pub fn ports(session: &Session) -> Check {
     return check("host ports", Status::Ok, "no [host] ports: nothing is forwarded");
   }
 
-  let probed: Vec<(u16, bool)> = session
+  forwarded("host ports", session, |forward| match forward.upstream {
+    Upstream::Tcp(_) => Some(forward.guest_address()),
+    Upstream::Unix(_) => None,
+  })
+}
+
+pub fn sockets(session: &Session) -> Check {
+  if !session.manifest.host.has_sockets() {
+    return check("host sockets", Status::Ok, "no [host] sockets: nothing is forwarded");
+  }
+
+  forwarded("host sockets", session, |forward| match &forward.upstream {
+    Upstream::Unix(path) => Some(format!("{} → {}", forward.guest_address(), path.display())),
+    Upstream::Tcp(_) => None,
+  })
+}
+
+/// The forwards `label` names, each probed on the host.
+fn forwarded(name: &'static str, session: &Session, label: impl Fn(&Forward) -> Option<String>) -> Check {
+  let probed: Vec<(String, bool)> = session
     .forwards()
     .iter()
-    .map(|forward| (forward.port(), answering(forward.upstream)))
+    .filter_map(|forward| Some((label(forward)?, answering(&forward.upstream))))
     .collect();
 
   let idle = probed.iter().any(|(_, answering)| !answering);
-  let ports = probed
-    .iter()
-    .map(|(port, answering)| {
-      if *answering {
-        format!("localhost:{port}")
+  let items = probed
+    .into_iter()
+    .map(|(label, answering)| {
+      if answering {
+        label
       } else {
-        format!("localhost:{port} — nothing is listening on the host, so it would only refuse")
+        format!("{label} — nothing is listening on the host, so it would only refuse")
       }
     })
     .collect();
 
   listed(
-    "host ports",
+    name,
     if idle { Status::Warn } else { Status::Ok },
     "reachable from this session's container and nothing else",
-    ports,
+    items,
   )
 }
 
-fn answering(upstream: SocketAddr) -> bool {
-  TcpStream::connect_timeout(&upstream, PROBE_TIMEOUT).is_ok()
+fn answering(upstream: &Upstream) -> bool {
+  match upstream {
+    Upstream::Tcp(address) => TcpStream::connect_timeout(address, PROBE_TIMEOUT).is_ok(),
+    Upstream::Unix(path) => UnixStream::connect(path).is_ok(),
+  }
 }
 
 pub fn credentials(session: &Session, source: &impl CredentialStore, api_key_present: bool) -> Check {

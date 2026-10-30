@@ -1,8 +1,8 @@
-use crate::error::{At, InvalidMemory, ManifestError};
+use crate::error::{At, InvalidMemory, InvalidSocketMode, ManifestError};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
 use toml::{Table, Value};
 
 const DEFAULT_CONTAINER_CPUS: u32 = 4;
@@ -59,7 +59,7 @@ impl Manifest {
     };
 
     // Parsed alone too, so a mistake in it names its own file.
-    let local_paths = from_table::<Self>(&local_path, local.clone())?.paths;
+    let local_paths = from_table::<Self>(&local_path, with_shared_sockets(&local, &shared))?.paths;
     local.remove(PATHS_KEY);
     overlay(&mut shared, local, &[]);
 
@@ -82,6 +82,33 @@ const PATHS_KEY: &str = "paths";
 
 /// A partial host command could not stand alone, so a local one replaces the shared one whole.
 const WHOLE_ENTRIES: &[&str] = &["host", "commands"];
+
+/// `local`, each socket in it given the shared socket's `source` if it sets none. Only `source` is required, and
+/// taking no other key keeps a mistake in the shared socket out of an error naming `local`.
+fn with_shared_sockets(local: &Table, shared: &Table) -> Table {
+  let sockets = |table: &Table| {
+    table
+      .get("host")
+      .and_then(|host| host.get("sockets"))
+      .and_then(Value::as_table)
+      .cloned()
+  };
+  let mut local = local.clone();
+
+  if let (Some(base), Some(mut over)) = (sockets(shared), sockets(&local)) {
+    for (name, socket) in &mut over {
+      let source = base.get(name).and_then(|shared| shared.get(SOURCE_KEY));
+      if let (Value::Table(socket), Some(source)) = (socket, source) {
+        socket.entry(SOURCE_KEY).or_insert_with(|| source.clone());
+      }
+    }
+    local["host"]["sockets"] = Value::Table(over);
+  }
+
+  local
+}
+
+const SOURCE_KEY: &str = "source";
 
 fn overlay(shared: &mut Table, local: Table, at: &[&str]) {
   for (key, value) in local {
@@ -331,6 +358,11 @@ pub struct HostConfig {
   pub concurrency: usize,
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub ports: Vec<u16>,
+  #[serde(
+    deserialize_with = "HostConfig::deserialize_sockets",
+    skip_serializing_if = "BTreeMap::is_empty"
+  )]
+  pub sockets: BTreeMap<String, HostSocket>,
   /// Must stay last: TOML cannot express a bare value after a table.
   #[serde(skip_serializing_if = "BTreeMap::is_empty")]
   pub commands: BTreeMap<String, HostCommand>,
@@ -343,6 +375,7 @@ impl Default for HostConfig {
       commands: BTreeMap::new(),
       concurrency: DEFAULT_HOST_CONCURRENCY,
       ports: Vec::new(),
+      sockets: BTreeMap::new(),
     }
   }
 }
@@ -356,12 +389,166 @@ impl HostConfig {
     !self.ports.is_empty()
   }
 
+  pub fn has_sockets(&self) -> bool {
+    !self.sockets.is_empty()
+  }
+
   pub fn is_empty(&self) -> bool {
-    !self.has_commands() && !self.has_ports()
+    !self.has_commands() && !self.has_ports() && !self.has_sockets()
+  }
+
+  /// Each socket by name, with where it answers in the guest.
+  pub fn socket_targets(&self) -> impl Iterator<Item = (PathBuf, &HostSocket)> {
+    self
+      .sockets
+      .iter()
+      .map(|(name, socket)| (socket.target(name), socket))
   }
 
   fn is_default_concurrency(concurrency: &usize) -> bool {
     *concurrency == DEFAULT_HOST_CONCURRENCY
+  }
+
+  /// A bad socket would otherwise fail out of sight in the guest relay.
+  fn deserialize_sockets<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+  ) -> Result<BTreeMap<String, HostSocket>, D::Error> {
+    let sockets = BTreeMap::<String, HostSocket>::deserialize(deserializer)?;
+    let mut targets = BTreeSet::new();
+
+    for (name, socket) in &sockets {
+      if !is_socket_name(name) {
+        return Err(serde::de::Error::custom(format!(
+          "socket name `{name}` must be letters, digits, `-`, `_` and `.`, not starting with `.`"
+        )));
+      }
+
+      let target = socket.target(name);
+      // `socat` gives `,`, `:`, `!!`, quotes, backslashes and brackets in an address meanings of their own.
+      if !target.is_absolute()
+        || target
+          .components()
+          .any(|component| component == Component::ParentDir)
+        || !target
+          .to_string_lossy()
+          .chars()
+          .all(|character| character == '/' || is_name_character(character))
+      {
+        return Err(serde::de::Error::custom(format!(
+          "socket `{name}`'s target `{}` must be an absolute path of letters, digits, `-`, `_`, `.` and `/`, \
+           without `..`",
+          target.display()
+        )));
+      }
+      if let Some(target) = targets.replace(target) {
+        return Err(serde::de::Error::custom(format!(
+          "socket `{name}` shares its target `{}` with another socket",
+          target.display()
+        )));
+      }
+    }
+
+    Ok(sockets)
+  }
+}
+
+/// A relayed socket's permissions in the guest.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SocketMode(u32);
+
+impl SocketMode {
+  pub const fn new(bits: u32) -> Self {
+    Self(bits)
+  }
+
+  fn is_default(&self) -> bool {
+    *self == Self::default()
+  }
+}
+
+impl Default for SocketMode {
+  fn default() -> Self {
+    Self(0o660)
+  }
+}
+
+impl std::str::FromStr for SocketMode {
+  type Err = InvalidSocketMode;
+
+  fn from_str(text: &str) -> Result<Self, InvalidSocketMode> {
+    // `from_str_radix` takes a leading `+`.
+    let digits = (3..=4).contains(&text.len()) && !text.starts_with('+');
+
+    u32::from_str_radix(text, 8)
+      .ok()
+      .filter(|&bits| digits && bits <= 0o777)
+      .map(Self)
+      .ok_or_else(|| InvalidSocketMode(text.to_string()))
+  }
+}
+
+impl TryFrom<String> for SocketMode {
+  type Error = InvalidSocketMode;
+
+  fn try_from(text: String) -> Result<Self, InvalidSocketMode> {
+    text.parse()
+  }
+}
+
+impl From<SocketMode> for String {
+  fn from(mode: SocketMode) -> Self {
+    mode.to_string()
+  }
+}
+
+impl std::fmt::Display for SocketMode {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(formatter, "{:04o}", self.0)
+  }
+}
+
+impl std::fmt::Octal for SocketMode {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    std::fmt::Octal::fmt(&self.0, formatter)
+  }
+}
+
+fn is_socket_name(name: &str) -> bool {
+  !name.is_empty() && !name.starts_with('.') && name.chars().all(is_name_character)
+}
+
+fn is_name_character(character: char) -> bool {
+  character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+}
+
+/// A host socket, relayed to `target` in the guest. It belongs to the `compostbin` group, which the
+/// session's user is in.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostSocket {
+  pub source: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub target: Option<PathBuf>,
+  #[serde(default, skip_serializing_if = "SocketMode::is_default")]
+  pub mode: SocketMode,
+}
+
+impl HostSocket {
+  pub fn new(source: impl Into<String>) -> Self {
+    Self {
+      source: source.into(),
+      target: None,
+      mode: SocketMode::default(),
+    }
+  }
+
+  /// Where the socket `name` answers in the guest.
+  pub fn target(&self, name: &str) -> PathBuf {
+    self
+      .target
+      .clone()
+      .unwrap_or_else(|| Path::new(crate::host::GUEST_SOCKETS_DIR).join(name))
   }
 }
 
@@ -468,6 +655,15 @@ impl Manifest {
         clipboard: true,
         concurrency: 8,
         ports: vec![7001],
+        sockets: [(
+          "mcp".to_string(),
+          HostSocket {
+            source: "~/mcp.sock".to_string(),
+            target: Some("/run/mcp.sock".into()),
+            mode: SocketMode::new(0o600),
+          },
+        )]
+        .into(),
         commands: [(
           "test".to_string(),
           HostCommand {
@@ -612,6 +808,105 @@ tty = true
       rendered.starts_with("[host]\nports = [7001, 7002]\n\n[project]"),
       "a table declaring only ports must still render: {rendered}"
     );
+  }
+
+  fn sockets_error(sockets: &str) -> String {
+    toml::from_str::<Manifest>(sockets)
+      .expect_err("the socket should be refused")
+      .to_string()
+  }
+
+  #[test]
+  fn sockets_alone_open_no_spool() {
+    let manifest: Manifest = toml::from_str("[host.sockets.mcp]\nsource = \"~/mcp.sock\"\n").expect("should parse");
+
+    assert_eq!(
+      manifest.host.sockets,
+      BTreeMap::from([("mcp".to_string(), HostSocket::new("~/mcp.sock"))])
+    );
+    assert!(manifest.host.has_sockets());
+    assert!(!manifest.host.has_commands(), "sockets must not open the spool");
+
+    let rendered = toml::to_string(&manifest).expect("should serialize");
+    assert!(
+      rendered.contains("[host.sockets.mcp]\nsource = \"~/mcp.sock\"\n"),
+      "a table declaring only sockets must still render, without its defaults: {rendered}"
+    );
+  }
+
+  #[test]
+  fn puts_a_socket_in_the_guest_sockets_directory_unless_it_names_a_target() {
+    let manifest: Manifest = toml::from_str(
+      "[host.sockets.mcp]\nsource = \"~/mcp.sock\"\n\n[host.sockets.other]\nsource = \"/other.sock\"\ntarget = \"/run/other.sock\"\nmode = \"0600\"\n",
+    )
+    .expect("should parse");
+
+    assert_eq!(
+      manifest.host.sockets["mcp"].target("mcp"),
+      Path::new("/run/compostbin/sockets/mcp")
+    );
+    assert_eq!(manifest.host.sockets["mcp"].mode, SocketMode::default());
+    assert_eq!(
+      manifest.host.sockets["other"].target("other"),
+      Path::new("/run/other.sock")
+    );
+    assert_eq!(manifest.host.sockets["other"].mode, SocketMode::new(0o600));
+  }
+
+  #[test]
+  fn a_socket_mode_reads_and_prints_as_octal() {
+    assert_eq!("660".parse::<SocketMode>(), Ok(SocketMode::new(0o660)));
+    assert_eq!(SocketMode::new(0o600).to_string(), "0600");
+    assert_eq!(String::from(SocketMode::default()), "0660");
+  }
+
+  #[test]
+  fn refuses_a_socket_name_unfit_for_a_file_name() {
+    for name in ["../escape", ".hidden", "a/b", ""] {
+      let error = sockets_error(&format!("[host.sockets.\"{name}\"]\nsource = \"/host.sock\"\n"));
+
+      assert!(error.contains("socket name"), "{name}: {error}");
+    }
+  }
+
+  #[test]
+  fn refuses_a_target_socat_would_misread() {
+    for target in [
+      "relative.sock",
+      "/a,b.sock",
+      "/a:b.sock",
+      "/a!!b.sock",
+      "/a'b.sock",
+      "/a b.sock",
+      "/a(b).sock",
+      "/run/compostbin/sockets/../../../etc/passwd",
+    ] {
+      let error = sockets_error(&format!(
+        "[host.sockets.mcp]\nsource = \"/host.sock\"\ntarget = \"{target}\"\n"
+      ));
+
+      assert!(error.contains("absolute path"), "{target}: {error}");
+    }
+  }
+
+  #[test]
+  fn refuses_two_sockets_at_one_target() {
+    let error = sockets_error(
+      "[host.sockets.a]\nsource = \"/a.sock\"\ntarget = \"/run/compostbin/sockets/b\"\n\n[host.sockets.b]\nsource = \"/b.sock\"\n",
+    );
+
+    assert!(error.contains("shares its target"), "{error}");
+  }
+
+  #[test]
+  fn refuses_a_mode_that_is_not_permissions() {
+    for mode in ["rw", "0999", "10000", "66", "+660", "+66"] {
+      let error = sockets_error(&format!(
+        "[host.sockets.mcp]\nsource = \"/host.sock\"\nmode = \"{mode}\"\n"
+      ));
+
+      assert!(error.contains("octal permissions"), "{mode}: {error}");
+    }
   }
 
   #[test]
@@ -784,6 +1079,71 @@ roots = ["~/elsewhere"]
     assert_eq!(loaded.project.image, "mine:latest");
     assert_eq!(loaded.project.name.as_deref(), Some("compostbin"));
     assert_eq!(loaded.workspace.roots, ["~/elsewhere"]);
+  }
+
+  const SOCKET_MANIFEST: &str =
+    "[host.sockets.mcp]\nsource = \"~/mcp.sock\"\ntarget = \"/run/mcp.sock\"\nmode = \"0600\"\n";
+
+  #[test]
+  fn a_local_socket_key_replaces_only_that_key() {
+    let (_temp, path) = shared_and_local(
+      SOCKET_MANIFEST,
+      "[host.sockets.mcp]\nsource = \"~/elsewhere/mcp.sock\"\n\n[host.sockets.mine]\nsource = \"~/mine.sock\"\n",
+    );
+
+    let sockets = Manifest::load(&path)
+      .expect("load should succeed")
+      .host
+      .sockets;
+
+    assert_eq!(
+      sockets["mcp"],
+      HostSocket {
+        source: "~/elsewhere/mcp.sock".to_string(),
+        target: Some("/run/mcp.sock".into()),
+        mode: SocketMode::new(0o600),
+      }
+    );
+    assert_eq!(sockets["mine"], HostSocket::new("~/mine.sock"));
+  }
+
+  #[test]
+  fn a_local_socket_may_leave_out_its_source() {
+    let (_temp, path) = shared_and_local(SOCKET_MANIFEST, "[host.sockets.mcp]\nmode = \"0660\"\n");
+
+    let sockets = Manifest::load(&path)
+      .expect("load should succeed")
+      .host
+      .sockets;
+
+    assert_eq!(sockets["mcp"].source, "~/mcp.sock");
+    assert_eq!(sockets["mcp"].mode, SocketMode::default());
+  }
+
+  #[test]
+  fn a_local_socket_is_checked_against_the_shared_ones() {
+    let (_temp, path) = shared_and_local(
+      SOCKET_MANIFEST,
+      "[host.sockets.other]\nsource = \"/other.sock\"\ntarget = \"/run/mcp.sock\"\n",
+    );
+
+    let error = Manifest::load(&path)
+      .expect_err("two sockets at one target")
+      .to_string();
+
+    assert!(error.contains("shares its target"), "{error}");
+  }
+
+  #[test]
+  fn a_mistake_in_a_shared_socket_names_the_shared_manifest() {
+    let (_temp, path) = shared_and_local(
+      "[host.sockets.mcp]\nsource = \"~/mcp.sock\"\nmode = \"rw\"\n",
+      "[host.sockets.mcp]\nsource = \"~/elsewhere/mcp.sock\"\n",
+    );
+
+    let error = Manifest::load(&path).expect_err("a bad mode").to_string();
+
+    assert!(error.contains("compostbin.toml"), "{error}");
   }
 
   #[test]

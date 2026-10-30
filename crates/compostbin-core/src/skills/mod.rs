@@ -320,6 +320,13 @@ mod tests {
         };
         keys.extend(command.clone());
       }
+      if let Some(toml::Value::Table(sockets)) = keys.remove("sockets") {
+        assert!(docs.contains("[host.sockets.<name>]"));
+        let toml::Value::Table(socket) = &sockets["mcp"] else {
+          panic!("a host socket is a table");
+        };
+        keys.extend(socket.clone());
+      }
 
       for key in keys.keys() {
         assert!(

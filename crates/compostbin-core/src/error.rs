@@ -119,6 +119,11 @@ pub enum SessionError {
   Engine(EngineError),
   Io(PathError),
   Record(ManifestError),
+  /// The relay would replace what the mount holds at the target.
+  SocketInMount {
+    target: PathBuf,
+    mount: PathBuf,
+  },
 }
 
 impl fmt::Display for SessionError {
@@ -128,6 +133,12 @@ impl fmt::Display for SessionError {
       Self::Engine(error) => error.fmt(formatter),
       Self::Io(error) => error.fmt(formatter),
       Self::Record(error) => write!(formatter, "recording the container's mounts: {error}"),
+      Self::SocketInMount { target, mount } => write!(
+        formatter,
+        "socket target {} is inside the mount at {}",
+        target.display(),
+        mount.display()
+      ),
     }
   }
 }
@@ -139,6 +150,7 @@ impl Error for SessionError {
       Self::Engine(error) => error.source(),
       Self::Io(error) => error.source(),
       Self::Record(error) => Some(error),
+      Self::SocketInMount { .. } => None,
     }
   }
 }
@@ -175,6 +187,21 @@ impl fmt::Display for InvalidMemory {
 }
 
 impl Error for InvalidMemory {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidSocketMode(pub(crate) String);
+
+impl fmt::Display for InvalidSocketMode {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      formatter,
+      "\"{}\" is not a socket mode: expected octal permissions, like \"0660\"",
+      self.0
+    )
+  }
+}
+
+impl Error for InvalidSocketMode {}
 
 #[derive(Debug)]
 pub struct PathError {

@@ -10,7 +10,7 @@ mod spec;
 mod state;
 
 pub use crate::session::lifecycle::Process;
-pub use crate::session::spec::{CLAUDE_HOME_TARGET, CLIPBOARD_DISPLAY};
+pub use crate::session::spec::{CLAUDE_HOME_TARGET, CLIPBOARD_DISPLAY, SOCKETS_READY_TIMEOUT};
 
 use crate::error::{ManifestError, PathError};
 use crate::host::PortEvent;
@@ -39,6 +39,8 @@ pub enum Notice {
   Shared(Vec<String>),
   Port(PortEvent),
   Unpacking(String),
+  /// Every socket's guest target, when not all existed within `SOCKETS_READY_TIMEOUT`.
+  SocketsNotReady(Vec<PathBuf>),
   /// Stops Claude but not other entrypoints.
   SetupFailed {
     line: String,

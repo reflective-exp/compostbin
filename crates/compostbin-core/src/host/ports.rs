@@ -1,9 +1,12 @@
 use crate::host::agent::POLL_INTERVAL;
+use crate::manifest::SocketMode;
 use compostbin_engine::engine::{Engine, Listener};
 use compostbin_engine::error::EngineError;
+use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -13,31 +16,83 @@ const BUFFER_SIZE: usize = 16 * 1024;
 
 /// Kept clear of the low vsock ports Containerization's guest agent uses.
 const VSOCK_PORT_BASE: u32 = 0x7000_0000;
+/// Above every port's vsock port.
+const SOCKET_VSOCK_PORT_BASE: u32 = VSOCK_PORT_BASE + 0x1_0000;
+/// Where `[host.sockets]` answer in the guest by default, by name.
+pub const GUEST_SOCKETS_DIR: &str = "/run/compostbin/sockets";
+/// Owns every relayed socket in the guest; the session's user is a member.
+pub const GUEST_SOCKETS_GROUP: &str = "compostbin";
+
+/// What a forward connects to on the host.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Upstream {
+  Tcp(SocketAddr),
+  Unix(PathBuf),
+}
+
+impl fmt::Display for Upstream {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Tcp(address) => address.fmt(formatter),
+      Self::Unix(path) => path.display().fmt(formatter),
+    }
+  }
+}
+
+/// Where a forward answers in the guest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Guest {
+  Port(u16),
+  Socket { path: PathBuf, mode: SocketMode },
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Forward {
-  pub upstream: SocketAddr,
+  pub upstream: Upstream,
+  guest: Guest,
+  vsock_port: u32,
 }
 
 impl From<u16> for Forward {
   fn from(port: u16) -> Self {
     Self {
-      upstream: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
+      upstream: Upstream::Tcp(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)),
+      guest: Guest::Port(port),
+      vsock_port: VSOCK_PORT_BASE + u32::from(port),
     }
   }
 }
 
 impl Forward {
-  pub fn port(&self) -> u16 {
-    self.upstream.port()
+  /// The host's socket at `source`, answering at `target` in the guest with permissions `mode`. `index` gives
+  /// each socket a vsock port of its own.
+  pub fn socket(source: PathBuf, target: PathBuf, mode: SocketMode, index: u16) -> Self {
+    Self {
+      upstream: Upstream::Unix(source),
+      guest: Guest::Socket { path: target, mode },
+      vsock_port: SOCKET_VSOCK_PORT_BASE + u32::from(index),
+    }
   }
 
   pub fn vsock_port(&self) -> u32 {
-    VSOCK_PORT_BASE + u32::from(self.port())
+    self.vsock_port
   }
 
+  /// For `compostbin-ports`: `<port>:<vsock port>`, or `unix:<mode>:<vsock port>:<guest path>`, the path
+  /// last so nothing need be parsed after it.
   pub fn guest_argument(&self) -> String {
-    format!("{}:{}", self.port(), self.vsock_port())
+    match &self.guest {
+      Guest::Port(port) => format!("{port}:{}", self.vsock_port),
+      Guest::Socket { path, mode } => format!("unix:{mode}:{}:{}", self.vsock_port, path.display()),
+    }
+  }
+
+  /// Where it answers in the guest.
+  pub fn guest_address(&self) -> String {
+    match &self.guest {
+      Guest::Port(port) => format!("localhost:{port}"),
+      Guest::Socket { path, .. } => path.display().to_string(),
+    }
   }
 }
 
@@ -58,8 +113,8 @@ impl std::fmt::Display for PortEvent {
     match self {
       Self::Listening(forward) => write!(
         formatter,
-        "forwarding localhost:{} to {}",
-        forward.port(),
+        "forwarding {} to {}",
+        forward.guest_address(),
         forward.upstream
       ),
       Self::UpstreamRefused(forward, error) => write!(formatter, "nothing answers at {}: {error}", forward.upstream),
@@ -127,7 +182,29 @@ fn connect(
     return;
   }
 
-  let upstream = match TcpStream::connect_timeout(&forward.upstream, CONNECT_TIMEOUT) {
+  match &forward.upstream {
+    Upstream::Tcp(address) => splice_to(
+      &guest,
+      TcpStream::connect_timeout(address, CONNECT_TIMEOUT),
+      forward,
+      refused,
+      stop,
+      report,
+    ),
+    Upstream::Unix(path) => splice_to(&guest, UnixStream::connect(path), forward, refused, stop, report),
+  }
+}
+
+/// Relays `guest` to the upstream once it's connected, or closes `guest` and reports why not.
+fn splice_to(
+  guest: &UnixStream,
+  upstream: io::Result<impl Stream>,
+  forward: &Forward,
+  refused: &AtomicBool,
+  stop: &AtomicBool,
+  report: &(dyn Fn(PortEvent) + Sync),
+) {
+  let upstream = match upstream {
     Ok(upstream) => {
       refused.store(false, Ordering::Relaxed);
       upstream
@@ -136,7 +213,7 @@ fn connect(
       if !refused.swap(true, Ordering::Relaxed) {
         report(PortEvent::UpstreamRefused(forward.clone(), error.to_string()));
       }
-      close_cleanly(&guest);
+      close_cleanly(guest);
       return;
     }
   };
@@ -146,8 +223,8 @@ fn connect(
   }
 
   std::thread::scope(|scope| {
-    scope.spawn(|| splice(&guest, &upstream, stop));
-    splice(&upstream, &guest, stop);
+    scope.spawn(|| splice(guest, &upstream, stop));
+    splice(&upstream, guest, stop);
   });
 }
 
@@ -252,8 +329,10 @@ mod tests {
   use super::*;
   use compostbin_engine::fake::{Call, RecordingEngine};
   use std::net::TcpListener;
+  use std::os::unix::net::UnixListener;
   use std::sync::Mutex;
   use std::time::Instant;
+  use tempfile::TempDir;
 
   const DEADLINE: Duration = Duration::from_secs(5);
   const NAME: &str = "cb-ports";
@@ -298,7 +377,31 @@ mod tests {
   fn upstream_listener() -> (TcpListener, Forward) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
     let upstream = listener.local_addr().expect("upstream address");
-    (listener, Forward { upstream })
+    (listener, Forward::from(upstream.port()))
+  }
+
+  fn guest_socket(source: PathBuf, name: &str, index: u16) -> Forward {
+    Forward::socket(
+      source,
+      PathBuf::from(GUEST_SOCKETS_DIR).join(name),
+      SocketMode::default(),
+      index,
+    )
+  }
+
+  fn socket_listener(dir: &TempDir) -> (UnixListener, Forward) {
+    let path = dir.path().join("upstream.sock");
+    let listener = UnixListener::bind(&path).expect("upstream socket");
+    (listener, guest_socket(path, "upstream", 0))
+  }
+
+  fn serve_socket_echo(listener: &UnixListener) {
+    let (mut stream, _) = listener.accept().expect("accept a relayed connection");
+    let mut received = Vec::new();
+    stream
+      .read_to_end(&mut received)
+      .expect("read to the guest's EOF");
+    stream.write_all(&received).expect("echo");
   }
 
   fn serve_echo(listener: &TcpListener) {
@@ -347,11 +450,94 @@ mod tests {
 
     assert_eq!(
       forward.upstream,
-      "127.0.0.1:7001".parse::<SocketAddr>().expect("an address")
+      Upstream::Tcp("127.0.0.1:7001".parse::<SocketAddr>().expect("an address"))
     );
-    assert_eq!(forward.port(), 7001);
+    assert_eq!(forward.guest_address(), "localhost:7001");
     assert_eq!(forward.vsock_port(), 0x7000_0000 + 7001);
     assert_eq!(forward.guest_argument(), format!("7001:{}", 0x7000_0000 + 7001));
+  }
+
+  #[test]
+  fn gives_each_socket_a_vsock_port_above_every_ports() {
+    let first = Forward::socket(
+      PathBuf::from("/host/mcp.sock"),
+      PathBuf::from("/run/mcp.sock"),
+      SocketMode::new(0o600),
+      0,
+    );
+    let second = guest_socket(PathBuf::from("/host/other.sock"), "other", 1);
+
+    assert_eq!(first.upstream, Upstream::Unix(PathBuf::from("/host/mcp.sock")));
+    assert_eq!(first.guest_address(), "/run/mcp.sock");
+    assert!(first.vsock_port() > Forward::from(u16::MAX).vsock_port());
+    assert_eq!(second.vsock_port(), first.vsock_port() + 1);
+    assert_eq!(
+      first.guest_argument(),
+      format!("unix:0600:{}:/run/mcp.sock", first.vsock_port())
+    );
+  }
+
+  #[test]
+  fn relays_to_a_unix_socket() {
+    let dir = TempDir::new().expect("temp dir");
+    let engine = RecordingEngine::new();
+    let (upstream, forward) = socket_listener(&dir);
+    let stop = AtomicBool::new(false);
+    let events = Mutex::new(Vec::new());
+    let bound = listening(&engine, &forward, &events);
+
+    std::thread::scope(|scope| {
+      let _stop = StopOnDrop(&stop);
+      scope.spawn(|| relay(&bound, &stop, &record(&events)));
+      scope.spawn(|| serve_socket_echo(&upstream));
+
+      assert_eq!(round_trip(&engine, &forward, "hello"), "hello");
+
+      stop.store(true, Ordering::Relaxed);
+    });
+
+    assert_eq!(
+      events.into_inner().expect("events")[0].to_string(),
+      format!(
+        "forwarding /run/compostbin/sockets/upstream to {}",
+        dir.path().join("upstream.sock").display()
+      )
+    );
+  }
+
+  #[test]
+  fn a_missing_socket_reports_once() {
+    let dir = TempDir::new().expect("temp dir");
+    let engine = RecordingEngine::new();
+    let forward = guest_socket(dir.path().join("missing.sock"), "missing", 0);
+    let stop = AtomicBool::new(false);
+    let events = Mutex::new(Vec::new());
+    let bound = listening(&engine, &forward, &events);
+
+    std::thread::scope(|scope| {
+      let _stop = StopOnDrop(&stop);
+      scope.spawn(|| relay(&bound, &stop, &record(&events)));
+
+      for _ in 0..2 {
+        assert_eq!(
+          round_trip(&engine, &forward, "hello"),
+          "",
+          "a missing socket closes the guest"
+        );
+      }
+
+      stop.store(true, Ordering::Relaxed);
+    });
+
+    let refusals: Vec<String> = events
+      .lock()
+      .expect("events")
+      .iter()
+      .filter(|event| matches!(event, PortEvent::UpstreamRefused(..)))
+      .map(ToString::to_string)
+      .collect();
+    assert_eq!(refusals.len(), 1);
+    assert!(refusals[0].contains("missing.sock"), "{refusals:?}");
   }
 
   #[test]
@@ -424,7 +610,7 @@ mod tests {
   #[test]
   fn refused_upstream_reports_once() {
     let engine = RecordingEngine::new();
-    let forward = Forward { upstream: free_port() };
+    let forward = Forward::from(free_port().port());
     let stop = AtomicBool::new(false);
     let events = Mutex::new(Vec::new());
     let bound = listening(&engine, &forward, &events);

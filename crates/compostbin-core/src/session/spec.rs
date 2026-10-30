@@ -1,10 +1,13 @@
-use crate::host::{Forward, GUEST_SPOOL_TARGET};
-use crate::image::GUEST_PORTS_NAME;
+use crate::host::{Forward, GUEST_SOCKETS_GROUP, GUEST_SPOOL_TARGET};
+use crate::image::{GUEST_PORTS_NAME, ROOT};
 use crate::session::briefing::MANAGED_SETTINGS_TARGET;
 use crate::session::{Process, Session};
 use compostbin_engine::model::{EnvVar, ExecSpec, Mount, Resources, RunSpec};
 use std::path::PathBuf;
+use std::time::Duration;
 
+pub const SOCKETS_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const SOCKETS_READY_POLL: Duration = Duration::from_millis(100);
 pub const CLAUDE_HOME_TARGET: &str = "/home/claude/.claude";
 const KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
 /// Names no real compositor; it only has to be set.
@@ -65,19 +68,24 @@ impl Session {
     }
   }
 
+  /// The ports, then the sockets by name.
   pub fn forwards(&self) -> Vec<Forward> {
-    self
-      .manifest
-      .host
-      .ports
-      .iter()
-      .copied()
-      .map(Forward::from)
-      .collect()
+    let host = &self.manifest.host;
+    let ports = host.ports.iter().copied().map(Forward::from);
+    let sockets = host
+      .socket_targets()
+      .zip(0..)
+      .map(|((target, socket), index)| {
+        Forward::socket(self.resolver.resolve(&socket.source), target, socket.mode, index)
+      });
+
+    ports.chain(sockets).collect()
   }
 
   fn process(&self) -> Vec<String> {
-    if !self.manifest.host.has_ports() {
+    let forwards = self.forwards();
+
+    if forwards.is_empty() {
       return KEEPALIVE_COMMAND
         .iter()
         .copied()
@@ -86,7 +94,7 @@ impl Session {
     }
 
     std::iter::once(GUEST_PORTS_NAME.to_string())
-      .chain(self.forwards().iter().map(Forward::guest_argument))
+      .chain(forwards.iter().map(Forward::guest_argument))
       .collect()
   }
 
@@ -114,6 +122,9 @@ impl Session {
         cpus: container.cpus,
         memory_in_bytes: container.memory.bytes(),
       },
+      // Root, to make each socket at its target and give it to the sockets group. Attached processes still run
+      // as the image's user.
+      user: self.manifest.host.has_sockets().then(|| ROOT.to_string()),
       workdir: Some(self.workdir()),
     }
   }
@@ -125,6 +136,39 @@ impl Session {
       tty: false,
       ..self.exec_spec(["bash", "-euo", "pipefail", "-c", line].map(str::to_string))
     }
+  }
+
+  /// Exits 0 once every socket exists in the guest with its group and mode, or 1 after `SOCKETS_READY_TIMEOUT`.
+  /// Both are checked because the relay may set them after making the socket. As root, since a socket's directory
+  /// need not be the image user's to read. `None` without sockets.
+  pub(super) fn sockets_ready_spec(&self) -> Option<ExecSpec> {
+    if !self.manifest.host.has_sockets() {
+      return None;
+    }
+
+    let tests: Vec<String> = self
+      .manifest
+      .host
+      .socket_targets()
+      .map(|(target, socket)| {
+        let target = target.display();
+        format!(
+          "[ -S {target} ] && [ \"$(stat -c %G:%a {target})\" = {GUEST_SOCKETS_GROUP}:{:o} ]",
+          socket.mode
+        )
+      })
+      .collect();
+    let tries = SOCKETS_READY_TIMEOUT.as_millis() / SOCKETS_READY_POLL.as_millis();
+    let script = format!(
+      "for _ in $(seq {tries}); do {{ {}; }} && exit 0; sleep {}; done; exit 1",
+      tests.join(" && "),
+      SOCKETS_READY_POLL.as_secs_f32()
+    );
+
+    Some(ExecSpec {
+      user: Some(ROOT.to_string()),
+      ..self.setup_spec(&script)
+    })
   }
 
   /// An exec doesn't inherit the boot environment, so `[container] env` is repeated first.
@@ -173,6 +217,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::manifest::{HostSocket, SocketMode};
   use crate::session::fixtures::{session, session_at};
   use std::path::Path;
 
@@ -347,6 +392,7 @@ mod tests {
           cpus: 4,
           memory_in_bytes: 8 << 30,
         },
+        user: None,
         workdir: Some(PathBuf::from("/workspace/workspace/compostbin")),
       }
     );
@@ -408,5 +454,98 @@ mod tests {
     session.manifest.host.ports = vec![7001, 7002];
 
     assert_eq!(session.forwards(), [Forward::from(7001), Forward::from(7002)]);
+  }
+
+  #[test]
+  fn forwards_each_declared_socket_after_the_ports() {
+    let mut session = session();
+    session.manifest.host.ports = vec![7001];
+    session.manifest.host.sockets = [
+      (
+        "other".to_string(),
+        HostSocket {
+          target: Some("/run/other.sock".into()),
+          mode: SocketMode::new(0o600),
+          ..HostSocket::new("/host/other.sock")
+        },
+      ),
+      ("mcp".to_string(), HostSocket::new("~/mcp.sock")),
+    ]
+    .into();
+
+    assert_eq!(
+      session.forwards(),
+      [
+        Forward::from(7001),
+        Forward::socket(
+          session.resolver().resolve("~/mcp.sock"),
+          PathBuf::from("/run/compostbin/sockets/mcp"),
+          SocketMode::default(),
+          0
+        ),
+        Forward::socket(
+          PathBuf::from("/host/other.sock"),
+          PathBuf::from("/run/other.sock"),
+          SocketMode::new(0o600),
+          1
+        ),
+      ]
+    );
+  }
+
+  #[test]
+  fn waits_for_every_socket_as_root_without_reading_input() {
+    let mut session = session();
+    session.manifest.host.ports = vec![7001];
+    assert_eq!(session.sockets_ready_spec(), None, "ports are not waited for");
+
+    session.manifest.host.sockets = [
+      ("mcp".to_string(), HostSocket::new("/host/mcp.sock")),
+      (
+        "other".to_string(),
+        HostSocket {
+          target: Some("/run/other.sock".into()),
+          mode: SocketMode::new(0o600),
+          ..HostSocket::new("/host/other.sock")
+        },
+      ),
+    ]
+    .into();
+    let spec = session.sockets_ready_spec().expect("sockets to wait for");
+
+    assert_eq!(spec.user.as_deref(), Some("root"));
+    assert!(!spec.interactive && !spec.tty);
+    assert_eq!(
+      spec.arguments.last().map(String::as_str),
+      Some(
+        "for _ in $(seq 50); do { \
+         [ -S /run/compostbin/sockets/mcp ] && [ \"$(stat -c %G:%a /run/compostbin/sockets/mcp)\" = compostbin:660 ] && \
+         [ -S /run/other.sock ] && [ \"$(stat -c %G:%a /run/other.sock)\" = compostbin:600 ]; \
+         } && exit 0; sleep 0.1; done; exit 1"
+      )
+    );
+  }
+
+  #[test]
+  fn runs_the_relay_as_root_for_sockets() {
+    let mut session = session();
+    assert_eq!(
+      session.run_spec().user,
+      None,
+      "nothing to relay, nothing to run as root"
+    );
+
+    session.manifest.host.ports = vec![7001];
+    assert_eq!(session.run_spec().user, None, "ports need no root");
+
+    session.manifest.host.ports = Vec::new();
+    session.manifest.host.sockets = [("mcp".to_string(), HostSocket::new("/host/mcp.sock"))].into();
+    let spec = session.run_spec();
+
+    assert_eq!(spec.user.as_deref(), Some("root"));
+    assert_eq!(
+      spec.arguments,
+      [GUEST_PORTS_NAME.to_string(), session.forwards()[0].guest_argument(),]
+    );
   }
 }

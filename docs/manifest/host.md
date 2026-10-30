@@ -55,6 +55,8 @@ ports       = [7001, 7002]
   `compostbin-host` independently.
 - `ports` (`[]`): host loopback ports the guest reaches at its own `localhost`.
   See [Ports](#ports).
+- `sockets` (`{}`): host Unix sockets by name, as `[host.sockets.<name>]`
+  tables. See [Sockets](#sockets).
 
 The host-command channel is only created and mounted when a command or the
 clipboard is declared.
@@ -80,3 +82,45 @@ A port with no service behind it yet (one started later through
 `compostbin-host`, say) is normal: once Claude is attached, the relay logs to
 `ports.log` in the session directory rather than Claude's terminal.
 `compostbin doctor` reports ports with nothing behind them.
+
+## Sockets
+
+``` toml
+[host.sockets.notes]
+source = "~/Library/Application Support/Notes/mcp.sock"
+
+[host.sockets.agent]
+source = "~/.agent.sock"
+target = "/run/agent.sock"
+mode   = "0600"
+```
+
+`[host.sockets.<name>]` relays a host Unix socket into the guest over vsock,
+like a port. Names are letters, digits, `-`, `_` and `.`, not starting with
+`.`.
+
+- `source` (required): the socket on the host. `~` is allowed.
+- `target` (`/run/compostbin/sockets/<name>`): where it answers in the guest,
+  an absolute path of letters, digits, `-`, `_`, `.` and `/`, without `..` and
+  outside every mount, since the relay replaces whatever is there. Its
+  directories are made as needed.
+- `mode` (`"0660"`): its permissions in the guest. It belongs to the
+  `compostbin` group, which the session's user is in, so `0660` lets Claude
+  and root connect, and no other guest user.
+
+With sockets, the guest relay runs as root to make them. Claude and other
+attached processes still run as the image's user.
+
+An MCP server served on a socket is a stdio server in the guest, through the
+image's `socat`:
+
+``` sh
+claude mcp add notes -- socat - UNIX-CONNECT:/run/compostbin/sockets/notes
+```
+
+Claude starts and stops `socat` with the session, so nothing outlives it on the
+host.
+
+A socket with nothing behind it is normal too: the relay logs to `ports.log`,
+and `compostbin doctor` reports it. Sockets are fixed when the container is
+created, like ports.

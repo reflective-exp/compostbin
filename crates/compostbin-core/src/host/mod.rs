@@ -11,7 +11,9 @@ mod spool;
 mod fixtures;
 
 pub use crate::host::agent::serve;
-pub use crate::host::ports::{Bound, Forward, PortEvent, listen_all, relay};
+pub use crate::host::ports::{
+  Bound, Forward, GUEST_SOCKETS_DIR, GUEST_SOCKETS_GROUP, PortEvent, Upstream, listen_all, relay,
+};
 pub use crate::host::spool::Spool;
 
 use crate::manifest::{HostCommand, HostConfig};

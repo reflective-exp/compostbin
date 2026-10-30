@@ -5,7 +5,7 @@ use std::time::Duration;
 
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 
-const CHECKS: [&str; 10] = [
+const CHECKS: [&str; 11] = [
   "engine",
   "image store",
   "base image",
@@ -16,6 +16,7 @@ const CHECKS: [&str; 10] = [
   "credentials",
   "host commands",
   "host ports",
+  "host sockets",
 ];
 
 #[test]

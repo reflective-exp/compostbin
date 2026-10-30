@@ -31,7 +31,7 @@ not run through a shell. Exact by default; `arguments`, `deny` and `tty` are in
 Read the file for the table being edited:
 
 - `references/host.md`: `[host.commands.<name>]`, `[host]` (clipboard,
-  concurrency, ports)
+  concurrency, ports), `[host.sockets.<name>]`
 - `references/container.md`: `[project]`, `[container]`, `[image]`
 - `references/local.md`: `compostbin.local.toml`
 - `references/mounts.md`: `[[paths]]`, `[workspace]`

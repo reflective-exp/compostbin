@@ -1,7 +1,7 @@
 //! Uses managed settings because `settings::share` overwrites `settings.json` from the host.
 
 use crate::error::{At, PathError};
-use crate::host::{CLIPBOARD_COMMAND, served_commands};
+use crate::host::{CLIPBOARD_COMMAND, GUEST_SOCKETS_GROUP, served_commands};
 use crate::manifest::Manifest;
 use std::path::Path;
 
@@ -48,6 +48,7 @@ pub fn briefing(manifest: &Manifest, config: &str) -> String {
        entry in {config}.\n"
     ));
     text.push_str(&ports(manifest, config));
+    text.push_str(&sockets(manifest, config));
 
     return text;
   }
@@ -96,6 +97,7 @@ pub fn briefing(manifest: &Manifest, config: &str) -> String {
   }
 
   text.push_str(&ports(manifest, config));
+  text.push_str(&sockets(manifest, config));
 
   text
 }
@@ -117,6 +119,26 @@ fn ports(manifest: &Manifest, config: &str) -> String {
      the host: {}. They are the host's, not this container's, and they are fixed when \
      the container is created — changing [host] ports in {config} takes \
      a restart.\n",
+    listed.join(", ")
+  )
+}
+
+fn sockets(manifest: &Manifest, config: &str) -> String {
+  if !manifest.host.has_sockets() {
+    return String::new();
+  }
+
+  let listed: Vec<String> = manifest
+    .host
+    .socket_targets()
+    .map(|(target, _)| target.display().to_string())
+    .collect();
+
+  format!(
+    "\nSome of the host's Unix sockets answer here: {}. They are fixed when the container \
+     is created — changing [host.sockets] in {config} takes a restart. You reach them through \
+     the {GUEST_SOCKETS_GROUP} group. An MCP server behind one is a stdio server run as \
+     `socat - UNIX-CONNECT:<socket>`.\n",
     listed.join(", ")
   )
 }
@@ -215,6 +237,39 @@ mod tests {
     assert!(briefing.contains("compostbin-host clipboard  pbcopy"), "{briefing}");
     assert!(briefing.contains("macOS clipboard"), "{briefing}");
     assert!(!super::briefing(&manifest_with_commands(), MANIFEST_RELATIVE_PATH).contains("clipboard"));
+  }
+
+  #[test]
+  fn the_briefing_lists_each_socket_where_the_guest_finds_it() {
+    let manifest: Manifest = toml::from_str(
+      "[host.sockets.mcp]\nsource = \"~/mcp.sock\"\n\n[host.sockets.other]\nsource = \"/other.sock\"\ntarget = \"/run/other.sock\"\n",
+    )
+    .expect("manifest should parse");
+
+    for briefing in [
+      briefing(&manifest, MANIFEST_RELATIVE_PATH),
+      briefing(
+        &Manifest {
+          host: crate::manifest::HostConfig {
+            sockets: manifest.host.sockets.clone(),
+            ..manifest_with_commands().host
+          },
+          ..Manifest::default()
+        },
+        MANIFEST_RELATIVE_PATH,
+      ),
+    ] {
+      assert!(
+        briefing.contains("/run/compostbin/sockets/mcp, /run/other.sock"),
+        "with or without host commands: {briefing}"
+      );
+      assert!(briefing.contains("socat - UNIX-CONNECT:"), "{briefing}");
+      assert!(
+        !briefing.contains("~/mcp.sock"),
+        "the host path means nothing here: {briefing}"
+      );
+    }
+    assert!(!super::briefing(&manifest_with_commands(), MANIFEST_RELATIVE_PATH).contains("Unix sockets"));
   }
 
   #[test]

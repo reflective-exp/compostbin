@@ -1,4 +1,5 @@
 use crate::error::{At, ImageError};
+use crate::host::GUEST_SOCKETS_GROUP;
 use crate::session::briefing::MANAGED_SETTINGS_TARGET;
 use crate::session::{CLAUDE_HOME_TARGET, Session};
 use crate::workspace::WORKSPACE_TARGET;
@@ -22,6 +23,7 @@ const BASE_IMAGE: &str = "docker.io/library/debian:stable-slim";
 
 const BUILT_BY: (&str, &str) = ("dev.compostbin.built-by", env!("CARGO_PKG_VERSION"));
 pub const USER: &str = "claude";
+pub const ROOT: &str = "root";
 const HOME: &str = "/home/claude";
 /// `socat` is required by the port relay.
 const PACKAGES: [&str; 10] = [
@@ -115,7 +117,8 @@ fn base_plan(session: &Session) -> BuildPlan {
       format!(
         // The guest cannot create mountpoints under /etc; the managed-settings one stays root-owned.
         "mkdir -p {MANAGED_SETTINGS_TARGET} \\\n \
-         && useradd --create-home --shell /bin/bash {USER} \\\n \
+         && groupadd {GUEST_SOCKETS_GROUP} \\\n \
+         && useradd --create-home --shell /bin/bash --groups {GUEST_SOCKETS_GROUP} {USER} \\\n \
          && mkdir -p {CLAUDE_HOME_TARGET} {WORKSPACE_TARGET} \\\n \
          && chown -R {USER}:{USER} {HOME} {WORKSPACE_TARGET}"
       ),

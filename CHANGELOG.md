@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add `[host.sockets.<name>]`, relaying a host Unix socket into the guest at
+  its `target` (default `/run/compostbin/sockets/<name>`) with its `mode`,
+  owned by a new `compostbin` group the session's user is in. An MCP server on
+  a socket runs as a stdio server through `socat`. The guest half and the
+  group are in the image, so run `compostbin build` before using sockets.
+- `doctor` reports sockets with nothing listening behind them.
+- A new session waits up to 5s for the guest relay's sockets before running
+  anything.
+
 ## v0.19.0
 
 - Add `[claude] keychain` to `~/.config/compostbin/config.toml`, defaulted to

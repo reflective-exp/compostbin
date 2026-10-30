@@ -43,6 +43,7 @@ pub fn diagnose(
     host::credentials(session, credentials, api_key_present),
     host::allowlist(session),
     host::ports(session),
+    host::sockets(session),
   ]
 }
 
@@ -426,6 +427,48 @@ mod tests {
   }
 
   #[test]
+  fn lists_each_socket_and_whether_anything_listens_behind_it() {
+    let home = TempDir::new().expect("temp dir");
+    let base = home.path().canonicalize().expect("canonical temp");
+    let mut session = session(&home, &quoted(&base, "workspace"));
+    let live = base.join("live.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&live).expect("bind a host socket");
+    let dead = base.join("dead.sock");
+    session.manifest.host.sockets = [
+      (
+        "dead".to_string(),
+        crate::manifest::HostSocket::new(dead.display().to_string()),
+      ),
+      (
+        "live".to_string(),
+        crate::manifest::HostSocket::new(live.display().to_string()),
+      ),
+    ]
+    .into();
+
+    let checks = diagnose(
+      &session,
+      &RecordingEngine::with_images(&["compostbin/base:latest"]),
+      &in_keychain(),
+      false,
+    );
+
+    let sockets = check(&checks, "host sockets");
+    assert_eq!(sockets.status, Status::Warn, "{sockets:?}");
+    assert_eq!(
+      sockets.items,
+      [
+        format!(
+          "/run/compostbin/sockets/dead → {} — nothing is listening on the host, so it would only refuse",
+          dead.display()
+        ),
+        format!("/run/compostbin/sockets/live → {}", live.display()),
+      ]
+    );
+    assert_eq!(check(&checks, "host ports").status, Status::Ok, "sockets are not ports");
+  }
+
+  #[test]
   fn lists_every_command_the_guest_can_run_on_the_host() {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");
@@ -463,7 +506,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");
     let mut session = session(&home, &quoted(&base, "workspace"));
-    Record::of(&session.mounts(), &session.manifest.host.ports)
+    Record::of(&session.mounts(), &session.manifest.host)
       .save(&session.mount_record())
       .expect("recording the started container should succeed");
 
@@ -499,7 +542,7 @@ mod tests {
     let home = TempDir::new().expect("temp dir");
     let base = home.path().canonicalize().expect("canonical temp");
     let session = session(&home, &quoted(&base, "workspace"));
-    Record::of(&session.mounts(), &session.manifest.host.ports)
+    Record::of(&session.mounts(), &session.manifest.host)
       .save(&session.mount_record())
       .expect("recording the started container should succeed");
 

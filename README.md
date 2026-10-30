@@ -276,17 +276,29 @@ additions from manifest fields.
 The export reads the inodes and writes pax with `schily` xattrs, carrying uids,
 modes, symlinks, hardlinks and extended attributes into the layer.
 
-### Host ports are relayed over vsock
+### Host ports and sockets are relayed over vsock
 
 For each of `[host] ports`, the process that booted the VM listens on a vsock
 port derived from it (`VZVirtualMachineInstance.listen`), and the guest's
 `compostbin-ports` runs `socat` from its loopback to that vsock port. Vsock
 connects one VM to its own host process, so nothing is bound on a network
-address or in the filesystem.
+address.
+
+`[host.sockets]` work the same way, from a socket the guest's `socat` listens
+on at its `target` to the host socket. Their vsock ports start above every
+port's, numbered in name order. To make a socket anywhere and give it to the
+`compostbin` group, the relay runs as root: `RunSpec.user` sets the main
+process's user, while attached processes still seed theirs from the image.
 
 The guest dials and the host listens, not the reverse (`dialVsock`): the
 connections begin in the guest, and only the VM's owner can listen, so the
 relay is `run`'s, not a joining `shell`'s.
+
+The relay creates its sockets only after the container has started, so a
+process attached straight away could find them missing. Before attaching
+anything, `run` waits up to five seconds for each socket to exist with the
+`compostbin` group and its declared mode (`sockets_ready_spec`). It does not
+wait for ports, which the relay binds quickly enough in practice.
 
 ### Attached processes are seeded from the image
 

@@ -54,6 +54,19 @@ impl Session {
   fn create(&self, engine: &impl Engine, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
     let spec = self.run_spec();
 
+    for (target, _) in self.manifest.host.socket_targets() {
+      if let Some(mount) = spec
+        .mounts
+        .iter()
+        .find(|mount| target.starts_with(&mount.target))
+      {
+        return Err(SessionError::SocketInMount {
+          target,
+          mount: mount.target.clone(),
+        });
+      }
+    }
+
     // Booting with a missing blob would fail naming the image's digest, not the blob's.
     if let Some(digest) = engine.missing_content(&spec.image)? {
       return Err(
@@ -77,7 +90,7 @@ impl Session {
     }
 
     engine.run(&spec)?;
-    Record::of(&spec.mounts, &self.manifest.host.ports)
+    Record::of(&spec.mounts, &self.manifest.host)
       .save(&self.mount_record())
       .map_err(SessionError::Record)?;
 
@@ -150,6 +163,7 @@ impl Session {
   ) -> Result<i32, SessionError> {
     self.prepare_host_spool()?;
     self.create(engine, notify)?;
+    self.await_sockets(engine, notify)?;
 
     let bound = host::listen_all(engine, &self.container_name(), &self.forwards(), &|event| {
       notify(Notice::Port(event))
@@ -200,6 +214,26 @@ impl Session {
     Ok(code)
   }
 
+  /// The relay makes its sockets after the container starts, so a process attached at once could find none.
+  fn await_sockets(&self, engine: &impl Engine, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
+    let Some(spec) = self.sockets_ready_spec() else {
+      return Ok(());
+    };
+
+    if engine.exec(&spec)? != 0 {
+      notify(Notice::SocketsNotReady(
+        self
+          .manifest
+          .host
+          .socket_targets()
+          .map(|(target, _)| target)
+          .collect(),
+      ));
+    }
+
+    Ok(())
+  }
+
   /// Returns the first failing line's code if `process` needs setup, else 0.
   fn set_up(
     &self,
@@ -227,10 +261,11 @@ impl Session {
 mod tests {
   use super::*;
   use crate::host::Spool;
-  use crate::manifest::{MANIFEST_RELATIVE_PATH, PathEntry};
+  use crate::manifest::{HostSocket, MANIFEST_RELATIVE_PATH, PathEntry};
   use crate::session::credentials::FakeStore;
   use crate::session::fixtures::{self, MANIFEST, PROJECT};
   use compostbin_engine::fake::{Call, RecordingEngine};
+  use std::path::PathBuf;
 
   fn quiet(_: Notice) {}
 
@@ -552,19 +587,116 @@ mod tests {
     assert!(Some(listened) < position(&claude(&session)));
   }
 
+  fn declare_socket(session: &mut Session) {
+    session.manifest.host.sockets = [("mcp".to_string(), HostSocket::new("/host/mcp.sock"))].into();
+  }
+
   #[test]
-  fn joining_a_running_session_listens_for_nothing() {
+  fn run_waits_for_the_sockets_before_attaching() {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
-    session.manifest.host.ports = vec![7001];
-    let engine = RecordingEngine::with_running(&["compostbin-cb"]);
+    declare_socket(&mut session);
+    let engine = RecordingEngine::new();
 
     run(&session, &engine);
 
+    let calls = engine.calls();
+    let position = |wanted: &Call| calls.iter().position(|call| call == wanted);
+    let waited = position(&Call::Exec(session.sockets_ready_spec().expect("a socket to wait for")));
+
+    assert!(waited.is_some(), "{calls:?}");
+    assert!(position(&Call::Run(session.run_spec())) < waited);
+    assert!(waited < position(&claude(&session)));
+  }
+
+  #[test]
+  fn run_waits_for_no_port() {
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
+    session.manifest.host.ports = vec![7001];
+    let engine = RecordingEngine::new();
+
+    run(&session, &engine);
+
+    assert_eq!(
+      engine
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, Call::Exec(..)))
+        .collect::<Vec<_>>(),
+      [&claude(&session)]
+    );
+  }
+
+  #[test]
+  fn run_names_every_socket_when_they_are_not_ready() {
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
+    declare_socket(&mut session);
+    let said = std::sync::Mutex::new(Vec::new());
+
+    session
+      .run(
+        &RecordingEngine::exiting_with(1),
+        &FakeStore::default(),
+        &root_shell(),
+        &|notice| {
+          if let Notice::SocketsNotReady(targets) = notice {
+            said.lock().expect("unpoisoned").push(targets);
+          }
+        },
+      )
+      .expect("sockets that are not ready must not stop the session");
+
+    assert_eq!(
+      said.into_inner().expect("unpoisoned"),
+      [vec![PathBuf::from("/run/compostbin/sockets/mcp")]]
+    );
+  }
+
+  #[test]
+  fn run_refuses_a_socket_inside_a_mount_before_starting() {
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
+    session.manifest.host.sockets = [(
+      "settings".to_string(),
+      HostSocket {
+        target: Some(PathBuf::from(crate::session::CLAUDE_HOME_TARGET).join("settings.json")),
+        ..HostSocket::new("/host/mcp.sock")
+      },
+    )]
+    .into();
+    let engine = RecordingEngine::new();
+
+    let error = session
+      .run(&engine, &FakeStore::default(), &root_shell(), &quiet)
+      .expect_err("the relay would replace the mounted file");
+
+    assert!(
+      matches!(&error, SessionError::SocketInMount { mount, .. } if mount == Path::new(crate::session::CLAUDE_HOME_TARGET)),
+      "{error}"
+    );
     assert!(
       !engine
         .calls()
         .iter()
-        .any(|call| matches!(call, Call::Listen(..)))
+        .any(|call| matches!(call, Call::Run(..))),
+      "nothing may start"
+    );
+  }
+
+  #[test]
+  fn joining_a_running_session_listens_for_nothing() {
+    let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
+    session.manifest.host.ports = vec![7001];
+    declare_socket(&mut session);
+    let engine = RecordingEngine::with_running(&["compostbin-cb"]);
+
+    run(&session, &engine);
+
+    let waited = Call::Exec(session.sockets_ready_spec().expect("a socket to wait for"));
+    assert!(
+      !engine
+        .calls()
+        .iter()
+        .any(|call| matches!(call, Call::Listen(..)) || *call == waited),
+      "nothing to listen for or wait on"
     );
   }
 
@@ -618,7 +750,7 @@ mod tests {
     let recorded = Record::load_if_present(&session.mount_record())
       .expect("load should succeed")
       .expect("run must have written a record");
-    assert_eq!(recorded, Record::of(&session.mounts(), &session.manifest.host.ports));
+    assert_eq!(recorded, Record::of(&session.mounts(), &session.manifest.host));
 
     session.manifest.paths.push(PathEntry {
       local: false,
@@ -629,7 +761,7 @@ mod tests {
 
     assert!(
       !recorded
-        .drift(&session.mounts(), &session.manifest.host.ports)
+        .drift(&session.mounts(), &session.manifest.host)
         .is_empty(),
       "a path added mid-session is not mounted until the container is recreated"
     );
@@ -678,7 +810,7 @@ mod tests {
 
     assert!(
       recorded
-        .drift(&session.mounts(), &session.manifest.host.ports)
+        .drift(&session.mounts(), &session.manifest.host)
         .is_empty(),
       "the record must describe the container that is running now: {recorded:?}"
     );

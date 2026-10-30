@@ -1,15 +1,29 @@
 #!/bin/sh
-# Relays each <port>:<vsock port> argument from guest localhost to the host over vsock.
+# Relays each argument to the host over vsock: <port>:<vsock port> from guest
+# localhost, or unix:<mode>:<vsock port>:<path> from a guest socket at <path>,
+# which belongs to the compostbin group. Runs as root when there are sockets.
 set -eu
 
 # VMADDR_CID_HOST.
 host=2
 
 for forward in "$@"; do
-  port=${forward%%:*}
-  vsock=${forward#*:}
-
-  socat "TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr" "VSOCK-CONNECT:$host:$vsock" &
+  case $forward in
+    unix:*)
+      rest=${forward#unix:}
+      mode=${rest%%:*}
+      rest=${rest#*:}
+      vsock=${rest%%:*}
+      path=${rest#*:}
+      mkdir -p "$(dirname "$path")"
+      socat "UNIX-LISTEN:$path,fork,unlink-early,group=compostbin,mode=$mode" "VSOCK-CONNECT:$host:$vsock" &
+      ;;
+    *)
+      port=${forward%%:*}
+      vsock=${forward#*:}
+      socat "TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr" "VSOCK-CONNECT:$host:$vsock" &
+      ;;
+  esac
 done
 
 exec sleep infinity
