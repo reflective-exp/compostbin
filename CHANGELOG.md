@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.20.0
+
 - Add `[host.sockets.<name>]`, relaying a host Unix socket into the guest at
   its `target` (default `/run/compostbin/sockets/<name>`) with its `mode`,
   owned by a new `compostbin` group the session's user is in. An MCP server on
