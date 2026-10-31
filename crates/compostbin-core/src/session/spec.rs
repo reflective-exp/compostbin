@@ -98,14 +98,24 @@ impl Session {
       .collect()
   }
 
+  /// `[container] env`, then `[container.environment]`, which wins over a variable both name.
   fn inherited_env(&self) -> Vec<EnvVar> {
-    self
-      .manifest
-      .container
+    let container = &self.manifest.container;
+    let set = container
+      .environment
+      .iter()
+      .map(|(name, value)| EnvVar::Set {
+        name: name.clone(),
+        value: value.clone(),
+      });
+
+    container
       .env
       .iter()
+      .filter(|name| !container.environment.contains_key(*name))
       .cloned()
       .map(EnvVar::Inherit)
+      .chain(set)
       .collect()
   }
 
@@ -217,7 +227,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::manifest::{HostSocket, SocketMode};
+  use crate::manifest::{HostSocket, RESERVED_VARIABLES, SocketMode};
   use crate::session::fixtures::{session, session_at};
   use std::path::Path;
 
@@ -257,6 +267,51 @@ mod tests {
         workdir: Some(PathBuf::from("/workspace/workspace/compostbin")),
       }
     );
+  }
+
+  #[test]
+  fn sets_the_environment_in_every_process_over_variables_passed_through() {
+    let mut session = session();
+    session.manifest.container.env = vec!["MODE".to_string(), "TOKEN".to_string()];
+    session.manifest.container.environment = [("MODE".to_string(), "fast".to_string())].into();
+    let expected = [
+      EnvVar::Inherit("TOKEN".to_string()),
+      EnvVar::Set {
+        name: "MODE".to_string(),
+        value: "fast".to_string(),
+      },
+    ];
+
+    assert_eq!(session.run_spec().env, expected);
+    assert_eq!(session.setup_spec("true").env[..2], expected);
+    assert_eq!(session.exec_spec([]).env[..2], expected);
+    assert_eq!(
+      session.exec_spec([]).env[2],
+      EnvVar::Set {
+        name: "CLAUDE_CONFIG_DIR".to_string(),
+        value: "/home/claude/.claude".to_string(),
+      },
+      "compostbin's own come last"
+    );
+  }
+
+  #[test]
+  fn reserves_every_variable_compostbin_sets() {
+    let mut session = session();
+    session.manifest.container.env.clear();
+    session.manifest.host.clipboard = true;
+
+    let set: Vec<String> = session
+      .exec_spec([])
+      .env
+      .into_iter()
+      .filter_map(|variable| match variable {
+        EnvVar::Set { name, .. } => Some(name),
+        EnvVar::Inherit(_) => None,
+      })
+      .collect();
+
+    assert_eq!(set, RESERVED_VARIABLES);
   }
 
   #[test]

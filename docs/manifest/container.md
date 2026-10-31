@@ -22,11 +22,20 @@ cpus   = 4
 env    = ["GITHUB_TOKEN"]
 memory = "8G"
 setup  = ["direnv allow"]
+
+[container.environment]
+RUST_LOG = "info"
 ```
 
 - `cpus` (`4`).
-- `env` (`[]`): names of host environment variables passed through. Names, not
-  values.
+- `env` (`[]`): names of host environment variables passed through. Neither
+  this nor `environment` may set reserved variables (`CLAUDE_CONFIG_DIR`,
+  `IS_SANDBOX`, or `WAYLAND_DISPLAY`). May be used to inject secrets from the
+  host that are not checked into git.
+- `environment` (`{}`): variables set in container sessions, including setup
+  lines and Claude. Variables named in both `env` and `environment` resolve to
+  the `environment` version. Secrets should only be set here from gitignore'd
+  [local manifest](local.md) files.
 - `memory` (`"8G"`): a number with an optional `G`, `M` or `K` suffix, or a
   bare byte count.
 - `setup` (`[]`): shell lines run as `claude` in the project directory when the

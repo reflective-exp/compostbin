@@ -12,6 +12,8 @@ const DEFAULT_IMAGE: &str = "compostbin/base:latest";
 pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
 pub const PROFILES_DIR: &str = "~/.config/compostbin/profiles";
 pub const USER_CONFIG_PATH: &str = "~/.config/compostbin/config.toml";
+/// Set by compostbin in exec'd processes, so `[container]` may not name them.
+pub const RESERVED_VARIABLES: [&str; 3] = ["CLAUDE_CONFIG_DIR", "IS_SANDBOX", "WAYLAND_DISPLAY"];
 
 /// Renders only what differs from the defaults, except `[project] image`.
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -242,8 +244,17 @@ impl ClaudeConfig {
 pub struct ContainerConfig {
   #[serde(skip_serializing_if = "ContainerConfig::is_default_cpus")]
   pub cpus: u32,
-  #[serde(skip_serializing_if = "Vec::is_empty")]
+  #[serde(
+    deserialize_with = "ContainerConfig::deserialize_env",
+    skip_serializing_if = "Vec::is_empty"
+  )]
   pub env: Vec<String>,
+  /// Variables set to these values, where `env` passes the host's through.
+  #[serde(
+    deserialize_with = "ContainerConfig::deserialize_environment",
+    skip_serializing_if = "BTreeMap::is_empty"
+  )]
+  pub environment: BTreeMap<String, String>,
   #[serde(skip_serializing_if = "ContainerConfig::is_default_memory")]
   pub memory: Memory,
   /// Run as `claude` in the project directory when the container is created.
@@ -256,6 +267,7 @@ impl Default for ContainerConfig {
     Self {
       cpus: DEFAULT_CONTAINER_CPUS,
       env: Vec::new(),
+      environment: BTreeMap::new(),
       memory: DEFAULT_CONTAINER_MEMORY,
       setup: Vec::new(),
     }
@@ -274,6 +286,59 @@ impl ContainerConfig {
   fn is_default_memory(memory: &Memory) -> bool {
     *memory == DEFAULT_CONTAINER_MEMORY
   }
+
+  fn deserialize_env<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    let env = Vec::<String>::deserialize(deserializer)?;
+
+    if let Some(name) = env.iter().find(|name| is_reserved(name)) {
+      return Err(reserved_error(name));
+    }
+
+    Ok(env)
+  }
+
+  /// A bad name or value would otherwise fail out of sight, as the container starts.
+  fn deserialize_environment<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+  ) -> Result<BTreeMap<String, String>, D::Error> {
+    let environment = BTreeMap::<String, String>::deserialize(deserializer)?;
+
+    for (name, value) in &environment {
+      if !is_variable_name(name) {
+        return Err(serde::de::Error::custom(format!(
+          "environment variable `{name}` must be letters, digits and `_`, not starting with a digit"
+        )));
+      }
+      if is_reserved(name) {
+        return Err(reserved_error(name));
+      }
+      if value.contains('\0') {
+        return Err(serde::de::Error::custom(format!(
+          "environment variable `{name}`'s value has a NUL, which no process can be given"
+        )));
+      }
+    }
+
+    Ok(environment)
+  }
+}
+
+fn is_reserved(name: &str) -> bool {
+  RESERVED_VARIABLES.contains(&name)
+}
+
+fn reserved_error<E: serde::de::Error>(name: &str) -> E {
+  E::custom(format!("environment variable `{name}` is set by compostbin"))
+}
+
+fn is_variable_name(name: &str) -> bool {
+  name
+    .chars()
+    .next()
+    .is_some_and(|first| !first.is_ascii_digit())
+    && name
+      .chars()
+      .all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -648,6 +713,7 @@ impl Manifest {
       container: ContainerConfig {
         cpus: 4,
         env: vec!["TOKEN".to_string()],
+        environment: [("MODE".to_string(), "fast".to_string())].into(),
         memory: Memory::gibibytes(8),
         setup: vec!["true".to_string()],
       },
@@ -1079,6 +1145,71 @@ roots = ["~/elsewhere"]
     assert_eq!(loaded.project.image, "mine:latest");
     assert_eq!(loaded.project.name.as_deref(), Some("compostbin"));
     assert_eq!(loaded.workspace.roots, ["~/elsewhere"]);
+  }
+
+  #[test]
+  fn sets_environment_variables_to_values() {
+    let manifest: Manifest =
+      toml::from_str("[container.environment]\nMODE = \"fast\"\n_UNDER = \"a=b\"\n").expect("should parse");
+
+    assert_eq!(
+      manifest.container.environment,
+      [
+        ("MODE".to_string(), "fast".to_string()),
+        ("_UNDER".to_string(), "a=b".to_string()),
+      ]
+      .into()
+    );
+  }
+
+  #[test]
+  fn refuses_an_environment_variable_no_process_could_have() {
+    for name in ["1ST", "A-B", "A B", "A=B", ""] {
+      let error = toml::from_str::<Manifest>(&format!("[container.environment]\n\"{name}\" = \"x\"\n"))
+        .expect_err("the name should be refused")
+        .to_string();
+
+      assert!(error.contains("must be letters"), "{name}: {error}");
+    }
+    let error = toml::from_str::<Manifest>("[container.environment]\nMODE = \"a\\u0000b\"\n")
+      .expect_err("the value should be refused")
+      .to_string();
+    assert!(error.contains("NUL"), "{error}");
+  }
+
+  #[test]
+  fn refuses_an_environment_variable_compostbin_sets() {
+    for name in RESERVED_VARIABLES {
+      for manifest in [
+        format!("[container.environment]\n{name} = \"x\"\n"),
+        format!("[container]\nenv = [\"{name}\"]\n"),
+      ] {
+        let error = toml::from_str::<Manifest>(&manifest)
+          .expect_err("the name should be refused")
+          .to_string();
+
+        assert!(error.contains("is set by compostbin"), "{manifest}: {error}");
+      }
+    }
+  }
+
+  #[test]
+  fn a_local_environment_variable_replaces_only_that_variable() {
+    let (_temp, path) = shared_and_local(
+      "[container.environment]\nKEPT = \"shared\"\nMODE = \"shared\"\n",
+      "[container.environment]\nMODE = \"local\"\n",
+    );
+
+    let loaded = Manifest::load(&path).expect("load should succeed");
+
+    assert_eq!(
+      loaded.container.environment,
+      [
+        ("KEPT".to_string(), "shared".to_string()),
+        ("MODE".to_string(), "local".to_string()),
+      ]
+      .into()
+    );
   }
 
   const SOCKET_MANIFEST: &str =

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add `[container.environment]` to set variables in container sessions
+  (vs `[container] env`, which passes through host vars). A variable named
+  in both takes its value from `environment`.
+- Refuse reserved variables in `[container] env`.
+
 ## v0.21.0
 
 - Update containerization-framework to v0.11.0.
