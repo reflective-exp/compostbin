@@ -7,6 +7,7 @@ use super::progress::Meter;
 use super::store::Store;
 use crate::error::EngineError;
 use containerization_framework::containerization::container::Mount;
+use containerization_framework::containerization::image::image_store::GetInitImageOptions;
 use containerization_framework::containerization::vm::SystemPlatform;
 use containerization_framework::containerization_error::Code;
 use containerization_framework::versions::{INIT_IMAGE, KERNEL_ARCHIVE_URL, KERNEL_IN_ARCHIVE};
@@ -122,7 +123,13 @@ fn initfs(store: &Store) -> Result<(), EngineError> {
   }
 
   let meter = Meter::new();
-  let image = images.get_init_image(INIT_IMAGE, None, meter.handler())?;
+  let image = images.get_init_image(
+    INIT_IMAGE,
+    GetInitImageOptions {
+      progress: meter.handler(),
+      ..Default::default()
+    },
+  )?;
   drop(meter);
   // Unpacked aside so concurrent first builds never share a partial file.
   let scratch = partial(directory).map_err(failed)?;

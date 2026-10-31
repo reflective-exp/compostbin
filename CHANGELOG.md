@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Update containerization-framework to v0.11.0.
+- Boot the Containerization 0.54.0 init image.
+
 ## v0.20.0
 
 - Add `[host.sockets.<name>]`, relaying a host Unix socket into the guest at
