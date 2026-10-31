@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.22.0
+
 - Add `[container.environment]` to set variables in container sessions
   (vs `[container] env`, which passes through host vars). A variable named
   in both takes its value from `environment`.
