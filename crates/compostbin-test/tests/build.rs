@@ -38,6 +38,34 @@ fn names_the_store_it_provisions() {
 }
 
 #[test]
+fn build_removes_kernels_and_init_images_older_than_its_own() {
+  let project = Project::new("cbt-build-retire");
+  let store = image::store(project.session().resolver());
+  let old_kernel = store.join("kernels/vmlinux-0.0.1");
+  let old_initfs = store.join("initfs/vminit-0.0.1.ext4");
+  let new_kernel = store.join("kernels/vmlinux-999.0.0");
+  let new_initfs = store.join("initfs/vminit-999.0.0.ext4");
+  for planted in [&old_kernel, &old_initfs, &new_kernel, &new_initfs] {
+    std::fs::write(planted, "").expect("a planted file");
+  }
+
+  let output = project.compostbin(&["build"]);
+
+  assert!(output.status.success(), "build failed: {}", stderr(&output));
+  for newer in [&new_kernel, &new_initfs] {
+    assert!(newer.exists(), "{} should be kept", newer.display());
+  }
+  for old in [&old_kernel, &old_initfs] {
+    assert!(!old.exists(), "{} should be removed", old.display());
+    assert!(
+      stderr(&output).contains(&format!("removed {}", old.display())),
+      "stderr: {}",
+      stderr(&output)
+    );
+  }
+}
+
+#[test]
 fn unbuilt_image_stops_the_session() {
   let project = Project::new("cbt-build-missing");
   project.manifest(

@@ -4,9 +4,10 @@
 use super::files::{partial, settle};
 use super::note;
 use super::progress::Meter;
-use super::store::Store;
+use super::store::{Store, initfs_version, is_older};
 use crate::error::EngineError;
 use containerization_framework::containerization::container::Mount;
+use containerization_framework::containerization::image::Image;
 use containerization_framework::containerization::image::image_store::GetInitImageOptions;
 use containerization_framework::containerization::vm::SystemPlatform;
 use containerization_framework::containerization_error::Code;
@@ -18,7 +19,51 @@ pub fn provision(store: &Store) -> Result<(), EngineError> {
   std::fs::create_dir_all(store.root()).map_err(|error| EngineError::failed("create the image store", error))?;
 
   kernel(store)?;
-  initfs(store)
+  initfs(store)?;
+  retire(store);
+
+  Ok(())
+}
+
+/// Leaves blobs to the build's reclaim, which runs once this build's blobs are tagged.
+fn retire(store: &Store) {
+  for path in store.retired() {
+    match std::fs::remove_file(&path) {
+      Ok(()) => note(&format!("removed {}", path.display())),
+      Err(error) => note(&format!("could not remove {}: {error}", path.display())),
+    }
+  }
+
+  let Ok(images) = store.images() else {
+    return;
+  };
+  let Ok(listed) = images.list() else {
+    return;
+  };
+  let references: Vec<String> = listed.iter().map(Image::reference).collect();
+
+  for reference in retired_init_images(&references) {
+    match images.delete(reference, false) {
+      Ok(()) => note(&format!("removed {reference}")),
+      Err(error) => note(&format!("could not remove {reference}: {error}")),
+    }
+  }
+}
+
+fn retired_init_images(references: &[String]) -> impl Iterator<Item = &str> {
+  let repository = INIT_IMAGE
+    .rsplit_once(':')
+    .map_or(INIT_IMAGE, |(repository, _)| repository);
+
+  references
+    .iter()
+    .map(String::as_str)
+    .filter(move |reference| {
+      reference
+        .strip_prefix(repository)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .is_some_and(|tag| is_older(tag, initfs_version()))
+    })
 }
 
 pub fn initfs_mount(store: &Store) -> Mount {
@@ -140,4 +185,27 @@ fn initfs(store: &Store) -> Result<(), EngineError> {
   let _ = std::fs::remove_file(&scratch);
 
   moved
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn retires_only_older_tags_of_the_init_image() {
+    let repository = INIT_IMAGE.rsplit_once(':').expect("a tagged init image").0;
+    let references = [
+      INIT_IMAGE.to_string(),
+      format!("{repository}:0.0.1"),
+      format!("{repository}:999.0.0"),
+      format!("{repository}@sha256:aa"),
+      format!("{repository}-other:0.0.1"),
+      "compostbin/base:latest".to_string(),
+    ];
+
+    assert_eq!(
+      retired_init_images(&references).collect::<Vec<_>>(),
+      [references[1].as_str()]
+    );
+  }
 }

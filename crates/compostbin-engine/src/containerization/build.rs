@@ -57,6 +57,7 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
   {
     note(&format!("{} is already built", plan.tag));
     images.create(&image::Description::new(&plan.tag, descriptor))?;
+    reclaim(store, &images);
     snapshots.evict();
 
     return Ok(());

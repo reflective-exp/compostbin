@@ -4,6 +4,8 @@
 
 - Update containerization-framework to v0.11.0.
 - Boot the Containerization 0.54.0 init image.
+- `build` removes kernels and init images older than its own from the image
+  store, keeping newer ones for another compostbin sharing it.
 
 ## v0.20.0
 

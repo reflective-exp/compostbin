@@ -20,8 +20,29 @@ pub fn kernel_version() -> &'static str {
     .unwrap_or(KERNEL_ARCHIVE_URL)
 }
 
+/// False unless both are dotted release numbers.
+pub fn is_older(version: &str, than: &str) -> bool {
+  let parse = |version: &str| {
+    let mut parts = version
+      .split('.')
+      .map(str::parse::<u64>)
+      .collect::<Result<Vec<_>, _>>()
+      .ok()?;
+
+    while parts.last() == Some(&0) {
+      parts.pop();
+    }
+
+    Some(parts)
+  };
+
+  matches!((parse(version), parse(than)), (Some(version), Some(than)) if version < than)
+}
+
 const CONTAINERS: &str = "containers";
 const CONTENT: &str = "content";
+const KERNEL_PREFIX: &str = "vmlinux-";
+const INITFS_PREFIX: &str = "vminit-";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Store {
@@ -60,13 +81,41 @@ impl Store {
   pub fn kernel(&self) -> PathBuf {
     self
       .root
-      .join(format!("kernels/vmlinux-{}", kernel_version()))
+      .join(format!("kernels/{KERNEL_PREFIX}{}", kernel_version()))
   }
 
   pub fn initfs(&self) -> PathBuf {
     self
       .root
-      .join(format!("initfs/vminit-{}.ext4", initfs_version()))
+      .join(format!("initfs/{INITFS_PREFIX}{}.ext4", initfs_version()))
+  }
+
+  /// Kernels and init images older than the pinned ones; a newer one may belong to another compostbin sharing the store.
+  pub fn retired(&self) -> Vec<PathBuf> {
+    [
+      ("kernels", KERNEL_PREFIX, "", kernel_version()),
+      ("initfs", INITFS_PREFIX, ".ext4", initfs_version()),
+    ]
+    .into_iter()
+    .flat_map(|(directory, prefix, suffix, current)| {
+      let entries = std::fs::read_dir(self.root.join(directory)).ok();
+
+      entries
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(move |path| {
+          path.file_name().is_some_and(|name| {
+            name
+              .to_string_lossy()
+              .strip_prefix(prefix)
+              .and_then(|rest| rest.strip_suffix(suffix))
+              .is_some_and(|version| is_older(version, current))
+          })
+        })
+    })
+    .collect()
   }
 
   pub fn containers(&self) -> PathBuf {
@@ -220,6 +269,49 @@ mod tests {
       store.container_dir("session-cb"),
       root.path().join("containers/session-cb")
     );
+  }
+
+  #[test]
+  fn retires_only_kernels_and_init_images_older_than_the_pins() {
+    let root = tempfile::tempdir().expect("a temp dir");
+    let store = Store::at(root.path());
+    let file = |relative: &str| {
+      let path = root.path().join(relative);
+      std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+      std::fs::write(&path, "").expect("a file");
+      path
+    };
+
+    file(&format!("kernels/vmlinux-{}", kernel_version()));
+    file(&format!("initfs/vminit-{}.ext4", initfs_version()));
+    let old_kernel = file("kernels/vmlinux-0.0.1");
+    let old_initfs = file("initfs/vminit-0.0.1.ext4");
+    file("kernels/vmlinux-999.0.0");
+    file("initfs/vminit-999.0.0.ext4");
+    file("kernels/0123456789abcdef.partial");
+    file("initfs/0123456789abcdef.partial");
+    file("initfs/unrelated");
+
+    let mut retired = store.retired();
+    retired.sort();
+
+    assert_eq!(retired, [old_initfs, old_kernel]);
+  }
+
+  #[test]
+  fn compares_release_numbers_part_by_part() {
+    assert!(is_older("0.9.0", "0.10.0"));
+    assert!(is_older("0.54", "0.54.1"));
+    assert!(!is_older("0.54", "0.54.0"));
+    assert!(!is_older("0.54.0", "0.54"));
+    assert!(!is_older("0.54.0", "0.54.0"));
+    assert!(!is_older("0.55.0", "0.54.0"));
+    assert!(!is_older("latest", "0.54.0"));
+  }
+
+  #[test]
+  fn retires_nothing_from_an_empty_store() {
+    assert_eq!(Store::at("/nonexistent/images").retired(), Vec::<PathBuf>::new());
   }
 
   #[test]
