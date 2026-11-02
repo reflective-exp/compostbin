@@ -62,30 +62,30 @@ impl Unpacked {
   }
 
   /// Safe while containers run, since they hold clones, never entries.
-  pub fn evict(&self, keeping: impl IntoIterator<Item = String>) {
+  pub fn evict(&self, keeping: impl IntoIterator<Item = String>) -> Vec<PathBuf> {
     let kept: BTreeSet<PathBuf> = keeping
       .into_iter()
       .map(|digest| self.path(&digest))
       .collect();
     let cutoff = SystemTime::now() - ABANDONED_AFTER;
-    let Ok(entries) = std::fs::read_dir(&self.root) else {
-      return;
-    };
 
-    for path in entries.flatten().map(|entry| entry.path()) {
-      let stale = if files::is_partial(&path) {
-        modified(&path).is_some_and(|modified| modified < cutoff)
-      } else {
-        path
-          .extension()
-          .is_some_and(|extension| extension == "ext4")
-          && !kept.contains(&path)
-      };
-
-      if stale {
-        let _ = std::fs::remove_file(&path);
-      }
-    }
+    std::fs::read_dir(&self.root)
+      .into_iter()
+      .flatten()
+      .flatten()
+      .map(|entry| entry.path())
+      .filter(|path| {
+        if files::is_partial(path) {
+          modified(path).is_some_and(|modified| modified < cutoff)
+        } else {
+          path
+            .extension()
+            .is_some_and(|extension| extension == "ext4")
+            && !kept.contains(path)
+        }
+      })
+      .filter(|path| std::fs::remove_file(path).is_ok())
+      .collect()
   }
 }
 
@@ -110,8 +110,10 @@ mod tests {
       std::fs::write(path, "").expect("an entry");
     }
 
-    unpacked.evict(["sha256:aa".to_string()]);
-
+    assert_eq!(
+      unpacked.evict(["sha256:aa".to_string()]),
+      std::slice::from_ref(&removed)
+    );
     assert!(kept.exists(), "a stored image's rootfs");
     assert!(!removed.exists(), "a removed image's rootfs");
     assert!(fresh.exists(), "an unpack still under way");

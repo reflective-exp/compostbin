@@ -165,6 +165,8 @@ the project directory, a workspace root, a `[[paths]]` entry, or a local one.
 `compostbin clean` removes a session's transient state. `--all` also removes the
 Claude home (discarding old conversations) and the session's credentials.
 
+Both also sweep the shared image store for orphaned files.
+
 ## Configuration
 
 `.config/compostbin.toml` declares what the project needs. Every table is

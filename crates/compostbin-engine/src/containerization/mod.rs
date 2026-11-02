@@ -10,6 +10,7 @@ mod snapshots;
 mod spec;
 mod stdio;
 mod store;
+mod sweep;
 mod terminal;
 mod unpacked;
 
@@ -34,6 +35,7 @@ use unpacked::Unpacked;
 
 pub use control::served;
 pub use store::{Store, StoreError};
+pub use sweep::{Blobs, Swept, describe, sweep};
 
 pub fn control_socket(runtime_dir: &Path, name: &str) -> PathBuf {
   runtime_dir.join(name).join(control::CONTROL_SOCKET)
@@ -56,6 +58,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 struct Booted {
+  _owner: sweep::Lock,
   /// Must be kept alive for as long as the container runs.
   _manager: ContainerManager,
   container: LinuxContainer,
@@ -227,7 +230,9 @@ impl FrameworkEngine {
     let platform = Platform::current()?;
     let seed = seed(&image.config(&platform)?.config.unwrap_or_default())?;
 
-    std::fs::create_dir_all(&directory).map_err(|error| EngineError::failed(format!("boot {}", spec.name), error))?;
+    let owner = std::fs::create_dir_all(&directory)
+      .and_then(|_| sweep::claim(&directory))
+      .map_err(|error| EngineError::failed(format!("boot {}", spec.name), error))?;
 
     let rootfs = Unpacked::at(self.store.unpacked()).rootfs(&image, &platform, &directory.join("rootfs.ext4"))?;
 
@@ -243,6 +248,7 @@ impl FrameworkEngine {
     container.start()?;
 
     Ok(Booted {
+      _owner: owner,
       _manager: manager,
       container,
       seed,

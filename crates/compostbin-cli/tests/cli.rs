@@ -1,8 +1,10 @@
 use compostbin_core::host::Spool;
+use compostbin_core::image;
 use compostbin_core::session::Session;
 use compostbin_core::workspace::paths::PathResolver;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_compostbin");
@@ -139,6 +141,56 @@ fn clean_empties_the_spool_and_keeps_the_conversation() {
     claude_home.exists(),
     "`clean` must not discard the conversation `--continue` resumes"
   );
+}
+
+#[test]
+fn clean_sweeps_what_the_image_store_no_longer_refers_to() {
+  let temp = TempDir::new().expect("temp dir");
+  let home = home(&temp);
+  let project_dir = initialized_project(&home);
+  let store = image::store(session(&home, &project_dir).resolver());
+  let file = |relative: &str, contents: &str| {
+    let path = store.join(relative);
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+    std::fs::write(&path, contents).expect("a file");
+    path
+  };
+
+  file("containers/compostbin-gone/rootfs.ext4", "");
+  file("containers/compostbin-gone/.owner", "");
+  file("containers/compostbin-unmarked/rootfs.ext4", "");
+  std::fs::File::open(store.join("containers/compostbin-unmarked"))
+    .and_then(|directory| directory.set_modified(SystemTime::now() - Duration::from_secs(600)))
+    .expect("a directory too old to be mid-claim");
+  let owner = std::fs::File::open(file("containers/compostbin-live/.owner", "")).expect("the owner's lock");
+  owner.lock().expect("a lock held while clean runs");
+  let unpacked = file("unpacked/sha256-aa.ext4", "");
+  let record = file(
+    "build-cache/images/aa.json",
+    r#"{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"sha256:aa","size":42}"#,
+  );
+
+  let output = compostbin(&home, &project_dir, &["clean"]);
+
+  assert!(
+    output.status.success(),
+    "clean failed: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(
+    !store.join("containers/compostbin-gone").exists(),
+    "its owner has exited"
+  );
+  assert!(
+    !store.join("containers/compostbin-unmarked").exists(),
+    "no session answers for it"
+  );
+  assert!(
+    store.join("containers/compostbin-live").exists(),
+    "its owner is this test"
+  );
+  assert!(!unpacked.exists(), "no stored image has its digest");
+  assert!(!record.exists(), "the image it records is not in the store");
 }
 
 #[test]

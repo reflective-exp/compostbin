@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `clean` also sweeps the shared image store: container directories whose
+  session or build has exited, unpacked rootfs files no image uses,
+  unreferenced blobs (skipped while a build runs), and build-cache records
+  whose image is gone.
+
 ## v0.22.0
 
 - Add `[container.environment]` to set variables in container sessions

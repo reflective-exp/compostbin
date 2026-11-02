@@ -29,16 +29,7 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
 
     Command::Build { no_cache, config } => engine::build_base_image(&config.load(resolver, &project_dir)?, !no_cache),
 
-    Command::Clean { all, config } => {
-      let cleaned = config.load(resolver, &project_dir)?.clean(all)?;
-      let verb = if all { "removed" } else { "cleared" };
-
-      for path in cleaned {
-        println!("{verb} {}", path.display());
-      }
-
-      Ok(0)
-    }
+    Command::Clean { all, config } => engine::clean(&config.load(resolver, &project_dir)?, all),
 
     Command::Doctor { config, fix } => report::report_diagnosis(&config, resolver, &project_dir, fix),
 

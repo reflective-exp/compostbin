@@ -6,8 +6,8 @@ use super::progress::Meter;
 use super::provision::initfs_mount;
 use super::snapshots::{Salted, Snapshots, short};
 use super::store::Store;
-use super::unpacked::{ROOTFS_SIZE_IN_BYTES, Unpacked, ext4_root};
-use super::{nat, note, spec};
+use super::unpacked::{ROOTFS_SIZE_IN_BYTES, ext4_root};
+use super::{nat, note, spec, sweep};
 use crate::error::EngineError;
 use crate::model::BuildPlan;
 use containerization_framework::containerization::container::container_manager::CreateWithRootfsOptions;
@@ -30,12 +30,12 @@ const SHELL: [&str; 4] = ["/bin/bash", "-euo", "pipefail", "-c"];
 /// Must outlive every step; the base's own `Cmd` could exit and stop the container.
 const KEEPALIVE: [&str; 3] = ["/bin/sh", "-c", "while :; do sleep 86400; done"];
 
-/// Marks a builder's directory in `containers`; holds the owning build's pid.
-const BUILDER_MARKER: &str = ".builder";
-
 pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<(), EngineError> {
   let (content, images) = store.content()?;
   let platform = Platform::current()?;
+  let failed = |error: std::io::Error| EngineError::failed(format!("build {}", plan.tag), error);
+  // Taken before the pull, whose blobs are unreferenced until tagged.
+  let building = sweep::building(store).map_err(failed)?;
 
   // Pulled first because its digest salts every cache key.
   let base = pulled(&images, &plan.base)?;
@@ -57,6 +57,7 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
   {
     note(&format!("{} is already built", plan.tag));
     images.create(&image::Description::new(&plan.tag, descriptor))?;
+    drop(building);
     reclaim(store, &images);
     snapshots.evict();
 
@@ -65,12 +66,13 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
 
   let directory = store.container_dir(name);
   let rootfs = directory.join("rootfs.ext4");
-  let failed = |error: std::io::Error| EngineError::failed(format!("build {}", plan.tag), error);
 
   let _ = std::fs::remove_dir_all(&directory);
-  sweep_builders(store, name);
+  for removed in sweep::abandoned(store, None) {
+    note(&format!("removed the rootfs left in {}", removed.display()));
+  }
   std::fs::create_dir_all(&directory).map_err(failed)?;
-  let _ = std::fs::write(directory.join(BUILDER_MARKER), format!("{}\n", std::process::id()));
+  let _owner = sweep::claim(&directory).map_err(failed)?;
 
   let start = prepare(&rootfs, plan, &keys, &snapshots, &base, &platform)?;
 
@@ -96,6 +98,7 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
   // Not `ContainerManager::delete`: a fully cached build has no manager.
   let _ = std::fs::remove_dir_all(&directory);
 
+  drop(building);
   reclaim(store, &images);
   snapshots.evict();
 
@@ -347,49 +350,8 @@ fn config(plan: &BuildPlan, mut config: ImageConfig, environment: Vec<String>) -
 
 /// Must run after the re-tag, since until then this build's own blobs are unreferenced.
 fn reclaim(store: &Store, images: &ImageStore) {
-  if let Ok(listed) = images.list() {
-    Unpacked::at(store.unpacked()).evict(listed.iter().map(Image::digest));
-  }
-
-  match images.clean_up_orphaned_blobs() {
-    Ok((deleted, _)) if deleted.is_empty() => {}
-    Ok((deleted, freed)) => note(&format!(
-      "reclaimed {} MB from {} unreferenced blob{}",
-      freed >> 20,
-      deleted.len(),
-      if deleted.len() == 1 { "" } else { "s" }
-    )),
-    Err(error) => note(&format!("could not reclaim unreferenced blobs: {error}")),
-  }
-}
-
-/// Only removes marked directories whose owning pid is gone; sessions and other builds share `containers`.
-fn sweep_builders(store: &Store, current: &str) {
-  let Ok(directories) = std::fs::read_dir(store.containers()) else {
-    return;
-  };
-
-  for directory in directories.flatten().map(|entry| entry.path()) {
-    if directory.file_name().is_some_and(|name| name == current) {
-      continue;
-    }
-
-    let Ok(owner) = std::fs::read_to_string(directory.join(BUILDER_MARKER)) else {
-      continue;
-    };
-
-    // SAFETY: signal 0 only checks whether the pid exists.
-    if let Ok(pid) = owner.trim().parse::<libc::pid_t>()
-      && unsafe { libc::kill(pid, 0) } == 0
-    {
-      continue;
-    }
-
-    if let Some(name) = directory.file_name() {
-      note(&format!("removing the rootfs left by {}", name.to_string_lossy()));
-    }
-
-    let _ = std::fs::remove_dir_all(&directory);
+  if let Some(description) = sweep::describe(&sweep::reclaim(store, images).1) {
+    note(&description);
   }
 }
 
@@ -453,33 +415,5 @@ mod tests {
   fn runs_a_step_as_root_unless_it_names_a_user() {
     assert_eq!(user(None), User::default());
     assert_eq!(user(Some("claude")).username, "claude");
-  }
-
-  #[test]
-  fn sweeps_only_builders_whose_build_has_gone() {
-    let root = tempfile::tempdir().expect("a temp dir");
-    let store = Store::at(root.path());
-    let directory = |name: &str, owner: Option<String>| {
-      let path = store.container_dir(name);
-      std::fs::create_dir_all(&path).expect("a container directory");
-
-      if let Some(owner) = owner {
-        std::fs::write(path.join(BUILDER_MARKER), owner).expect("a marker");
-      }
-
-      path
-    };
-
-    let session = directory("session-cb", None);
-    let live = directory("cb-builder-live", Some(format!("{}\n", std::process::id())));
-    let dead = directory("cb-builder-dead", Some(format!("{}\n", libc::pid_t::MAX)));
-    let current = directory("cb-builder-current", Some("1\n".to_string()));
-
-    sweep_builders(&store, "cb-builder-current");
-
-    assert!(session.exists(), "a session's directory");
-    assert!(live.exists(), "a build still running");
-    assert!(!dead.exists(), "a build that died");
-    assert!(current.exists(), "this build's own");
   }
 }

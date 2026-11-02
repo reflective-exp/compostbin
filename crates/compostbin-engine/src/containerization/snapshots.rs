@@ -124,6 +124,21 @@ impl Snapshots {
     }
   }
 
+  /// Leaves unreadable records, which may be mid-write, to `evict`.
+  pub fn forget_images(&self, missing: impl Fn(&Descriptor) -> bool) -> Vec<PathBuf> {
+    entries(&self.images_directory())
+      .into_iter()
+      .map(|(path, _)| path)
+      .filter(|path| {
+        std::fs::read_to_string(path)
+          .ok()
+          .and_then(|text| oci::from_json(&text))
+          .is_some_and(|descriptor| missing(&descriptor))
+      })
+      .filter(|path| std::fs::remove_file(path).is_ok())
+      .collect()
+  }
+
   /// Restoring or re-saving an entry counts as use.
   pub fn evict(&self) {
     let cutoff = SystemTime::now() - KEEP_FOR;
@@ -221,5 +236,26 @@ mod tests {
     assert!(!snapshots.holds_rootfs("two"));
     assert_eq!(std::fs::read_to_string(restored).expect("restored"), "after step one");
     assert_eq!(snapshots.image("image"), Some(descriptor));
+  }
+
+  #[test]
+  fn forgets_images_whose_content_is_gone() {
+    let directory = tempfile::tempdir().expect("a temp dir");
+    let snapshots = Snapshots::at(directory.path());
+    let media_type = "application/vnd.oci.image.index.v1+json";
+
+    snapshots.save_image(&Descriptor::new(media_type, "sha256:aa", 42), "held");
+    snapshots.save_image(&Descriptor::new(media_type, "sha256:bb", 42), "gone");
+    std::fs::write(snapshots.image_path("partial"), "{\"mediaType\":").expect("a record mid-write");
+
+    assert_eq!(
+      snapshots.forget_images(|descriptor| descriptor.digest != "sha256:aa"),
+      [snapshots.image_path("gone")]
+    );
+    assert!(snapshots.image("held").is_some());
+    assert!(
+      snapshots.image_path("partial").exists(),
+      "it may still be being written"
+    );
   }
 }
