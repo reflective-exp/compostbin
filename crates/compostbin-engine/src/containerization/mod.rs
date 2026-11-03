@@ -15,8 +15,9 @@ mod terminal;
 mod unpacked;
 
 use crate::builder::Builder;
-use crate::engine::{Engine, Listener};
 use crate::error::EngineError;
+use crate::images::Images;
+use crate::machine::{Listener, Machine};
 use crate::model::{BuildPlan, ExecSpec, RunSpec};
 use containerization_framework::containerization::container::container_manager::CreateWithRootfsOptions;
 use containerization_framework::containerization::container::{ContainerManager, LinuxContainer};
@@ -188,14 +189,51 @@ fn built(images: &ImageStore, reference: &str) -> Result<Image, EngineError> {
   })
 }
 
-pub struct FrameworkEngine {
+impl Images for Store {
+  fn references(&self) -> Result<Vec<String>, EngineError> {
+    if !self.root().is_dir() {
+      return Ok(Vec::new());
+    }
+
+    let mut references: Vec<String> = self
+      .images()?
+      .list()?
+      .iter()
+      .map(Image::reference)
+      .collect();
+
+    references.sort();
+
+    Ok(references)
+  }
+
+  fn is_prepared(&self, image: &str) -> Result<bool, EngineError> {
+    let image = built(&self.images()?, image)?;
+
+    Ok(Unpacked::at(self.unpacked()).holds(&image))
+  }
+
+  fn missing(&self, image: &str) -> Result<Option<String>, EngineError> {
+    let (content, images) = self.content()?;
+
+    for digest in built(&images, image)?.referenced_digests()? {
+      if content.get(&digest)?.is_none() {
+        return Ok(Some(format!("blob sha256:{digest}")));
+      }
+    }
+
+    Ok(None)
+  }
+}
+
+pub struct FrameworkMachine {
   attach_failed: Arc<Report>,
   running: Arc<Running>,
   runtime_dir: PathBuf,
   store: Store,
 }
 
-impl FrameworkEngine {
+impl FrameworkMachine {
   pub fn new(runtime_dir: impl Into<PathBuf>, store: Store) -> Self {
     Self {
       attach_failed: Arc::new(|_| {}),
@@ -282,7 +320,7 @@ impl FrameworkEngine {
   }
 }
 
-impl Engine for FrameworkEngine {
+impl Machine for FrameworkMachine {
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError> {
     let descriptor = std::io::stdin().as_raw_fd();
     // Both stdin and stdout must be terminals, so redirected output gets no escape codes.
@@ -337,10 +375,6 @@ impl Engine for FrameworkEngine {
     .map_err(|error| EngineError::failed("attach", error))
   }
 
-  fn images(&self) -> Result<Vec<String>, EngineError> {
-    self.store.references()
-  }
-
   fn run(&self, spec: &RunSpec) -> Result<(), EngineError> {
     let booted = self.boot(spec)?;
 
@@ -364,24 +398,6 @@ impl Engine for FrameworkEngine {
   fn is_running(&self, name: &str) -> bool {
     // Not `Running`, which only knows this process's containers.
     control::served(&control_socket(&self.runtime_dir, name))
-  }
-
-  fn is_unpacked(&self, image: &str) -> Result<bool, EngineError> {
-    let image = built(&self.store.images()?, image)?;
-
-    Ok(Unpacked::at(self.store.unpacked()).holds(&image))
-  }
-
-  fn missing_content(&self, image: &str) -> Result<Option<String>, EngineError> {
-    let (content, images) = self.store.content()?;
-
-    for digest in built(&images, image)?.referenced_digests()? {
-      if content.get(&digest)?.is_none() {
-        return Ok(Some(format!("sha256:{digest}")));
-      }
-    }
-
-    Ok(None)
   }
 
   fn version(&self) -> String {
@@ -535,14 +551,14 @@ mod tests {
   #[test]
   fn tells_the_caller_to_build_an_image_the_store_lacks() {
     let root = tempfile::tempdir().expect("a temp dir");
-    let engine = FrameworkEngine::new(root.path().join("sessions"), Store::at(root.path().join("images")));
+    let store = Store::at(root.path().join("images"));
 
     for error in [
-      engine
-        .missing_content("compostbin/absent")
+      store
+        .missing("compostbin/absent")
         .expect_err("nothing is built"),
-      engine
-        .is_unpacked("compostbin/absent")
+      store
+        .is_prepared("compostbin/absent")
         .expect_err("nothing is built"),
     ] {
       assert_eq!(

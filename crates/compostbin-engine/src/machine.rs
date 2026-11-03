@@ -2,11 +2,8 @@ use crate::error::EngineError;
 use crate::model::{ExecSpec, RunSpec};
 use std::os::fd::OwnedFd;
 
-pub trait Engine {
+pub trait Machine {
   fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError>;
-
-  /// Each image as `name:tag`.
-  fn images(&self) -> Result<Vec<String>, EngineError>;
 
   fn run(&self, spec: &RunSpec) -> Result<(), EngineError>;
 
@@ -15,11 +12,6 @@ pub trait Engine {
 
   /// A container exists only while the process that started it is alive.
   fn is_running(&self, name: &str) -> bool;
-
-  fn is_unpacked(&self, image: &str) -> Result<bool, EngineError>;
-
-  /// The first blob of `image` missing from the store, as `sha256:<hex>`.
-  fn missing_content(&self, image: &str) -> Result<Option<String>, EngineError>;
 
   fn version(&self) -> String;
 }

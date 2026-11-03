@@ -2,8 +2,9 @@
 
 pub mod builder;
 pub mod containerization;
-pub mod engine;
 pub mod error;
 #[cfg(any(feature = "fake", test))]
 pub mod fake;
+pub mod images;
+pub mod machine;
 pub mod model;

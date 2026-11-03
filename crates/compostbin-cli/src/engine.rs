@@ -1,6 +1,6 @@
 use compostbin_core::image;
 use compostbin_core::session::Session;
-use compostbin_engine::containerization::{FrameworkBuilder, FrameworkEngine, Store, StoreError, describe, sweep};
+use compostbin_engine::containerization::{FrameworkBuilder, FrameworkMachine, Store, StoreError, describe, sweep};
 use std::error::Error;
 use std::fmt;
 
@@ -60,13 +60,13 @@ impl Error for Unready {
   }
 }
 
-pub fn select(session: &Session) -> Result<FrameworkEngine, Unready> {
+pub fn select(session: &Session) -> Result<(Store, FrameworkMachine), Unready> {
   let store = Store::at(image::store(session.resolver()));
 
   store.ready().map_err(Unready)?;
 
-  Ok(
-    FrameworkEngine::new(session.sessions_dir(), store)
-      .reporting(|error| eprintln!("compostbin: a session client went away: {error}")),
-  )
+  let machine = FrameworkMachine::new(session.sessions_dir(), store.clone())
+    .reporting(|error| eprintln!("compostbin: a session client went away: {error}"));
+
+  Ok((store, machine))
 }

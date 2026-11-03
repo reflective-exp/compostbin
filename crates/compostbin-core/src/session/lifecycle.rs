@@ -5,8 +5,9 @@ use crate::manifest::TomlFile;
 use crate::session::credentials::{self, CredentialStore, CredentialsFile};
 use crate::session::record::Record;
 use crate::session::{Notice, Session, briefing, settings};
-use compostbin_engine::engine::Engine;
 use compostbin_engine::error::EngineError;
+use compostbin_engine::images::Images;
+use compostbin_engine::machine::Machine;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -51,7 +52,12 @@ fn append_to_log(log: &Path, event: &PortEvent) {
 
 impl Session {
   /// Always records the spec, since `doctor` relies on the record.
-  fn create(&self, engine: &impl Engine, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
+  fn create(
+    &self,
+    images: &impl Images,
+    machine: &impl Machine,
+    notify: &(dyn Fn(Notice) + Sync),
+  ) -> Result<(), SessionError> {
     let spec = self.run_spec();
 
     for (target, _) in self.manifest.host.socket_targets() {
@@ -68,17 +74,17 @@ impl Session {
     }
 
     // Booting with a missing blob would fail naming the image's digest, not the blob's.
-    if let Some(digest) = engine.missing_content(&spec.image)? {
+    if let Some(missing) = images.missing(&spec.image)? {
       return Err(
         EngineError::unavailable(
           format!("boot from {}", spec.image),
-          format!("blob {digest} is missing; run `compostbin build`"),
+          format!("{missing} is missing; run `compostbin build`"),
         )
         .into(),
       );
     }
 
-    if !engine.is_unpacked(&spec.image)? {
+    if !images.is_prepared(&spec.image)? {
       notify(Notice::Unpacking(spec.image.clone()));
     }
 
@@ -89,7 +95,7 @@ impl Session {
       spool.sweep()?;
     }
 
-    engine.run(&spec)?;
+    machine.run(&spec)?;
     Record::of(&spec.mounts, &self.manifest.host)
       .save(&self.mount_record())
       .map_err(SessionError::Record)?;
@@ -98,26 +104,27 @@ impl Session {
   }
 
   /// Work that belongs to creation, such as relaying ports, must check this first.
-  pub fn is_running(&self, engine: &impl Engine) -> bool {
-    engine.is_running(&self.container_name())
+  pub fn is_running(&self, machine: &impl Machine) -> bool {
+    machine.is_running(&self.container_name())
   }
 
   /// Joining a running container only execs: the agent, port relay, record, and exit cleanup belong to
   /// the creator, which holds the VM.
   pub fn run(
     &self,
-    engine: &impl Engine,
+    images: &impl Images,
+    machine: &impl Machine,
     credentials: &(impl CredentialStore + Sync),
     process: &Process,
     notify: &(dyn Fn(Notice) + Sync),
   ) -> Result<i32, SessionError> {
     self.prepare(credentials, notify)?;
 
-    if self.is_running(engine) {
-      return Ok(engine.exec(&self.process_spec(process))?);
+    if self.is_running(machine) {
+      return Ok(machine.exec(&self.process_spec(process))?);
     }
 
-    self.launch(engine, credentials, process, notify)
+    self.launch(images, machine, credentials, process, notify)
   }
 
   /// Claude's home is created even when empty, because the guest cannot create a missing mount source.
@@ -156,16 +163,17 @@ impl Session {
   /// with this process.
   fn launch(
     &self,
-    engine: &impl Engine,
+    images: &impl Images,
+    machine: &impl Machine,
     credentials: &(impl CredentialStore + Sync),
     process: &Process,
     notify: &(dyn Fn(Notice) + Sync),
   ) -> Result<i32, SessionError> {
     self.prepare_host_spool()?;
-    self.create(engine, notify)?;
-    self.await_sockets(engine, notify)?;
+    self.create(images, machine, notify)?;
+    self.await_sockets(machine, notify)?;
 
-    let bound = host::listen_all(engine, &self.container_name(), &self.forwards(), &|event| {
+    let bound = host::listen_all(machine, &self.container_name(), &self.forwards(), &|event| {
       notify(Notice::Port(event))
     })?;
 
@@ -197,8 +205,8 @@ impl Session {
         scope.spawn(|| credentials::watch(&self.claude_home(), credentials, &stop));
       }
 
-      let code = match self.set_up(engine, process, notify) {
-        Ok(0) => engine
+      let code = match self.set_up(machine, process, notify) {
+        Ok(0) => machine
           .exec(&self.process_spec(process))
           .map_err(SessionError::from),
         failed => failed,
@@ -215,12 +223,12 @@ impl Session {
   }
 
   /// The relay makes its sockets after the container starts, so a process attached at once could find none.
-  fn await_sockets(&self, engine: &impl Engine, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
+  fn await_sockets(&self, machine: &impl Machine, notify: &(dyn Fn(Notice) + Sync)) -> Result<(), SessionError> {
     let Some(spec) = self.sockets_ready_spec() else {
       return Ok(());
     };
 
-    if engine.exec(&spec)? != 0 {
+    if machine.exec(&spec)? != 0 {
       notify(Notice::SocketsNotReady(
         self
           .manifest
@@ -237,12 +245,12 @@ impl Session {
   /// Returns the first failing line's code if `process` needs setup, else 0.
   fn set_up(
     &self,
-    engine: &impl Engine,
+    machine: &impl Machine,
     process: &Process,
     notify: &(dyn Fn(Notice) + Sync),
   ) -> Result<i32, SessionError> {
     for line in &self.manifest.container.setup {
-      let code = engine.exec(&self.setup_spec(line))?;
+      let code = machine.exec(&self.setup_spec(line))?;
 
       if code != 0 {
         notify(Notice::SetupFailed {
@@ -271,7 +279,13 @@ mod tests {
 
   fn run(session: &Session, engine: &RecordingEngine) -> i32 {
     session
-      .run(engine, &FakeStore::default(), &Process::claude(Vec::new()), &quiet)
+      .run(
+        engine,
+        engine,
+        &FakeStore::default(),
+        &Process::claude(Vec::new()),
+        &quiet,
+      )
       .expect("run should succeed")
   }
 
@@ -289,7 +303,13 @@ mod tests {
     let store = FakeStore::from(r#"{"claudeAiOauth":{"expiresAt":1000}}"#);
 
     session
-      .run(&RecordingEngine::new(), &store, &root_shell(), &quiet)
+      .run(
+        &RecordingEngine::new(),
+        &RecordingEngine::new(),
+        &store,
+        &root_shell(),
+        &quiet,
+      )
       .expect("run should succeed");
 
     assert!(
@@ -317,7 +337,13 @@ mod tests {
     let store = FakeStore::from(r#"{"claudeAiOauth":{"expiresAt":1000}}"#);
 
     session
-      .run(&RecordingEngine::new(), &store, &root_shell(), &quiet)
+      .run(
+        &RecordingEngine::new(),
+        &RecordingEngine::new(),
+        &store,
+        &root_shell(),
+        &quiet,
+      )
       .expect("run should succeed");
 
     assert_eq!(store.kept().as_deref(), Some(newer));
@@ -335,7 +361,13 @@ mod tests {
     let store = FakeStore::from(r#"{"claudeAiOauth":{"expiresAt":1000}}"#);
 
     session
-      .run(&RecordingEngine::new(), &store, &root_shell(), &quiet)
+      .run(
+        &RecordingEngine::new(),
+        &RecordingEngine::new(),
+        &store,
+        &root_shell(),
+        &quiet,
+      )
       .expect("run should succeed");
 
     assert_eq!(
@@ -364,7 +396,7 @@ mod tests {
     let engine = RecordingEngine::with_running(&["compostbin-cb"]);
 
     session
-      .run(&engine, &FakeStore::default(), &root_shell(), &quiet)
+      .run(&engine, &engine, &FakeStore::default(), &root_shell(), &quiet)
       .expect("run should succeed");
 
     assert_eq!(
@@ -382,15 +414,15 @@ mod tests {
     let engine = RecordingEngine::new();
 
     session
-      .run(&engine, &FakeStore::default(), &root_shell(), &quiet)
+      .run(&engine, &engine, &FakeStore::default(), &root_shell(), &quiet)
       .expect("run should succeed");
 
     assert_eq!(
       engine.calls(),
       [
         Call::IsRunning("compostbin-cb".to_string()),
-        Call::MissingContent(session.run_spec().image),
-        Call::IsUnpacked(session.run_spec().image),
+        Call::Missing(session.run_spec().image),
+        Call::IsPrepared(session.run_spec().image),
         Call::Run(session.run_spec()),
         Call::Exec(session.process_spec(&root_shell())),
       ]
@@ -410,8 +442,8 @@ mod tests {
       engine.calls(),
       [
         Call::IsRunning("compostbin-cb".to_string()),
-        Call::MissingContent(session.run_spec().image),
-        Call::IsUnpacked(session.run_spec().image),
+        Call::Missing(session.run_spec().image),
+        Call::IsPrepared(session.run_spec().image),
         Call::Run(session.run_spec()),
         claude(&session),
       ]
@@ -421,10 +453,16 @@ mod tests {
   #[test]
   fn run_refuses_an_image_missing_a_blob_naming_it() {
     let (_temp, session) = fixtures::temp_session(MANIFEST, PROJECT);
-    let engine = RecordingEngine::missing_content(&[], "sha256:abc");
+    let engine = RecordingEngine::missing(&[], "blob sha256:abc");
 
     let error = session
-      .run(&engine, &FakeStore::default(), &Process::claude(Vec::new()), &quiet)
+      .run(
+        &engine,
+        &engine,
+        &FakeStore::default(),
+        &Process::claude(Vec::new()),
+        &quiet,
+      )
       .expect_err("a damaged image should not boot");
 
     assert!(
@@ -450,11 +488,17 @@ mod tests {
       let said = std::sync::Mutex::new(Vec::new());
 
       session
-        .run(engine, &FakeStore::default(), &Process::claude(Vec::new()), &|notice| {
-          if let Notice::Unpacking(image) = notice {
-            said.lock().expect("unpoisoned").push(image);
-          }
-        })
+        .run(
+          engine,
+          engine,
+          &FakeStore::default(),
+          &Process::claude(Vec::new()),
+          &|notice| {
+            if let Notice::Unpacking(image) = notice {
+              said.lock().expect("unpoisoned").push(image);
+            }
+          },
+        )
         .expect("run should succeed");
 
       said.into_inner().expect("unpoisoned")
@@ -462,7 +506,7 @@ mod tests {
 
     assert_eq!(unpacking(&RecordingEngine::new()), std::slice::from_ref(&image));
     assert_eq!(
-      unpacking(&RecordingEngine::with_unpacked(&[&image])),
+      unpacking(&RecordingEngine::with_prepared(&[&image])),
       Vec::<String>::new()
     );
   }
@@ -475,7 +519,7 @@ mod tests {
     let process = Process::claude(vec!["--continue".to_string()]);
 
     session
-      .run(&engine, &FakeStore::default(), &process, &quiet)
+      .run(&engine, &engine, &FakeStore::default(), &process, &quiet)
       .expect("run should succeed");
 
     assert_eq!(engine.calls().last(), Some(&Call::Exec(session.process_spec(&process))));
@@ -526,6 +570,7 @@ mod tests {
     let code = session
       .run(
         &engine,
+        &engine,
         &FakeStore::default(),
         &Process::claude(Vec::new()),
         &|notice| {
@@ -549,7 +594,7 @@ mod tests {
     let said = std::sync::Mutex::new(Vec::new());
 
     session
-      .run(&engine, &FakeStore::default(), &root_shell(), &|notice| {
+      .run(&engine, &engine, &FakeStore::default(), &root_shell(), &|notice| {
         if let Notice::SetupFailed { line, code } = notice {
           said.lock().expect("unpoisoned").push((line, code));
         }
@@ -631,18 +676,14 @@ mod tests {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
     declare_socket(&mut session);
     let said = std::sync::Mutex::new(Vec::new());
+    let engine = RecordingEngine::exiting_with(1);
 
     session
-      .run(
-        &RecordingEngine::exiting_with(1),
-        &FakeStore::default(),
-        &root_shell(),
-        &|notice| {
-          if let Notice::SocketsNotReady(targets) = notice {
-            said.lock().expect("unpoisoned").push(targets);
-          }
-        },
-      )
+      .run(&engine, &engine, &FakeStore::default(), &root_shell(), &|notice| {
+        if let Notice::SocketsNotReady(targets) = notice {
+          said.lock().expect("unpoisoned").push(targets);
+        }
+      })
       .expect("sockets that are not ready must not stop the session");
 
     assert_eq!(
@@ -665,7 +706,7 @@ mod tests {
     let engine = RecordingEngine::new();
 
     let error = session
-      .run(&engine, &FakeStore::default(), &root_shell(), &quiet)
+      .run(&engine, &engine, &FakeStore::default(), &root_shell(), &quiet)
       .expect_err("the relay would replace the mounted file");
 
     assert!(
@@ -705,10 +746,11 @@ mod tests {
     let (_temp, mut session) = fixtures::temp_session(MANIFEST, PROJECT);
     session.user.claude.keychain = true;
     let said = std::sync::Mutex::new(Vec::new());
-    let engine = RecordingEngine::with_unpacked(&[&session.run_spec().image]);
+    let engine = RecordingEngine::with_prepared(&[&session.run_spec().image]);
 
     session
       .run(
+        &engine,
         &engine,
         &FakeStore::default(),
         &Process::claude(Vec::new()),

@@ -5,7 +5,8 @@ mod mounts;
 
 use crate::session::Session;
 use crate::session::credentials::CredentialStore;
-use compostbin_engine::engine::Engine;
+use compostbin_engine::images::Images;
+use compostbin_engine::machine::Machine;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status {
@@ -25,17 +26,18 @@ pub struct Check {
 
 pub fn diagnose(
   session: &Session,
-  engine: &impl Engine,
+  images: &impl Images,
+  machine: &impl Machine,
   credentials: &impl CredentialStore,
   api_key_present: bool,
 ) -> Vec<Check> {
-  let images = engine.images();
-  let running = session.is_running(engine);
+  let references = images.references();
+  let running = session.is_running(machine);
 
   vec![
-    engine::version(engine),
-    engine::store(images.as_deref()),
-    engine::base_image(session, engine, images.as_deref()),
+    engine::version(machine),
+    engine::store(references.as_deref()),
+    engine::base_image(session, images, references.as_deref()),
     mounts::mounted_paths(session),
     mounts::dangling_symlinks(session),
     mounts::live_mounts(session, running),
@@ -74,6 +76,15 @@ mod tests {
   use compostbin_engine::fake::RecordingEngine;
   use std::path::Path;
   use tempfile::TempDir;
+
+  fn diagnose(
+    session: &Session,
+    engine: &RecordingEngine,
+    credentials: &impl CredentialStore,
+    api_key_present: bool,
+  ) -> Vec<Check> {
+    super::diagnose(session, engine, engine, credentials, api_key_present)
+  }
 
   const LOGIN: &str = r#"{"claudeAiOauth":{"expiresAt":1000}}"#;
 
@@ -171,7 +182,7 @@ mod tests {
 
     let checks = diagnose(
       &session,
-      &RecordingEngine::missing_content(&[&image], "sha256:abc"),
+      &RecordingEngine::missing(&[&image], "blob sha256:abc"),
       &in_keychain(),
       false,
     );

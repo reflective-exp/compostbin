@@ -1,6 +1,7 @@
 use crate::builder::Builder;
-use crate::engine::{Engine, Listener};
 use crate::error::EngineError;
+use crate::images::Images;
+use crate::machine::{Listener, Machine};
 use crate::model::{BuildPlan, ExecSpec, RunSpec};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -15,11 +16,11 @@ pub const VERSION: &str = "fake engine 1.0";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Call {
   Exec(ExecSpec),
-  Images,
+  IsPrepared(String),
   IsRunning(String),
-  IsUnpacked(String),
   Listen(String, u32),
-  MissingContent(String),
+  Missing(String),
+  References,
   Run(RunSpec),
   Version,
 }
@@ -52,8 +53,8 @@ pub struct RecordingEngine {
   calls: Calls<Call>,
   listening: RefCell<HashMap<u32, Arc<Doorway>>>,
   running: RefCell<Vec<String>>,
-  unpacked: RefCell<Vec<String>>,
-  /// `None` makes `images` fail.
+  prepared: RefCell<Vec<String>>,
+  /// `None` makes `references` fail.
   images: Option<Vec<String>>,
   missing: Option<String>,
   exit_code: i32,
@@ -71,9 +72,9 @@ impl RecordingEngine {
     }
   }
 
-  pub fn with_unpacked(images: &[&str]) -> Self {
+  pub fn with_prepared(images: &[&str]) -> Self {
     Self {
-      unpacked: RefCell::new(images.iter().copied().map(str::to_string).collect()),
+      prepared: RefCell::new(images.iter().copied().map(str::to_string).collect()),
       ..Self::default()
     }
   }
@@ -85,9 +86,9 @@ impl RecordingEngine {
     }
   }
 
-  pub fn missing_content(images: &[&str], digest: &str) -> Self {
+  pub fn missing(images: &[&str], what: &str) -> Self {
     Self {
-      missing: Some(digest.to_string()),
+      missing: Some(what.to_string()),
       ..Self::with_images(images)
     }
   }
@@ -145,14 +146,9 @@ impl Listener for ChannelListener {
   }
 }
 
-impl Engine for RecordingEngine {
-  fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError> {
-    self.calls.record(Call::Exec(spec.clone()));
-    Ok(self.exit_code)
-  }
-
-  fn images(&self) -> Result<Vec<String>, EngineError> {
-    self.calls.record(Call::Images);
+impl Images for RecordingEngine {
+  fn references(&self) -> Result<Vec<String>, EngineError> {
+    self.calls.record(Call::References);
 
     self
       .images
@@ -160,10 +156,35 @@ impl Engine for RecordingEngine {
       .ok_or_else(|| EngineError::unavailable("read the image store", "there is none"))
   }
 
+  fn is_prepared(&self, image: &str) -> Result<bool, EngineError> {
+    self.calls.record(Call::IsPrepared(image.to_string()));
+
+    Ok(
+      self
+        .prepared
+        .borrow()
+        .iter()
+        .any(|prepared| prepared == image),
+    )
+  }
+
+  fn missing(&self, image: &str) -> Result<Option<String>, EngineError> {
+    self.calls.record(Call::Missing(image.to_string()));
+
+    Ok(self.missing.clone())
+  }
+}
+
+impl Machine for RecordingEngine {
+  fn exec(&self, spec: &ExecSpec) -> Result<i32, EngineError> {
+    self.calls.record(Call::Exec(spec.clone()));
+    Ok(self.exit_code)
+  }
+
   fn run(&self, spec: &RunSpec) -> Result<(), EngineError> {
     self.calls.record(Call::Run(spec.clone()));
     self.running.borrow_mut().push(spec.name.clone());
-    self.unpacked.borrow_mut().push(spec.image.clone());
+    self.prepared.borrow_mut().push(spec.image.clone());
     Ok(())
   }
 
@@ -189,24 +210,6 @@ impl Engine for RecordingEngine {
     self.calls.record(Call::IsRunning(name.to_string()));
 
     self.running.borrow().iter().any(|running| running == name)
-  }
-
-  fn is_unpacked(&self, image: &str) -> Result<bool, EngineError> {
-    self.calls.record(Call::IsUnpacked(image.to_string()));
-
-    Ok(
-      self
-        .unpacked
-        .borrow()
-        .iter()
-        .any(|unpacked| unpacked == image),
-    )
-  }
-
-  fn missing_content(&self, image: &str) -> Result<Option<String>, EngineError> {
-    self.calls.record(Call::MissingContent(image.to_string()));
-
-    Ok(self.missing.clone())
   }
 
   fn version(&self) -> String {

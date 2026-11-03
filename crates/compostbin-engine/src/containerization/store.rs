@@ -1,7 +1,7 @@
 //! Follows Containerization's `ImageStore` layout, which `ContainerManager` opens as-is.
 
 use crate::error::EngineError;
-use containerization_framework::containerization::image::{Image, ImageStore};
+use containerization_framework::containerization::image::ImageStore;
 use containerization_framework::containerization_oci::content::LocalContentStore;
 use containerization_framework::versions::{INIT_IMAGE, KERNEL_ARCHIVE_URL};
 use std::fmt;
@@ -162,28 +162,12 @@ impl Store {
 
     Ok((content, images))
   }
-
-  pub fn references(&self) -> Result<Vec<String>, EngineError> {
-    if !self.root.is_dir() {
-      return Ok(Vec::new());
-    }
-
-    let mut references: Vec<String> = self
-      .images()?
-      .list()?
-      .iter()
-      .map(Image::reference)
-      .collect();
-
-    references.sort();
-
-    Ok(references)
-  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::images::Images;
 
   #[test]
   fn names_the_kernel_and_init_image_for_the_versions_it_pins() {

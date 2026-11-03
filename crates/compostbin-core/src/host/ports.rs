@@ -1,7 +1,7 @@
 use crate::host::agent::POLL_INTERVAL;
 use crate::manifest::SocketMode;
-use compostbin_engine::engine::{Engine, Listener};
 use compostbin_engine::error::EngineError;
+use compostbin_engine::machine::{Listener, Machine};
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
@@ -123,7 +123,7 @@ impl std::fmt::Display for PortEvent {
 }
 
 pub fn listen_all(
-  engine: &impl Engine,
+  machine: &impl Machine,
   name: &str,
   forwards: &[Forward],
   report: &(dyn Fn(PortEvent) + Sync),
@@ -133,7 +133,7 @@ pub fn listen_all(
   for forward in forwards {
     bound.push(Bound {
       forward: forward.clone(),
-      listener: engine.listen(name, forward.vsock_port())?,
+      listener: machine.listen(name, forward.vsock_port())?,
     });
     report(PortEvent::Listening(forward.clone()));
   }

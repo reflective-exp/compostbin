@@ -46,7 +46,9 @@ pub fn missing_terminal() -> bool {
 
 pub fn attach(session: &Session, process: &Process) -> Result<i32, Box<dyn Error>> {
   let keychain = keychain();
-  Ok(session.run(&select(session)?, &keychain, process, &|notice| {
+  let (store, machine) = select(session)?;
+
+  Ok(session.run(&store, &machine, &keychain, process, &|notice| {
     notify(&keychain, notice)
   })?)
 }

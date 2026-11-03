@@ -30,10 +30,12 @@ pub fn report_diagnosis(
   }
 
   let session = config.load(resolver, project_dir)?;
+  let (store, machine) = select(&session)?;
   let checks: Vec<Check> = std::iter::once(configuration)
     .chain(doctor::diagnose(
       &session,
-      &select(&session)?,
+      &store,
+      &machine,
       &keychain(),
       std::env::var_os("ANTHROPIC_API_KEY").is_some(),
     ))
