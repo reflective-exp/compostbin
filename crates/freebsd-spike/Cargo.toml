@@ -1,0 +1,14 @@
+[package]
+description = "Spike: boot FreeBSD's arm64 VM image on Virtualization.framework and measure it. macOS only."
+edition.workspace = true
+license.workspace = true
+name = "freebsd-spike"
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+compostbin-engine.workspace = true
+virtualization = { path = "../../../../synchronal/virtualization/crates/virtualization" }
+xz2 = { version = "0.1", features = ["static"] }

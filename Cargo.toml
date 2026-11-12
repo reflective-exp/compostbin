@@ -4,6 +4,7 @@ members = [
   "crates/compostbin-cli",
   "crates/compostbin-core",
   "crates/compostbin-test",
+  "crates/freebsd-spike",
 ]
 resolver = "3"
 

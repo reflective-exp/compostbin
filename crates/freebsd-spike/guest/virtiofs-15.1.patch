@@ -1,0 +1,2028 @@
+diff --git a/sys/amd64/conf/GENERIC b/sys/amd64/conf/GENERIC
+index 6f1b4993a..7646ff86f 100644
+--- a/sys/amd64/conf/GENERIC
++++ b/sys/amd64/conf/GENERIC
+@@ -359,6 +359,7 @@ device		vtnet			# VirtIO Ethernet device
+ device		virtio_blk		# VirtIO Block device
+ device		virtio_scsi		# VirtIO SCSI device
+ device		virtio_balloon		# VirtIO Memory Balloon device
++device		virtio_fs		# VirtIO File System device
+ 
+ # Linux KVM paravirtualization support
+ device		kvm_clock		# KVM paravirtual clock driver
+diff --git a/sys/conf/files b/sys/conf/files
+index 7f925bfc3..d8663d1cc 100644
+--- a/sys/conf/files
++++ b/sys/conf/files
+@@ -3498,6 +3498,7 @@ dev/virtio/p9fs/virtio_p9fs.c		optional	virtio_p9fs
+ dev/virtio/random/virtio_random.c	optional	virtio_random
+ dev/virtio/scmi/virtio_scmi.c		optional	virtio_scmi
+ dev/virtio/scsi/virtio_scsi.c		optional	virtio_scsi
++dev/virtio/fs/virtio_fs.c		optional	virtio_fs
+ dev/vkbd/vkbd.c			optional vkbd
+ dev/vmgenc/vmgenc_acpi.c	optional acpi
+ dev/vmware/vmxnet3/if_vmx.c		optional vmx
+@@ -3610,6 +3611,7 @@ fs/fuse/fuse_main.c		optional fusefs
+ fs/fuse/fuse_node.c		optional fusefs
+ fs/fuse/fuse_vfsops.c		optional fusefs
+ fs/fuse/fuse_vnops.c		optional fusefs
++fs/fuse/virtiofs_vfsops.c	optional virtiofs
+ fs/mntfs/mntfs_vnops.c		standard
+ fs/msdosfs/msdosfs_conv.c	optional msdosfs
+ fs/msdosfs/msdosfs_denode.c	optional msdosfs
+diff --git a/sys/dev/virtio/fs/virtio_fs.c b/sys/dev/virtio/fs/virtio_fs.c
+new file mode 100644
+index 000000000..34159eefe
+--- /dev/null
++++ b/sys/dev/virtio/fs/virtio_fs.c
+@@ -0,0 +1,640 @@
++/*
++ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
++ *
++ * Copyright (c) 2026, Emil Tsalapatis <emil@etsalapatis.com>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice unmodified, this list of conditions, and the following
++ *    disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/* Device for the VirtIO file system. */
++
++#include <sys/cdefs.h>
++
++#include <sys/param.h>
++#include <sys/lock.h>
++#include <sys/queue.h>
++#include <sys/systm.h>
++#include <sys/condvar.h>
++#include <sys/kernel.h>
++#include <sys/malloc.h>
++#include <sys/module.h>
++#include <sys/mount.h>
++#include <sys/mutex.h>
++#include <sys/selinfo.h>
++#include <sys/sglist.h>
++#include <sys/sysctl.h>
++#include <sys/taskqueue.h>
++
++#include <machine/bus.h>
++#include <sys/bus.h>
++
++#include <dev/virtio/virtio.h>
++#include <dev/virtio/virtqueue.h>
++#include <dev/virtio/fs/virtio_fs.h>
++
++#include "virtio_if.h"
++#include "virtio_fs_internal.h"
++
++SYSCTL_NODE(_dev, OID_AUTO, vtfs, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
++    "Virtio FS paravirt device");
++
++bool vtfs_debug = false;
++SYSCTL_BOOL(_dev_vtfs, OID_AUTO, debug, CTLFLAG_RW, &vtfs_debug, false,
++	"vtfs debug logging");
++
++#define VTFS_DEBUG(fmt, ...) \
++	do { \
++		if (vtfs_debug)	\
++			printf("(%s:%d) " fmt "\n", __func__, __LINE__, ##__VA_ARGS__); \
++	} while (0)
++
++#define VTFS_ERR(fmt, ...) \
++	do { \
++		printf("[VTFS] (%s:%d) " fmt "\n", __func__, __LINE__, ##__VA_ARGS__); \
++	} while (0)
++
++/* Module-wide device list. */
++
++LIST_HEAD(, vtfs_softc) vtfs_contexts = LIST_HEAD_INITIALIZER(vtfs_contexts);
++struct mtx vtfs_mod_mtx;
++MTX_SYSINIT(vtfs_mod_mtx, &vtfs_mod_mtx, "Virtio FS Global Lock", MTX_DEF);
++
++#define VTFS_LOCK()		mtx_lock(&vtfs_mod_mtx)
++#define VTFS_UNLOCK()		mtx_unlock(&vtfs_mod_mtx)
++
++#define FSQ_LOCK(_fsq)		mtx_lock(&(_fsq)->vtfsq_mtx)
++#define FSQ_UNLOCK(_fsq)	mtx_unlock(&(_fsq)->vtfsq_mtx)
++#define FSQ_WAIT(_fsq)		cv_wait(&(_fsq)->vtfsq_cv, &(_fsq)->vtfsq_mtx)
++#define FSQ_KICK(_fsq)		cv_broadcast(&(_fsq)->vtfsq_cv)
++
++static int	vtfs_modevent(module_t, int, void *);
++
++static int	vtfs_probe(device_t);
++static int	vtfs_attach(device_t);
++static int	vtfs_detach(device_t);
++
++static device_method_t vtfs_methods[] = {
++	DEVMETHOD(device_probe,		vtfs_probe),
++	DEVMETHOD(device_attach,	vtfs_attach),
++	DEVMETHOD(device_detach,	vtfs_detach),
++	DEVMETHOD_END
++};
++
++static driver_t vtfs_driver = {
++	"vtfs",
++	vtfs_methods,
++	sizeof(struct vtfs_softc),
++};
++
++VIRTIO_DRIVER_MODULE(vtfs, vtfs_driver, vtfs_modevent, NULL);
++MODULE_VERSION(vtfs, 1);
++MODULE_DEPEND(vtfs, virtio, 1, 1, 1);
++
++VIRTIO_SIMPLE_PNPINFO(vtfs, VIRTIO_ID_FS, "VirtIO FS Adapter");
++
++static int
++vtfs_modevent(module_t mod, int type, void *unused)
++{
++	int error = 0;
++
++	switch (type) {
++	case MOD_LOAD:
++	case MOD_UNLOAD:
++	case MOD_QUIESCE:
++	case MOD_SHUTDOWN:
++		break;
++	default:
++		error = EOPNOTSUPP;
++		break;
++	}
++
++	return (error);
++}
++
++static int
++vtfs_probe(device_t dev)
++{
++	return (VIRTIO_SIMPLE_PROBE(dev, vtfs));
++}
++
++static int
++vtfs_read_config(struct vtfs_softc *sc)
++{
++	device_t dev;
++	size_t taglen;
++#ifdef INVARIANTS
++	struct vtfs_config fscfg;
++
++	_Static_assert(sizeof(sc->vtfs_nqs) == sizeof(fscfg.num_request_queues),
++		"reading num_request_queues into wrongly typed struct");
++#endif
++
++	dev = sc->vtfs_dev;
++
++	virtio_read_device_config(dev,
++		offsetof(struct vtfs_config, num_request_queues),
++		&sc->vtfs_nqs,
++		sizeof(sc->vtfs_nqs));
++
++	if (sc->vtfs_nqs == 0) {
++		VTFS_ERR("zero queues reported from host");
++		return (EINVAL);
++	}
++
++	/* Account for the priority queue. */
++	sc->vtfs_nqs += 1;
++
++	virtio_read_device_config_array(dev,
++		offsetof(struct vtfs_config, tag),
++		sc->vtfs_tag, 1, TAG_SIZE);
++
++	/* The read tag may not be NUL-terminated. */
++	taglen = strnlen(sc->vtfs_tag, TAG_SIZE);
++	if (taglen == 0) {
++		VTFS_ERR("read empty tag");
++		return (EINVAL);
++	}
++
++	KASSERT(taglen < sizeof(sc->vtfs_tag), ("overran tag buffer"));
++	sc->vtfs_tag[taglen] = '\0';
++
++	VTFS_DEBUG("fs tag: %s, # vqs: %d", sc->vtfs_tag, sc->vtfs_nqs);
++
++	return (0);
++}
++
++static void
++vtfs_vq_intr(void *xfsq)
++{
++	struct vtfs_fsq *fsq = xfsq;
++	struct virtqueue *vq = fsq->vtfsq_vq;
++	uint32_t len;
++	void *ftick;
++
++	FSQ_LOCK(fsq);
++
++	/* We turn off vtfs interrupts before removing the callback. */
++	KASSERT(fsq->vtfsq_cb != NULL, ("missing fuse callback"));
++
++again:
++	/* Go through the tickets one by one, invoke the fuse callback. */
++	while ((ftick = virtqueue_dequeue(vq, &len)) != NULL)
++		fsq->vtfsq_cb(ftick, len);
++
++	/* If the host pushed another descriptor in the meantime, go again. */
++	if (virtqueue_enable_intr(vq) != 0) {
++		virtqueue_disable_intr(vq);
++		goto again;
++	}
++
++	FSQ_KICK(fsq);
++	FSQ_UNLOCK(fsq);
++}
++
++static int
++vtfs_init_fsq(struct vtfs_softc *sc, int id)
++{
++	struct vtfs_fsq *fsq = &sc->vtfs_fsqs[id];
++	int error;
++
++	if (id == 0) {
++		snprintf(fsq->vtfsq_name, sizeof(fsq->vtfsq_name), 
++			"%s-priority", device_get_nameunit(sc->vtfs_dev));
++	} else {
++		snprintf(fsq->vtfsq_name, sizeof(fsq->vtfsq_name), 
++			"%s-queue%d", device_get_nameunit(sc->vtfs_dev), id);
++	}
++
++	mtx_init(&fsq->vtfsq_mtx, fsq->vtfsq_name, NULL, MTX_DEF);
++	cv_init(&fsq->vtfsq_cv, "fsqvqcv");
++
++	fsq->vtfsq_tq = taskqueue_create("vtfsqtq", M_WAITOK, 
++			taskqueue_thread_enqueue, &fsq->vtfsq_tq);
++	if (fsq->vtfsq_tq == NULL)
++		return (ENOMEM);
++
++	error = taskqueue_start_threads(&fsq->vtfsq_tq, VTFS_TQTHREAD,
++		PVM, "VirtioFS device");
++	if (error != 0)
++		return (error);
++
++	fsq->vtfsq_sc = sc;
++	VTFS_DEBUG("vq %s online", fsq->vtfsq_name);
++
++	return (0);
++}
++
++static void
++vtfs_fini_fsq(struct vtfs_fsq *fsq)
++{
++
++	if (fsq->vtfsq_sg != NULL) {
++		sglist_free(fsq->vtfsq_sg);
++		fsq->vtfsq_sg = NULL;
++	}
++
++	if (fsq->vtfsq_tq != NULL) {
++		taskqueue_drain_all(fsq->vtfsq_tq);
++		taskqueue_free(fsq->vtfsq_tq);
++		fsq->vtfsq_tq = NULL;
++	}
++
++	if (mtx_initialized(&fsq->vtfsq_mtx) != 0) {
++		cv_destroy(&fsq->vtfsq_cv);
++		mtx_destroy(&fsq->vtfsq_mtx);
++	}
++
++	VTFS_DEBUG("vq %s destroyed", fsq->vtfsq_name);
++}
++
++static int
++vtfs_alloc_fsqueues(struct vtfs_softc *sc)
++{
++	int error;
++	int nvqs;
++	int i, j;
++
++	nvqs = sc->vtfs_nqs;
++	sc->vtfs_fsqs = malloc((sizeof(*sc->vtfs_fsqs)) * nvqs, M_DEVBUF,
++		M_NOWAIT | M_ZERO);
++	if (sc->vtfs_fsqs == NULL)
++		return (ENOMEM);
++
++	for (i = 0; i < nvqs; i++) {
++		error = vtfs_init_fsq(sc, i);
++		if (error != 0)
++			goto fail;
++	}
++
++	return (0);
++
++fail:
++	VTFS_DEBUG("failed while initializing vq %d", i);
++
++	/* 
++	 * Clean up any initialized fsqs along with the 
++	 * partially initialized one.
++	 */
++	for (j = 0; j <= i; j++)
++		vtfs_fini_fsq(&sc->vtfs_fsqs[j]);
++
++	free(sc->vtfs_fsqs, M_DEVBUF);
++	sc->vtfs_fsqs = NULL;
++
++	return (error);
++}
++
++static void
++vtfs_free_fsqueues(struct vtfs_softc *sc)
++{
++	int i;
++
++	for (i = 0; i < sc->vtfs_nqs; i++)
++		vtfs_fini_fsq(&sc->vtfs_fsqs[i]);
++
++	free(sc->vtfs_fsqs, M_DEVBUF);
++	sc->vtfs_fsqs = NULL;
++}
++
++static int
++vtfs_alloc_virtqueues(struct vtfs_softc *sc)
++{
++	struct vq_alloc_info *vq_info;
++	struct vtfs_fsq *fsq;
++	device_t dev;
++	int error;
++	int nqs;
++	int i;
++
++	dev = sc->vtfs_dev;
++	nqs = sc->vtfs_nqs;
++
++	/* 
++	 * We have num_request_queues regular queues and one high-priority 
++	 * queue for FORGET/general priority operations.
++	 */
++	KASSERT(nqs > 1, ("missing regular queues"));
++
++	vq_info = malloc(sizeof(*vq_info) * nqs, M_TEMP, M_NOWAIT);
++	if (vq_info == NULL)
++		return (ENOMEM);
++
++	for (i = 0; i < nqs; i++) {
++		fsq = &sc->vtfs_fsqs[i];
++		VQ_ALLOC_INFO_INIT(&vq_info[i], VTFS_MAXSEGS, vtfs_vq_intr, 
++			fsq, &fsq->vtfsq_vq, "%s", fsq->vtfsq_name);
++	}
++
++	error = virtio_alloc_virtqueues(dev, nqs, vq_info);
++	free(vq_info, M_TEMP);
++
++	VTFS_DEBUG("virtqueues online");
++
++	return (error);
++}
++
++static int
++vtfs_enable_intr(device_t dev)
++{
++	struct vtfs_softc *sc;
++	int error;
++	int i;
++
++	sc = device_get_softc(dev);
++
++	error = virtio_setup_intr(dev, INTR_TYPE_BIO);
++	if (error != 0)
++		return (error);
++
++	for (i = 0; i < sc->vtfs_nqs; i++)
++		virtqueue_enable_intr(sc->vtfs_fsqs[i].vtfsq_vq);
++
++	return (0);
++}
++
++static void
++vtfs_stop(struct vtfs_softc *sc)
++{
++	struct virtqueue *vq;
++	int i;
++
++	/* The file system should have cleared the virtqueues when unmounting. */
++	for (i = 0; i < sc->vtfs_nqs; i++) {
++		vq = sc->vtfs_fsqs[i].vtfsq_vq;
++
++		/* Check if are aborting a failed device attach. */
++		if (vq == NULL)
++			continue;
++
++		virtqueue_disable_intr(vq);
++		KASSERT(virtqueue_empty(vq), ("virtqueue not empty"));
++	}
++
++	virtio_stop(sc->vtfs_dev);
++}
++
++static void
++vtfs_add(struct vtfs_softc *sc)
++{
++	VTFS_LOCK();
++	LIST_INSERT_HEAD(&vtfs_contexts, sc, vtfs_link);
++	sc->vtfs_attached = true;
++	VTFS_UNLOCK();
++}
++
++static void
++vtfs_remove(struct vtfs_softc *sc)
++{
++	VTFS_LOCK();
++	if (sc->vtfs_attached) {
++		LIST_REMOVE(sc, vtfs_link);
++		sc->vtfs_attached = false;
++	}
++	VTFS_UNLOCK();
++}
++
++int
++vtfs_find(char *tag, struct vtfs_softc **scp)
++{
++	struct vtfs_softc *sc;
++
++	VTFS_LOCK();
++
++	LIST_FOREACH(sc, &vtfs_contexts, vtfs_link) {
++		if (strncmp(sc->vtfs_tag, tag, sizeof(sc->vtfs_tag)) != 0)
++			continue;
++
++		if (sc->vtfs_inuse) {
++			VTFS_UNLOCK();
++			return (EALREADY);
++		}
++
++		sc->vtfs_inuse = true;
++		VTFS_UNLOCK();
++
++		*scp = sc;
++
++		return (0);
++	}
++
++	VTFS_UNLOCK();
++
++	return (EINVAL);
++}
++
++void
++vtfs_release(struct vtfs_softc *sc)
++{
++	VTFS_LOCK();
++	sc->vtfs_inuse = false;
++	VTFS_UNLOCK();
++}
++
++static int
++vtfs_attach(device_t dev)
++{
++	struct vtfs_softc *sc;
++	int error;
++
++	sc = device_get_softc(dev);
++	sc->vtfs_dev = dev;
++	sc->vtfs_inuse = false;
++
++	error = vtfs_read_config(sc);
++	if (error != 0)
++		goto fail;
++
++	error = vtfs_alloc_fsqueues(sc);
++	if (error != 0)
++		goto fail;
++
++	error = vtfs_alloc_virtqueues(sc);
++	if (error != 0)
++		goto fail;
++
++	error = vtfs_enable_intr(dev);
++	if (error != 0)
++		goto fail;
++
++	vtfs_add(sc);
++
++	return (0);
++
++fail:
++	vtfs_detach(dev);
++
++	return (error);
++}
++
++static int
++vtfs_detach(device_t dev)
++{
++	struct vtfs_softc *sc;
++
++	sc = device_get_softc(dev);
++
++	vtfs_remove(sc);
++
++	/* Kill any active FUSE session. */
++	if (sc->vtfs_detach_cb != NULL)
++		sc->vtfs_detach_cb(sc->vtfs_detach_cb_arg);
++
++	if (sc->vtfs_fsqs == NULL)
++		goto done;
++
++	vtfs_drain(sc);
++
++	vtfs_stop(sc);
++	vtfs_free_fsqueues(sc);
++
++done:
++	VTFS_DEBUG("device detached");
++
++	return (0);
++}
++
++void
++vtfs_register_cb(struct vtfs_softc *sc, vtfs_fuse_cb forget_cb,
++	vtfs_fuse_cb regular_cb, vtfs_fuse_cb cancel_cb,
++	vtfs_teardown_cb detach_cb, void *detach_cb_arg)
++{
++	struct vtfs_fsq *fsq;
++	int i;
++
++	sc->vtfs_detach_cb = detach_cb;
++	sc->vtfs_detach_cb_arg = detach_cb_arg;
++	sc->cancel_cb = cancel_cb;
++
++	for (i = 0; i < sc->vtfs_nqs; i++) {
++		fsq = &sc->vtfs_fsqs[i];
++		FSQ_LOCK(fsq);
++		if (i == VTFS_FORGET_FSQ)
++			fsq->vtfsq_cb = forget_cb;
++		else
++			fsq->vtfsq_cb = regular_cb;
++		FSQ_UNLOCK(fsq);
++	}
++}
++
++void
++vtfs_unregister_cb(struct vtfs_softc *sc)
++{
++	struct vtfs_fsq *fsq;
++	int i;
++
++	for (i = 0; i < sc->vtfs_nqs; i++) {
++		fsq = &sc->vtfs_fsqs[i];
++
++		FSQ_LOCK(fsq);
++		fsq->vtfsq_cb = NULL;
++		FSQ_UNLOCK(fsq);
++	}
++
++	sc->vtfs_detach_cb_arg = NULL;
++	sc->vtfs_detach_cb = NULL;
++}
++
++int
++vtfs_enqueue(struct vtfs_softc *sc, void *ftick, struct sglist *sg,
++	int readable, int writable, bool urgent)
++{
++	struct virtqueue *vq;
++	struct vtfs_fsq *fsq;
++	int error;
++
++	if (urgent)
++		fsq = &sc->vtfs_fsqs[VTFS_FORGET_FSQ];
++	else
++		fsq = &sc->vtfs_fsqs[VTFS_REGULAR_FSQ];
++
++	FSQ_LOCK(fsq);
++	vq = fsq->vtfsq_vq;
++
++	KASSERT(sg->sg_nseg == readable + writable, ("inconsistent segmentation"));
++
++	error = virtqueue_enqueue(vq, ftick, sg, readable, writable);
++	while (error == ENOSPC) {
++		FSQ_WAIT(fsq);
++		error = virtqueue_enqueue(vq, ftick, sg, readable, writable);
++	}
++
++	if (error != 0) {
++		FSQ_UNLOCK(fsq);
++
++		/* A new sglist will be created when virtiofs resends. */
++		sglist_free(sg);
++		return (error);
++	}
++
++	virtqueue_notify(vq);
++
++	FSQ_UNLOCK(fsq);
++	sglist_free(sg);
++
++	return (0);
++}
++
++static void
++vtfs_drain_vq(struct vtfs_fsq *fsq, vtfs_fuse_cb cancel_cb)
++{
++	struct virtqueue *vq = fsq->vtfsq_vq;
++	int last;
++	int len;
++	void *ftick;
++
++	/* 
++	 * If there is no callback, we don't have an 
++	 * upper-level FUSE session. 
++	 */
++	if (fsq->vtfsq_cb == NULL) {
++		KASSERT(virtqueue_empty(vq), ("virtqueue not empty"));
++		return;
++	}
++
++	while ((ftick = virtqueue_dequeue(vq, &len)) != NULL)
++		fsq->vtfsq_cb(ftick, len);
++
++	for (last = 0; (ftick = virtqueue_drain(vq, &last)) != NULL;)
++		cancel_cb(ftick, 0);
++
++	KASSERT(virtqueue_empty(vq), ("virtqueue not empty"));
++}
++
++void
++vtfs_drain(struct vtfs_softc *sc)
++{
++	struct vtfs_fsq *fsq;
++	int i;
++
++	for (i = 0; i < sc->vtfs_nqs; i++) {
++		fsq = &sc->vtfs_fsqs[i];
++		FSQ_LOCK(fsq);
++
++		/* If NULL, we are aborting a failed device attach. */
++		if (fsq->vtfsq_vq != NULL) {
++			virtqueue_disable_intr(fsq->vtfsq_vq);
++			vtfs_drain_vq(fsq, sc->cancel_cb);
++		}
++
++		FSQ_UNLOCK(fsq);
++	}
++}
+diff --git a/sys/dev/virtio/fs/virtio_fs.h b/sys/dev/virtio/fs/virtio_fs.h
+new file mode 100644
+index 000000000..86972fb09
+--- /dev/null
++++ b/sys/dev/virtio/fs/virtio_fs.h
+@@ -0,0 +1,44 @@
++/*
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2024, Emil Tsalapatis <emil@etsalapatis.com>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice unmodified, this list of conditions, and the following
++ *    disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _VIRTIO_FS_H
++#define _VIRTIO_FS_H
++
++struct vtfs_softc;
++typedef struct vtfs_softc *vtfs_instance;
++typedef void (*vtfs_fuse_cb)(void *, uint32_t);
++typedef void (*vtfs_teardown_cb)(void *);
++
++void vtfs_register_cb(vtfs_instance, vtfs_fuse_cb, vtfs_fuse_cb,
++		vtfs_fuse_cb, vtfs_teardown_cb, void *);
++int vtfs_enqueue(vtfs_instance, void *, struct sglist *, int, int, bool);
++int vtfs_find(char *, vtfs_instance *);
++void vtfs_release(vtfs_instance);
++void vtfs_drain(vtfs_instance);
++void vtfs_unregister_cb(vtfs_instance);
++
++#endif /* _VIRTIO_FS_H */
+diff --git a/sys/dev/virtio/fs/virtio_fs_internal.h b/sys/dev/virtio/fs/virtio_fs_internal.h
+new file mode 100644
+index 000000000..a0c1e40de
+--- /dev/null
++++ b/sys/dev/virtio/fs/virtio_fs_internal.h
+@@ -0,0 +1,78 @@
++/*
++ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
++ *
++ * Copyright (c) 2026, Emil Tsalapatis <emil@etsalapatis.com>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice unmodified, this list of conditions, and the following
++ *    disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++#ifndef _VIRTIO_FS_INTERNAL_
++#define _VIRTIO_FS_INTERNAL_
++
++/* Protocol-specified file system tag size. */
++#define TAG_SIZE (36)
++#define FSQ_NAME_SIZE (16)
++
++/* Struct for the file system instance. Provided by the host. */
++struct vtfs_config {
++	/* UTF-8 File system tag. */
++	uint8_t tag[TAG_SIZE];
++	/* Number of request queues. */
++	uint32_t num_request_queues;
++	/* Minimum # bytes for each buffer in the notification queue. */
++	uint32_t notify_buf_size;
++} __packed;
++
++/* A queue structure belonging to a virtio fs device. */
++struct vtfs_fsq {
++	struct mtx		vtfsq_mtx;
++	struct cv		vtfsq_cv;
++	struct virtqueue	*vtfsq_vq;
++	struct taskqueue	*vtfsq_tq;
++	struct sglist 		*vtfsq_sg;
++	char			vtfsq_name[FSQ_NAME_SIZE];
++	struct vtfs_softc	*vtfsq_sc;
++	vtfs_fuse_cb		vtfsq_cb;
++};
++
++/* A single virtio fs device instance. */
++struct vtfs_softc {
++	device_t	vtfs_dev;
++	struct mtx	vtfs_mtx;
++	bool		vtfs_attached;
++	struct vtfs_fsq	*vtfs_fsqs;
++	bool		vtfs_inuse;	/* protected by the vtfs modulelock */
++	vtfs_teardown_cb	vtfs_detach_cb;
++	void		*vtfs_detach_cb_arg;
++	/* Host-provided config state. */
++	uint8_t 	vtfs_tag[TAG_SIZE + 1];
++	uint32_t 	vtfs_nqs;
++	vtfs_fuse_cb	cancel_cb;
++	LIST_ENTRY(vtfs_softc) vtfs_link;
++};
++
++#define VTFS_FORGET_FSQ (0)
++#define VTFS_REGULAR_FSQ (1)
++
++#define VTFS_MAXSEGS (16)
++#define VTFS_TQTHREAD (4)
++
++#endif /* _VIRTIO_FS_INTERNAL_ */
+diff --git a/sys/fs/fuse/fuse_internal.c b/sys/fs/fuse/fuse_internal.c
+index c902b93a4..96da31d45 100644
+--- a/sys/fs/fuse/fuse_internal.c
++++ b/sys/fs/fuse/fuse_internal.c
+@@ -257,6 +257,7 @@ fuse_internal_cache_attrs(struct vnode *vp, struct fuse_attr *attr,
+ 	struct fuse_vnode_data *fvdat;
+ 	struct fuse_data *data;
+ 	struct vattr *vp_cache_at;
++	off_t size;
+ 
+ 	mp = vnode_mount(vp);
+ 	fvdat = VTOFUD(vp);
+@@ -264,13 +265,25 @@ fuse_internal_cache_attrs(struct vnode *vp, struct fuse_attr *attr,
+ 
+ 	ASSERT_CACHED_ATTRS_LOCKED(vp);
+ 
++	size = attr->size;
++
+ 	fuse_validity_2_bintime(attr_valid, attr_valid_nsec,
+ 		&fvdat->attr_cache_timeout);
+ 
++	/*
++	 * Check if the file has been changed from under us. We
++	 * can only reliably check whether the server has grown
++	 * the file unilaterally, not shrunk. This is because
++	 * unflushed writes on our end can lead us to report
++	 * larger sizes compared to the result of a getattr
++	 * to the server even if we have set FN_SIZECHANGE.
++	 * The opposite isn't true, because we clear the
++	 * FN_SIZECHANGE flag if we truncate the file.
++	 */
+ 	if (vnode_isreg(vp) &&
+ 	    fvdat->cached_attrs.va_size != VNOVAL &&
+ 	    fvdat->flag & FN_SIZECHANGE &&
+-	    attr->size != fvdat->cached_attrs.va_size)
++	    attr->size > fvdat->cached_attrs.va_size)
+ 	{
+ 		if (data->cache_mode == FUSE_CACHE_WB)
+ 		{
+@@ -313,11 +326,16 @@ fuse_internal_cache_attrs(struct vnode *vp, struct fuse_attr *attr,
+ 	}
+ 
+ 	/* Fix our buffers if the filesize changed without us knowing */
+-	if (vnode_isreg(vp) && attr->size != fvdat->cached_attrs.va_size) {
++	if (vnode_isreg(vp) && attr->size != fvdat->cached_attrs.va_size &&
++	    !(fvdat->flag & FN_SIZECHANGE)) {
+ 		(void)fuse_vnode_setsize(vp, attr->size, from_server);
+ 		fvdat->cached_attrs.va_size = attr->size;
+ 	}
+ 
++	/* If we have a local dirty copy of the size, use it. */
++	if (fvdat->flag & FN_SIZECHANGE && fvdat->cached_attrs.va_size != VNOVAL)
++		size = fvdat->cached_attrs.va_size;
++
+ 	if (attr_valid > 0 || attr_valid_nsec > 0)
+ 		vp_cache_at = &(fvdat->cached_attrs);
+ 	else if (vap != NULL)
+@@ -332,7 +350,7 @@ fuse_internal_cache_attrs(struct vnode *vp, struct fuse_attr *attr,
+ 	vp_cache_at->va_uid       = attr->uid;
+ 	vp_cache_at->va_gid       = attr->gid;
+ 	vp_cache_at->va_rdev      = attr->rdev;
+-	vp_cache_at->va_size      = attr->size;
++	vp_cache_at->va_size      = size;
+ 	/* XXX on i386, seconds are truncated to 32 bits */
+ 	vp_cache_at->va_atime.tv_sec  = attr->atime;
+ 	vp_cache_at->va_atime.tv_nsec = attr->atimensec;
+@@ -991,7 +1009,8 @@ fuse_internal_init_callback(struct fuse_ticket *tick, struct uio *uio)
+ 	if ((err = tick->tk_aw_ohead.error)) {
+ 		goto out;
+ 	}
+-	if ((err = fticket_pull(tick, uio))) {
++
++	if (!fsess_get_virtiofs(data) && (err = fticket_pull(tick, uio))) {
+ 		goto out;
+ 	}
+ 	fiio = fticket_resp(tick)->base;
+@@ -1010,7 +1029,8 @@ fuse_internal_init_callback(struct fuse_ticket *tick, struct uio *uio)
+ 	}
+ 
+ 	if (fuse_libabi_geq(data, 7, 5)) {
+-		if (fticket_resp(tick)->len == sizeof(struct fuse_init_out) ||
++		if (fsess_get_virtiofs(data) ||
++		    fticket_resp(tick)->len == sizeof(struct fuse_init_out) ||
+ 		    fticket_resp(tick)->len == FUSE_COMPAT_22_INIT_OUT_SIZE) {
+ 			data->max_write = fiio->max_write;
+ 			if (fiio->flags & FUSE_ASYNC_READ)
+diff --git a/sys/fs/fuse/fuse_ipc.c b/sys/fs/fuse/fuse_ipc.c
+index 381031312..0c4b1ed98 100644
+--- a/sys/fs/fuse/fuse_ipc.c
++++ b/sys/fs/fuse/fuse_ipc.c
+@@ -76,6 +76,7 @@
+ #include <sys/proc.h>
+ #include <sys/mount.h>
+ #include <sys/sdt.h>
++#include <sys/sglist.h>
+ #include <sys/vnode.h>
+ #include <sys/signalvar.h>
+ #include <sys/syscallsubr.h>
+@@ -87,6 +88,8 @@
+ #include "fuse_ipc.h"
+ #include "fuse_internal.h"
+ 
++#include <dev/virtio/fs/virtio_fs.h>
++
+ SDT_PROVIDER_DECLARE(fusefs);
+ /* 
+  * Fuse trace probe:
+@@ -107,8 +110,6 @@ static inline int
+ fticket_aw_pull_uio(struct fuse_ticket *ftick,
+     struct uio *uio);
+ 
+-static int fuse_body_audit(struct fuse_ticket *ftick, size_t blen);
+-
+ static fuse_handler_t fuse_standard_handler;
+ 
+ static counter_u64_t fuse_ticket_count;
+@@ -277,15 +278,15 @@ fiov_teardown(struct fuse_iov *fiov)
+ void
+ fiov_adjust(struct fuse_iov *fiov, size_t size)
+ {
++	void *base;
++
+ 	if (fiov->allocated_size < size ||
+ 	    (fuse_iov_permanent_bufsize >= 0 &&
+ 	    fiov->allocated_size - size > fuse_iov_permanent_bufsize &&
+ 	    --fiov->credit < 0)) {
+-		fiov->base = realloc(fiov->base, FU_AT_LEAST(size), M_FUSEMSG,
++		base = realloc(fiov->base, FU_AT_LEAST(size), M_FUSEMSG,
+ 		    M_WAITOK | M_ZERO);
+-		if (!fiov->base) {
+-			panic("FUSE: realloc failed");
+-		}
++		fiov->base = base;
+ 		fiov->allocated_size = FU_AT_LEAST(size);
+ 		fiov->credit = fuse_iov_credit;
+ 		/* Clear data buffer after reallocation */
+@@ -637,6 +638,16 @@ fuse_insert_callback(struct fuse_ticket *ftick, fuse_handler_t * handler)
+ 	fuse_lck_mtx_unlock(ftick->tk_data->aw_mtx);
+ }
+ 
++
++/* Notify users of the FUSE device of the new ticket. */
++static void
++fuse_notify_fuse_device(struct fuse_data *data)
++{
++	wakeup_one(data);
++	selwakeuppri(&data->ks_rsel, PZERO);
++	KNOTE_LOCKED(&data->ks_rsel.si_note, 0);
++}
++
+ /*
+  * Insert a new upgoing ticket into the message queue
+  *
+@@ -646,26 +657,188 @@ fuse_insert_callback(struct fuse_ticket *ftick, fuse_handler_t * handler)
+ void
+ fuse_insert_message(struct fuse_ticket *ftick, bool urgent)
+ {
++	struct fuse_data *data = ftick->tk_data;
++	int error;
++
+ 	if (ftick->tk_flag & FT_DIRTY) {
+ 		panic("FUSE: ticket reused without being refreshed");
+ 	}
+ 	ftick->tk_flag |= FT_DIRTY;
+ 
+-	if (fdata_get_dead(ftick->tk_data)) {
++	if (fdata_get_dead(data))
++		return;
++
++	/*
++	 * Choose between the virtiofs and FUSE paths. The virtiofs
++	 * path does not need to attach the ticket to the outgoing
++	 * message queue, because sending and acknowledging the
++	 * message happens through virtio.
++	 */
++	if (fsess_get_virtiofs(data)) {
++		/*
++		 * Enqueueing should never actually fail: The only
++		 * possible failures are caused by having either 0
++		 * or too many segments. Neither of those conditions
++		 * should be possible the way we send FUSE tickets.
++		 */
++		error = data->virtiofs_enqueue_cb(ftick);
++		if (error != 0)
++			panic("FUSE: failed to enqueue ticket into virtiofs");
+ 		return;
+ 	}
+-	fuse_lck_mtx_lock(ftick->tk_data->ms_mtx);
++
++	fuse_lck_mtx_lock(data->ms_mtx);
++
+ 	if (urgent)
+ 		fuse_ms_push_head(ftick);
+ 	else
+ 		fuse_ms_push(ftick);
+-	wakeup_one(ftick->tk_data);
+-	selwakeuppri(&ftick->tk_data->ks_rsel, PZERO);
+-	KNOTE_LOCKED(&ftick->tk_data->ks_rsel.si_note, 0);
+-	fuse_lck_mtx_unlock(ftick->tk_data->ms_mtx);
++
++	fuse_notify_fuse_device(data);
++
++	fuse_lck_mtx_unlock(data->ms_mtx);
+ }
+ 
+-static int
++/* Special case for read tickets. Reply size depends on the specified length. */
++static size_t
++fticket_out_size_read(struct fuse_ticket *ftick)
++{
++	struct fuse_read_in *read_header;
++	uintptr_t in_header;
++
++	in_header = (uintptr_t) ftick->tk_ms_fiov.base;
++	read_header = (struct fuse_read_in *)(in_header + sizeof(struct fuse_in_header));
++	return (read_header->size);
++}
++
++size_t
++fticket_out_size(struct fuse_ticket *ftick)
++{
++	enum fuse_opcode opcode;
++
++	opcode = fticket_opcode(ftick);
++
++	switch (opcode) {
++	case FUSE_BMAP:
++		return (sizeof(struct fuse_bmap_out));
++
++	case FUSE_LINK:
++	case FUSE_LOOKUP:
++	case FUSE_MKDIR:
++	case FUSE_MKNOD:
++	case FUSE_SYMLINK:
++		if (fuse_libabi_geq(ftick->tk_data, 7, 9)) {
++			return (sizeof(struct fuse_entry_out));
++		} else {
++			return (FUSE_COMPAT_ENTRY_OUT_SIZE);
++		}
++
++	case FUSE_FORGET:
++		return (0);
++
++	case FUSE_GETATTR:
++	case FUSE_SETATTR:
++		if (fuse_libabi_geq(ftick->tk_data, 7, 9)) {
++			return (sizeof(struct fuse_attr_out));
++		} else {
++			return (FUSE_COMPAT_ATTR_OUT_SIZE);
++		}
++
++	case FUSE_READLINK:
++		/* We are expecting to read back a POSIX path. */
++		return (PATH_MAX);
++
++	case FUSE_UNLINK:
++	case FUSE_RMDIR:
++	case FUSE_RENAME:
++		return (0);
++
++	case FUSE_OPEN:
++		return (sizeof(struct fuse_open_out));
++
++	case FUSE_READ:
++		return (fticket_out_size_read(ftick));
++
++	case FUSE_WRITE:
++		return (sizeof(struct fuse_write_out));
++
++	case FUSE_STATFS:
++		if (fuse_libabi_geq(ftick->tk_data, 7, 4)) {
++			return (sizeof(struct fuse_statfs_out));
++		} else {
++			return (FUSE_COMPAT_STATFS_SIZE);
++		}
++
++	case FUSE_RELEASE:
++	case FUSE_FSYNC:
++	case FUSE_SETXATTR:
++		return (0);
++
++	case FUSE_GETXATTR:
++		return (sizeof(struct fuse_getxattr_out));
++
++	case FUSE_LISTXATTR:
++		return (sizeof(struct fuse_listxattr_out));
++
++	case FUSE_REMOVEXATTR:
++	case FUSE_FLUSH:
++		return (0);
++
++	case FUSE_INIT:
++		return (sizeof(struct fuse_init_out));
++
++	case FUSE_OPENDIR:
++		return (sizeof(struct fuse_open_out));
++
++	case FUSE_READDIR:
++		return (fticket_out_size_read(ftick));
++
++	case FUSE_RELEASEDIR:
++	case FUSE_FSYNCDIR:
++		return (0);
++
++	case FUSE_GETLK:
++		return (sizeof(struct fuse_lk_out));
++
++	case FUSE_SETLK:
++	case FUSE_SETLKW:
++	case FUSE_ACCESS:
++		return (0);
++
++	case FUSE_CREATE:
++		if (fuse_libabi_geq(ftick->tk_data, 7, 9)) {
++			return (sizeof(struct fuse_entry_out) +
++			    sizeof(struct fuse_open_out));
++		} else {
++			return (FUSE_COMPAT_ENTRY_OUT_SIZE +
++			    sizeof(struct fuse_open_out));
++		}
++
++	case FUSE_INTERRUPT:
++	case FUSE_DESTROY:
++		return (0);
++
++	case FUSE_IOCTL:
++		return (sizeof(struct fuse_ioctl_out));
++
++	case FUSE_FALLOCATE:
++		return (0);
++
++	case FUSE_LSEEK:
++		return (sizeof(struct fuse_lseek_out));
++
++	case FUSE_COPY_FILE_RANGE:
++		return (sizeof(struct fuse_write_out));
++
++	case FUSE_SYNCFS:
++		return (0);
++
++	default:
++		panic("FUSE: opcodes out of sync (%d)", opcode);
++	}
++}
++
++int
+ fuse_body_audit(struct fuse_ticket *ftick, size_t blen)
+ {
+ 	int err = 0;
+@@ -878,7 +1051,9 @@ fuse_standard_handler(struct fuse_ticket *ftick, struct uio *uio)
+ {
+ 	int err = 0;
+ 
+-	err = fticket_pull(ftick, uio);
++	/* Data already pulled for virtiofs. */
++	if (uio != NULL)
++		err = fticket_pull(ftick, uio);
+ 
+ 	fuse_lck_mtx_lock(ftick->tk_aw_mtx);
+ 
+diff --git a/sys/fs/fuse/fuse_ipc.h b/sys/fs/fuse/fuse_ipc.h
+index 69501adf4..19b0b41b9 100644
+--- a/sys/fs/fuse/fuse_ipc.h
++++ b/sys/fs/fuse/fuse_ipc.h
+@@ -65,6 +65,7 @@
+ 
+ #include <sys/param.h>
+ #include <sys/refcount.h>
++#include <sys/taskqueue.h>
+ 
+ enum fuse_data_cache_mode {
+ 	FUSE_CACHE_UC,
+@@ -130,6 +131,8 @@ struct fuse_ticket {
+ 	struct mtx			tk_aw_mtx;
+ 	fuse_handler_t			*tk_aw_handler;
+ 	TAILQ_ENTRY(fuse_ticket)	tk_aw_link;
++
++	struct task			tk_vtfs_tk;
+ };
+ 
+ #define FT_ANSW  0x01  /* request of ticket has already been answered */
+@@ -168,6 +171,8 @@ fticket_opcode(struct fuse_ticket *ftick)
+ }
+ 
+ int fticket_pull(struct fuse_ticket *ftick, struct uio *uio);
++size_t fticket_out_size(struct fuse_ticket *ftick);
++int fuse_body_audit(struct fuse_ticket *ftick, size_t blen);
+ 
+ /*
+  * The data representing a FUSE session.
+@@ -217,6 +222,16 @@ struct fuse_data {
+ 	uint64_t			isimpl;
+ 	uint64_t			mnt_flag;
+ 	enum fuse_data_cache_mode	cache_mode;
++
++	/* Fields necessary for virtiofs. */
++	struct vtfs_softc 		*vtfs;
++	int				(*virtiofs_enqueue_cb)(struct fuse_ticket *);
++	void 				(*virtiofs_unmount_cb)(struct mount *, struct fuse_data *);
++
++	bool				virtiofs_destroy_acked;
++	struct mtx			virtiofs_mtx;
++	struct cv			virtiofs_cv;
++
+ };
+ 
+ #define FSESS_DEAD                0x0001 /* session is to be closed */
+@@ -239,6 +254,7 @@ struct fuse_data {
+ #define FSESS_WARN_DOT_LOOKUP	  0x2000000 /* Inconsistent . LOOKUP response */
+ #define FSESS_WARN_INODE_MISMATCH 0x4000000 /* ino != nodeid */
+ #define FSESS_WARN_LSEXTATTR_NUL 0x20000000 /* Non nul-terminated xattr list */
++#define	FSESS_VIRTIOFS 		0x40000000 /* session backed by virtio device */
+ #define FSESS_MNTOPTS_MASK	( \
+ 	FSESS_DAEMON_CAN_SPY | FSESS_PUSH_SYMLINKS_IN | \
+ 	FSESS_DEFAULT_PERMISSIONS | FSESS_INTR)
+@@ -414,6 +430,12 @@ fdata_get_dead(struct fuse_data *data)
+ 	return (data->dataflags & FSESS_DEAD);
+ }
+ 
++static inline bool
++fsess_get_virtiofs(struct fuse_data *data)
++{
++	return (data->dataflags & FSESS_VIRTIOFS);
++}
++
+ struct fuse_dispatcher {
+ 	struct fuse_ticket    *tick;
+ 	struct fuse_in_header *finh;
+diff --git a/sys/fs/fuse/fuse_vfsops.c b/sys/fs/fuse/fuse_vfsops.c
+index b22adb58d..2476702f9 100644
+--- a/sys/fs/fuse/fuse_vfsops.c
++++ b/sys/fs/fuse/fuse_vfsops.c
+@@ -83,15 +83,19 @@
+ #include <sys/fcntl.h>
+ #define EXTERR_CATEGORY EXTERR_CAT_FUSE_VFS
+ #include <sys/exterrvar.h>
++#include <sys/sglist.h>
+ 
+ #include "fuse.h"
+ #include "fuse_node.h"
+ #include "fuse_ipc.h"
+ #include "fuse_internal.h"
++#include "fuse_vfsops.h"
+ 
+ #include <sys/priv.h>
+ #include <security/mac/mac_framework.h>
+ 
++#include <dev/virtio/fs/virtio_fs.h>
++
+ SDT_PROVIDER_DECLARE(fusefs);
+ /* 
+  * Fuse trace probe:
+@@ -111,13 +115,6 @@ SDT_PROBE_DEFINE2(fusefs, , vfsops, trace, "int", "char*");
+ #define PRIV_VFS_FUSE_SYNC_UNMOUNT PRIV_VFS_MOUNT_NONUSER
+ #endif
+ 
+-static vfs_fhtovp_t fuse_vfsop_fhtovp;
+-static vfs_mount_t fuse_vfsop_mount;
+-static vfs_unmount_t fuse_vfsop_unmount;
+-static vfs_root_t fuse_vfsop_root;
+-static vfs_statfs_t fuse_vfsop_statfs;
+-static vfs_vget_t fuse_vfsop_vget;
+-
+ struct vfsops fuse_vfsops = {
+ 	.vfs_fhtovp = fuse_vfsop_fhtovp,
+ 	.vfs_mount = fuse_vfsop_mount,
+@@ -264,7 +261,7 @@ fuse_vfs_remount(struct mount *mp, struct thread *td, uint64_t mntopts,
+ 	return err;
+ }
+ 
+-static int
++int
+ fuse_vfsop_fhtovp(struct mount *mp, struct fid *fhp, int flags,
+ 	struct vnode **vpp)
+ {
+@@ -292,7 +289,7 @@ fuse_vfsop_fhtovp(struct mount *mp, struct fid *fhp, int flags,
+ 	return (0);
+ }
+ 
+-static int
++int
+ fuse_vfsop_mount(struct mount *mp)
+ {
+ 	int err;
+@@ -475,7 +472,7 @@ fuse_vfsop_mount(struct mount *mp)
+ 	return err;
+ }
+ 
+-static int
++int
+ fuse_vfsop_unmount(struct mount *mp, int mntflags)
+ {
+ 	int err = 0;
+@@ -510,6 +507,12 @@ fuse_vfsop_unmount(struct mount *mp, int mntflags)
+ 	if (fdata_get_dead(data)) {
+ 		goto alreadydead;
+ 	}
++
++	if (fsess_get_virtiofs(data)) {
++		data->virtiofs_unmount_cb(mp, data);
++		goto alreadydead;
++	}
++
+ 	if (fsess_maybe_impl(mp, FUSE_DESTROY)) {
+ 		fdisp_init(&fdi, 0);
+ 		fdisp_make(&fdi, FUSE_DESTROY, mp, 0, td, NULL);
+@@ -531,14 +534,15 @@ fuse_vfsop_unmount(struct mount *mp, int mntflags)
+ 	mp->mnt_data = NULL;
+ 	MNT_IUNLOCK(mp);
+ 
+-	dev_rel(fdev);
++	if (fdev != NULL)
++		dev_rel(fdev);
+ 
+ 	return 0;
+ }
+ 
+ SDT_PROBE_DEFINE1(fusefs, , vfsops, invalidate_without_export,
+ 	"struct mount*");
+-static int
++int
+ fuse_vfsop_vget(struct mount *mp, ino_t ino, int flags, struct vnode **vpp)
+ {
+ 	struct fuse_data *data = fuse_get_mpdata(mp);
+@@ -619,7 +623,7 @@ fuse_vfsop_vget(struct mount *mp, ino_t ino, int flags, struct vnode **vpp)
+ 	return error;
+ }
+ 
+-static int
++int
+ fuse_vfsop_root(struct mount *mp, int lkflags, struct vnode **vpp)
+ {
+ 	struct fuse_data *data = fuse_get_mpdata(mp);
+@@ -655,7 +659,7 @@ fuse_vfsop_root(struct mount *mp, int lkflags, struct vnode **vpp)
+ 	return err;
+ }
+ 
+-static int
++int
+ fuse_vfsop_statfs(struct mount *mp, struct statfs *sbp)
+ {
+ 	struct fuse_dispatcher fdi;
+diff --git a/sys/fs/fuse/fuse_vfsops.h b/sys/fs/fuse/fuse_vfsops.h
+new file mode 100644
+index 000000000..dd77348a4
+--- /dev/null
++++ b/sys/fs/fuse/fuse_vfsops.h
+@@ -0,0 +1,47 @@
++/*-
++ * SPDX-License-Identifier: BSD-3-Clause
++ *
++ * Copyright (c) 2007-2009 Google Inc. and Amit Singh
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are
++ * met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ * * Redistributions in binary form must reproduce the above
++ *   copyright notice, this list of conditions and the following disclaimer
++ *   in the documentation and/or other materials provided with the
++ *   distribution.
++ * * Neither the name of Google Inc. nor the names of its
++ *   contributors may be used to endorse or promote products derived from
++ *   this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ */
++#ifndef _FUSE_VFSOPS_H_
++#define _FUSE_VFSOPS_H_
++
++vfs_fhtovp_t fuse_vfsop_fhtovp;
++vfs_mount_t fuse_vfsop_mount;
++vfs_unmount_t fuse_vfsop_unmount;
++vfs_root_t fuse_vfsop_root;
++vfs_statfs_t fuse_vfsop_statfs;
++vfs_vget_t fuse_vfsop_vget;
++
++void virtiofs_teardown(void *xdata);
++void virtiofs_unmount(struct mount *mp, struct fuse_data *data);
++
++#endif /* _FUSE_VFSOPS_H_ */
+diff --git a/sys/fs/fuse/virtiofs_vfsops.c b/sys/fs/fuse/virtiofs_vfsops.c
+new file mode 100644
+index 000000000..83f597e78
+--- /dev/null
++++ b/sys/fs/fuse/virtiofs_vfsops.c
+@@ -0,0 +1,543 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2024, Emil Tsalapatis <emil@etsalapatis.com>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#include <sys/cdefs.h>
++
++#include <sys/param.h>
++#include <sys/buf.h>
++#include <sys/lock.h>
++#include <sys/queue.h>
++#include <sys/systm.h>
++#include <sys/mount.h>
++#include <sys/proc.h>
++#include <sys/sglist.h>
++#include <sys/sysctl.h>
++#include <sys/vnode.h>
++
++#include "fuse.h"
++#include "fuse_kernel.h"
++#include "fuse_internal.h"
++#include "fuse_ipc.h"
++#include "fuse_vfsops.h"
++
++#include <dev/virtio/fs/virtio_fs.h>
++
++#include <compat/linux/linux_errno.h>
++#include <compat/linux/linux_errno.inc>
++
++static vfs_mount_t virtiofs_vfsop_mount;
++
++/* Only mount/unmount is different compared to fuse. */
++static struct vfsops virtiofs_vfsops = {
++	.vfs_fhtovp = fuse_vfsop_fhtovp,
++	.vfs_mount = virtiofs_vfsop_mount,
++	.vfs_unmount = fuse_vfsop_unmount,
++	.vfs_root = fuse_vfsop_root,
++	.vfs_statfs = fuse_vfsop_statfs,
++	.vfs_vget = fuse_vfsop_vget,
++};
++
++static struct vfsconf virtiofs_vfsconf = {
++	.vfc_version = VFS_VERSION,
++	.vfc_name = "virtiofs",
++	.vfc_vfsops = &virtiofs_vfsops,
++	.vfc_typenum = -1,
++	.vfc_flags = VFCF_JAIL | VFCF_SYNTHETIC
++};
++
++static int
++virtiofs_loader(struct module *m, int what, void *arg)
++{
++	int error = 0;
++
++	switch (what) {
++	case MOD_LOAD:
++		error = vfs_modevent(NULL, what, &virtiofs_vfsconf);
++		break;
++	case MOD_UNLOAD:
++		error = vfs_modevent(NULL, what, &virtiofs_vfsconf);
++		break;
++	default:
++		return (EINVAL);
++	}
++
++	return (error);
++}
++
++/* Registering the module */
++
++static moduledata_t virtiofs_moddata = {
++	"virtiofs",
++	virtiofs_loader,
++	&virtiofs_vfsconf
++};
++
++DECLARE_MODULE(virtiofs, virtiofs_moddata, SI_SUB_VFS, SI_ORDER_MIDDLE);
++MODULE_DEPEND(virtiofs, fusefs, 1, 1, 1);
++MODULE_DEPEND(virtiofs, vtfs, 1, 1, 1);
++MODULE_VERSION(virtiofs, 1);
++
++/* Push the ticket to the virtiofs device. */
++static int
++virtiofs_enqueue(struct fuse_ticket *ftick)
++{
++	struct fuse_out_header *ohead = &ftick->tk_aw_ohead;
++	struct fuse_data *data = ftick->tk_data;
++	struct fuse_iov *riov, *wiov;
++	struct sglist *sg = NULL;
++	int readable, writable;
++	bool urgent;
++	int error;
++
++	urgent = (fticket_opcode(ftick) == FUSE_FORGET);
++	if (urgent)
++		refcount_acquire(&ftick->tk_refcount);
++
++	riov = &ftick->tk_ms_fiov;
++	wiov = &ftick->tk_aw_fiov;
++
++	/* Preallocate the response buffer. */
++	fiov_adjust(wiov, fticket_out_size(ftick));
++
++	/* Readable/writable from the host's point of view. */
++	readable = sglist_count(riov->base, riov->len);
++
++	/* Account for the out header. */
++	writable = sglist_count(ohead, sizeof(*ohead)) + 
++		sglist_count(wiov->base, wiov->len);
++
++	sg = sglist_alloc(readable + writable, M_WAITOK);
++
++	error = sglist_append(sg, riov->base, riov->len);
++	if (error != 0)
++		goto out;
++
++	error = sglist_append(sg, ohead, sizeof(*ohead));
++	if (error != 0)
++		goto out;
++
++	error = sglist_append(sg, wiov->base, wiov->len);
++	if (error != 0)
++		goto out;
++
++	error = vtfs_enqueue(data->vtfs, ftick, sg, readable, writable, urgent);
++	if (error != 0 && urgent)
++		fuse_ticket_drop(ftick);
++
++	/*
++	 * The enqueue call destroys the scatter-gather array both on success and
++	 * on failure, so no need to clean it up.
++	 */
++
++	return (error);
++
++out:
++	if (urgent)
++		fuse_ticket_drop(ftick);
++
++	if (sg != NULL)
++		sglist_free(sg);
++
++	return (error);
++}
++
++static void
++virtiofs_cb_forget_ticket(void *xtick, uint32_t len __unused)
++{
++	struct fuse_ticket *ftick = xtick;
++
++	fuse_ticket_drop(ftick);
++}
++
++static void
++virtiofs_drop_intr_tick(struct fuse_data *data, struct fuse_ticket *ftick)
++{
++	struct fuse_ticket *itick, *x_tick;
++
++	TAILQ_FOREACH_SAFE(itick, &data->aw_head, tk_aw_link, x_tick) {
++		if (itick->tk_unique == ftick->irq_unique) {
++			fuse_aw_remove(itick);
++			break;
++		}
++	}
++
++	if (itick) {
++		MPASS(itick->tk_refcount == 1);
++		fuse_ticket_drop(itick);
++	}
++
++	ftick->irq_unique = 0;
++}
++
++static int
++virtiofs_handle_async_tick(struct fuse_data *data, struct fuse_ticket *ftick, int oerror)
++{
++	struct mount *mp = data->mp;
++	struct iovec aiov;
++	struct uio uio;
++	int err = 0;
++
++	/* 
++	 * Form a uio and pass it to the message handlers, because unlike other
++	 * messages they do not use ftick->tk_aw_fiov to store the message body.
++	 */
++	aiov.iov_base = fticket_resp(ftick)->base;
++	aiov.iov_len = fticket_resp(ftick)->len;
++
++	uio.uio_iov = (struct iovec *)&aiov;
++	uio.uio_iovcnt = 1;
++	uio.uio_resid = aiov.iov_len;
++	uio.uio_segflg = UIO_SYSSPACE;
++	uio.uio_rw = UIO_WRITE;
++	uio.uio_td = curthread;
++	uio.uio_offset = 0;
++
++	/* Only handle the two async messages that the FUSE device does. */
++	switch (oerror) {
++	case FUSE_NOTIFY_INVAL_ENTRY:
++		err = fuse_internal_invalidate_entry(mp, &uio);
++		break;
++	case FUSE_NOTIFY_INVAL_INODE:
++		err = fuse_internal_invalidate_inode(mp, &uio);
++		break;
++	default:
++		err = ENOSYS;
++	}
++
++	if (err != 0) {
++		printf("WARNING: error %d when handling async message of type %d\n",
++			err, fticket_opcode(ftick));
++	}
++
++	return (err);
++}
++
++static bool
++virtiofs_remove_ticket(struct fuse_data *data, struct fuse_ticket *ftick)
++{
++	struct fuse_ticket *tick, *x_tick;
++
++	mtx_assert(&data->aw_mtx, MA_OWNED);
++
++	TAILQ_FOREACH_SAFE(tick, &data->aw_head, tk_aw_link, x_tick) {
++		if (tick->tk_unique != ftick->tk_aw_ohead.unique)
++			continue;
++
++		MPASS(tick == ftick);
++		fuse_aw_remove(ftick);
++
++		return (true);
++	}
++
++	return (false);
++}
++
++static void
++virtiofs_cb_cancel_ticket(void *xtick, uint32_t __unused len)
++{
++	struct fuse_ticket *ftick = xtick;
++	struct fuse_data *data = ftick->tk_data;
++	bool found;
++
++	fuse_lck_mtx_lock(data->aw_mtx);
++
++	KASSERT(fticket_opcode(ftick) != FUSE_DESTROY, ("unsent FUSE_DESTROY ticket"));
++
++	found = virtiofs_remove_ticket(data, ftick);
++	if (found && ftick->irq_unique > 0)
++		virtiofs_drop_intr_tick(data, ftick);
++
++	fuse_lck_mtx_unlock(data->aw_mtx);
++
++	fuse_ticket_drop(ftick);
++}
++
++static void
++virtiofs_cb_destroy_ticket(struct fuse_data *data)
++{
++	mtx_lock(&data->virtiofs_mtx);
++
++	KASSERT(!data->virtiofs_destroy_acked, ("virtiofs session already destroyed"));
++	data->virtiofs_destroy_acked = true;
++
++	cv_signal(&data->virtiofs_cv);
++
++	mtx_unlock(&data->virtiofs_mtx);
++}
++
++static void
++virtiofs_cb_complete_ticket(void *xtick, uint32_t len)
++{
++	struct fuse_ticket *ftick = xtick;
++	struct fuse_data *data = ftick->tk_data;
++	struct fuse_out_header *ohead = &ftick->tk_aw_ohead;
++	bool found;
++	int err;
++
++	/* 
++	 * The ticket that got acknowledged is FUSE_DESTROY.
++	 * Notify the module that we are ready to unload.
++	 * FUSE_DESTROY doesn't require a response from the
++	 * server, so what we are handling here is not a
++	 * response but an acknowledgement of receipt.
++	 */
++	if (fticket_opcode(ftick) == FUSE_DESTROY) {
++		fuse_ticket_drop(ftick);
++		virtiofs_cb_destroy_ticket(data);
++		return;
++	}
++
++	/* Validate the length field of the out header. */
++	if (len != ohead->len) {
++		err = EINVAL;
++		goto done;
++	}
++
++	/* Error responses to tickets do not have a body. */
++	if (len > sizeof(*ohead) && ohead->unique != 0 && ohead->error) {
++		err = EINVAL;
++		goto done;
++	}
++
++	/* Ensure that out headers that return an error are valid. */
++	if (data->linux_errnos != 0 && ohead->error != 0) {
++		err = -ohead->error;
++		if (err < 0 || err >= nitems(linux_to_bsd_errtbl))
++			goto done;
++
++		/* '-', because it will get flipped again below */
++		ohead->error = -linux_to_bsd_errtbl[err];
++	}
++
++	/* Remove the ticket from the answer queue. */
++	fuse_lck_mtx_lock(data->aw_mtx);
++
++	found = virtiofs_remove_ticket(data, ftick);
++
++	/*
++	 * We should not be able to find a non-unique ticket, and
++	 * all unique tickets should still be in the queue.
++	 */
++	KASSERT(found == (ohead->unique != 0),
++		("inconsistency in answer queue:"
++		"found %d unique %lu", found, ohead->unique));
++
++	/* Drop any pending interrupts for the completed ticket. */
++	if (found && ftick->irq_unique > 0)
++		virtiofs_drop_intr_tick(data, ftick);
++
++	fuse_lck_mtx_unlock(data->aw_mtx);
++
++	/* If the operation was successful, ensure the size is valid. */
++	if (ohead->error == 0 && ohead->unique != 0) {
++		err = fuse_body_audit(ftick, len - sizeof(*ohead));
++		if (err)
++			goto done;
++
++		fiov_adjust(fticket_resp(ftick), len - sizeof(*ohead));
++	}
++
++	if (found && ftick->tk_aw_handler) {
++		/* Sanitize the linuxism of negative errnos */
++		ohead->error *= -1;
++
++		/* Illegal error code, treat it as EIO. */
++		if (ohead->error < 0 || ohead->error > ELAST) {
++			ohead->error = EIO;
++			ftick->tk_aw_handler(ftick, NULL);
++			err = EINVAL;
++		} else {
++			err = ftick->tk_aw_handler(ftick, NULL);
++		}
++
++	} else if (!found && ohead->unique == 0) {
++		err = virtiofs_handle_async_tick(data, ftick, ohead->error);
++	}
++
++done:
++	fuse_ticket_drop(ftick);
++
++	/* 
++	 * If something goes wrong, err on the side of caution and kill the session
++	 * because the FUSE server in the host is misbehaving.
++	 */
++	if (err != 0 && err != ENOSYS)
++		fdata_set_dead(data);
++
++	return;
++}
++
++static int
++virtiofs_vfsop_mount(struct mount *mp)
++{
++	/* Turn interrupts on by default, existing virtiofsd servers use them anyway. */
++	const uint64_t mntopts = FSESS_VIRTIOFS | FSESS_DAEMON_CAN_SPY;
++	struct thread *td = curthread;
++	struct vfsoptlist *opts;
++	struct fuse_data *data;
++	vtfs_instance vtfs;
++	uint32_t max_read;
++	char *from;
++	int error;
++
++	opts = mp->mnt_optnew;
++	if (opts == NULL)
++		return (EINVAL);
++
++	/* `fspath' contains the mount point (eg. /mnt/guestfs); REQUIRED */
++	if (!vfs_getopts(opts, "fspath", &error))
++		return (error);
++
++	max_read = maxbcachebuf;
++	(void)vfs_scanopt(opts, "max_read=", "%u", &max_read);
++
++	/* XXX Remounts not handled for now, but should be easy to code in. */
++	if (mp->mnt_flag & MNT_UPDATE)
++		return (EOPNOTSUPP);
++
++	/* `from' contains the virtio from; REQUIRED */
++	from = vfs_getopts(opts, "from", &error);
++	if (!from)
++		return (error);
++
++	error = vtfs_find(from, &vtfs);
++	if (error != 0)
++		return (error);
++
++	data = fdata_alloc(NULL, td->td_ucred);
++
++	vtfs_register_cb(vtfs, virtiofs_cb_forget_ticket, virtiofs_cb_complete_ticket,
++			virtiofs_cb_cancel_ticket, virtiofs_teardown, data);
++
++	FUSE_LOCK();
++	KASSERT(!fdata_get_dead(data), ("allocated dead session"));
++
++	data->vtfs = vtfs;
++	data->virtiofs_enqueue_cb = virtiofs_enqueue;
++	data->virtiofs_unmount_cb = virtiofs_unmount;
++
++	mtx_init(&data->virtiofs_mtx, "virtiofs destroy mtx", NULL, MTX_DEF);
++	cv_init(&data->virtiofs_cv, "virtiofs destroy cv");
++	data->virtiofs_destroy_acked = false;
++
++	data->mp = mp;
++	/* 
++	 * XXX We currently do not support any mount options. This is due because it is
++	 * hard to test for it, even though most FUSE options should be trivially easy
++	 * to add. Deliberately defer enabling them until we can reuse the FUSE test
++	 * suite for virtiofs.
++	 */
++	data->dataflags |= mntopts;
++	data->max_read = max_read;
++	data->daemon_timeout = FUSE_MIN_DAEMON_TIMEOUT;
++	data->linux_errnos = 1;
++	data->mnt_flag = mp->mnt_flag & MNT_UPDATEMASK;
++	FUSE_UNLOCK();
++
++	KASSERT(!fdata_get_dead(data), ("newly created fuse session is dead"));
++
++	vfs_getnewfsid(mp);
++	MNT_ILOCK(mp);
++	mp->mnt_data = data;
++	mp->mnt_flag &= ~MNT_LOCAL;
++	mp->mnt_kern_flag |= MNTK_USES_BCACHE;
++	/* 
++	 * The FS is remote by default. Disable nullfs caching to avoid
++	 * the extra coherence cost, same as FUSE.
++	 */
++	mp->mnt_kern_flag |= MNTK_NULL_NOCACHE;
++	MNT_IUNLOCK(mp);
++
++	mp->mnt_stat.f_iosize = maxbcachebuf;
++	strlcpy(mp->mnt_stat.f_fstypename, "virtiofs", MFSNAMELEN);
++	memset(mp->mnt_stat.f_mntfromname, 0, MNAMELEN);
++	strlcpy(mp->mnt_stat.f_mntfromname, from, MNAMELEN);
++	mp->mnt_iosize_max = maxphys;
++
++	fsess_set_notimpl(data->mp, FUSE_READDIRPLUS);
++
++	/* FUSE_INTERRUPT is not implemented in Linux virtiofs either. */
++	fsess_set_notimpl(data->mp, FUSE_INTERRUPT);
++
++	/* 
++	 * vnop_fsync() has an issue where the syncer triggering
++	 * a VOP_SYNC with MNT_LAZY set, leading to two FUSE_FSYNC 
++	 * tickets in the answer queue for the same vnode. This
++	 * causes an assertion failure, so disable it for now.
++	 */
++	fsess_set_notimpl(data->mp, FUSE_FSYNC);
++
++	/* Now handshaking with daemon */
++	fuse_internal_send_init(data, td);
++
++	return (0);
++}
++
++void
++virtiofs_teardown(void *xdata)
++{
++	struct fuse_data *data = (struct fuse_data *)xdata;
++	vtfs_instance vtfs = data->vtfs;
++
++	/* Mark the session as dead to prevent new requests. */
++	fdata_set_dead(data);
++
++	/*
++	 * Turn off the device and handle all received
++	 * requests. After this there are no guest-bound
++	 * requests in flight, completing virtiofs teardown.
++	 */
++	vtfs_drain(vtfs);
++
++	vtfs_unregister_cb(vtfs);
++	vtfs_release(vtfs);
++}
++
++void
++virtiofs_unmount(struct mount *mp, struct fuse_data *data)
++{
++	struct thread *td = curthread;
++	struct fuse_dispatcher fdi;
++
++	if (!fsess_maybe_impl(mp, FUSE_DESTROY))
++		goto destroy_acked;
++
++	fdisp_init(&fdi, 0);
++	fdisp_make(&fdi, FUSE_DESTROY, mp, 0, td, NULL);
++	fuse_insert_message(fdi.tick, 0);
++
++	mtx_lock(&data->virtiofs_mtx);
++	while (!data->virtiofs_destroy_acked)
++		cv_wait(&data->virtiofs_cv, &data->virtiofs_mtx);
++	mtx_unlock(&data->virtiofs_mtx);
++
++destroy_acked:
++	virtiofs_teardown(data);
++
++	mtx_destroy(&data->virtiofs_mtx);
++	cv_destroy(&data->virtiofs_cv);
++}
+diff --git a/sys/modules/Makefile b/sys/modules/Makefile
+index abb2668f4..9d5e0b1e8 100644
+--- a/sys/modules/Makefile
++++ b/sys/modules/Makefile
+@@ -413,6 +413,7 @@ SUBDIR=	\
+ 	${_vesa} \
+ 	${_vf_i2c} \
+ 	virtio \
++	virtiofs \
+ 	vge \
+ 	${_viawd} \
+ 	videomode \
+diff --git a/sys/modules/virtio/Makefile b/sys/modules/virtio/Makefile
+index f00cdc7b2..a264c201a 100644
+--- a/sys/modules/virtio/Makefile
++++ b/sys/modules/virtio/Makefile
+@@ -22,6 +22,6 @@
+ # SUCH DAMAGE.
+ #
+ 
+-SUBDIR=	virtio pci network block balloon scsi random console p9fs
++SUBDIR=	virtio pci network block balloon scsi random console p9fs fs
+ 
+ .include <bsd.subdir.mk>
+diff --git a/sys/modules/virtio/fs/Makefile b/sys/modules/virtio/fs/Makefile
+new file mode 100644
+index 000000000..039617f78
+--- /dev/null
++++ b/sys/modules/virtio/fs/Makefile
+@@ -0,0 +1,30 @@
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++#
++# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++# SUCH DAMAGE.
++#
++
++.PATH: ${SRCTOP}/sys/dev/virtio/fs
++
++KMOD=  vtfs
++SRCS=  virtio_fs.c
++SRCS+= virtio_bus_if.h virtio_if.h
++SRCS+= bus_if.h device_if.h
++
++.include <bsd.kmod.mk>
+diff --git a/sys/modules/virtiofs/Makefile b/sys/modules/virtiofs/Makefile
+new file mode 100644
+index 000000000..2807f03e5
+--- /dev/null
++++ b/sys/modules/virtiofs/Makefile
+@@ -0,0 +1,6 @@
++.PATH: ${SRCTOP}/sys/fs/fuse
++
++KMOD=	virtiofs
++SRCS=	virtiofs_vfsops.c
++
++.include <bsd.kmod.mk>
