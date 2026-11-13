@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.23.0
+
 - `clean` also sweeps the shared image store: container directories whose
   session or build has exited, unpacked rootfs files no image uses,
   unreferenced blobs (skipped while a build runs), and build-cache records
