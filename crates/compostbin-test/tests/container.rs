@@ -11,6 +11,7 @@ fn machine_is_the_declared_size() {
     r#"
 [container]
 cpus = 1
+disk = "4G"
 memory = "1G"
 "#,
   );
@@ -19,12 +20,13 @@ memory = "1G"
     r#"
 [container]
 cpus = 4
+disk = "12G"
 memory = "3G"
 "#,
   );
 
-  let (small_cpus, small_memory) = machine(&small);
-  let (large_cpus, large_memory) = machine(&large);
+  let (small_cpus, small_memory, small_disk) = machine(&small);
+  let (large_cpus, large_memory, large_disk) = machine(&large);
 
   assert!(
     small_cpus >= 1 && large_cpus >= 4,
@@ -44,10 +46,19 @@ memory = "3G"
       "a machine declared {declared} KiB reported {reported}, which is not the size it asked for"
     );
   }
+
+  // Approximate: ext4 keeps some of the device for its own metadata.
+  for (declared, reported) in [(4u64 << 20, small_disk), (12 << 20, large_disk)] {
+    assert!(
+      reported <= declared && reported > declared * 4 / 5,
+      "a rootfs declared {declared} KiB reported {reported}, which is not the size it asked for"
+    );
+  }
 }
 
-fn machine(project: &Project) -> (usize, u64) {
-  let reported = project.guest_output("nproc; awk '/MemTotal/ { print $2 }' /proc/meminfo");
+fn machine(project: &Project) -> (usize, u64, u64) {
+  let reported =
+    project.guest_output("nproc; awk '/MemTotal/ { print $2 }' /proc/meminfo; df -k --output=size / | tail -n 1");
   let mut lines = reported.lines();
 
   (
@@ -59,6 +70,10 @@ fn machine(project: &Project) -> (usize, u64) {
       .next()
       .and_then(|total| total.trim().parse().ok())
       .expect("MemTotal is a number of kibibytes"),
+    lines
+      .next()
+      .and_then(|size| size.trim().parse().ok())
+      .expect("df prints the rootfs's size in kibibytes"),
   )
 }
 

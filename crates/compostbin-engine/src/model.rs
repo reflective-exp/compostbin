@@ -73,6 +73,8 @@ impl BuildPlan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Resources {
   pub cpus: u32,
+  /// The rootfs's sparse ceiling.
+  pub disk_in_bytes: u64,
   pub memory_in_bytes: u64,
 }
 

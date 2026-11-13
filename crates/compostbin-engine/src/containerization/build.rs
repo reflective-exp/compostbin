@@ -6,7 +6,7 @@ use super::progress::Meter;
 use super::provision::initfs_mount;
 use super::snapshots::{Salted, Snapshots, short};
 use super::store::Store;
-use super::unpacked::{ROOTFS_SIZE_IN_BYTES, ext4_root};
+use super::unpacked::ext4_root;
 use super::{nat, note, spec, sweep};
 use crate::error::EngineError;
 use crate::model::BuildPlan;
@@ -46,7 +46,7 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
   let keys = Salted::new(
     keys,
     &base.digest(),
-    ROOTFS_SIZE_IN_BYTES,
+    plan.resources.disk_in_bytes,
     plan.user.as_deref(),
     plan.workdir.as_deref(),
   );
@@ -139,7 +139,7 @@ fn prepare(
   }
 
   note(&format!("unpacking {}", plan.base));
-  EXT4Unpacker::new(ROOTFS_SIZE_IN_BYTES, None).unpack(base, platform, rootfs, None)?;
+  EXT4Unpacker::new(plan.resources.disk_in_bytes, None).unpack(base, platform, rootfs, None)?;
   snapshots.save_rootfs(rootfs, &keys.base);
 
   Ok(0)
@@ -368,6 +368,7 @@ mod tests {
       "compostbin/base:latest",
       Resources {
         cpus: 4,
+        disk_in_bytes: 8 << 30,
         memory_in_bytes: 8 << 30,
       },
     );

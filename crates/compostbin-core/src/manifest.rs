@@ -1,4 +1,4 @@
-use crate::error::{At, InvalidMemory, InvalidSocketMode, ManifestError};
+use crate::error::{At, InvalidSize, InvalidSocketMode, ManifestError};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
@@ -6,7 +6,8 @@ use std::path::{Component, Path, PathBuf};
 use toml::{Table, Value};
 
 const DEFAULT_CONTAINER_CPUS: u32 = 4;
-const DEFAULT_CONTAINER_MEMORY: Memory = Memory::gibibytes(8);
+const DEFAULT_CONTAINER_DISK: Size = Size::gibibytes(8);
+const DEFAULT_CONTAINER_MEMORY: Size = Size::gibibytes(8);
 const DEFAULT_HOST_CONCURRENCY: usize = 8;
 const DEFAULT_IMAGE: &str = "compostbin/base:latest";
 pub const MANIFEST_RELATIVE_PATH: &str = ".config/compostbin.toml";
@@ -244,6 +245,9 @@ impl ClaudeConfig {
 pub struct ContainerConfig {
   #[serde(skip_serializing_if = "ContainerConfig::is_default_cpus")]
   pub cpus: u32,
+  /// The rootfs's ceiling; sparse, so it costs only what is written.
+  #[serde(skip_serializing_if = "ContainerConfig::is_default_disk")]
+  pub disk: Size,
   #[serde(
     deserialize_with = "ContainerConfig::deserialize_env",
     skip_serializing_if = "Vec::is_empty"
@@ -256,7 +260,7 @@ pub struct ContainerConfig {
   )]
   pub environment: BTreeMap<String, String>,
   #[serde(skip_serializing_if = "ContainerConfig::is_default_memory")]
-  pub memory: Memory,
+  pub memory: Size,
   /// Run as `claude` in the project directory when the container is created.
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub setup: Vec<String>,
@@ -266,6 +270,7 @@ impl Default for ContainerConfig {
   fn default() -> Self {
     Self {
       cpus: DEFAULT_CONTAINER_CPUS,
+      disk: DEFAULT_CONTAINER_DISK,
       env: Vec::new(),
       environment: BTreeMap::new(),
       memory: DEFAULT_CONTAINER_MEMORY,
@@ -283,7 +288,11 @@ impl ContainerConfig {
     *cpus == DEFAULT_CONTAINER_CPUS
   }
 
-  fn is_default_memory(memory: &Memory) -> bool {
+  fn is_default_disk(disk: &Size) -> bool {
+    *disk == DEFAULT_CONTAINER_DISK
+  }
+
+  fn is_default_memory(memory: &Size) -> bool {
     *memory == DEFAULT_CONTAINER_MEMORY
   }
 
@@ -343,12 +352,12 @@ fn is_variable_name(name: &str) -> bool {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct Memory(u64);
+pub struct Size(u64);
 
 /// `Display` relies on largest-first order.
-const MEMORY_UNITS: [(char, u64); 3] = [('G', 1 << 30), ('M', 1 << 20), ('K', 1 << 10)];
+const SIZE_UNITS: [(char, u64); 3] = [('G', 1 << 30), ('M', 1 << 20), ('K', 1 << 10)];
 
-impl Memory {
+impl Size {
   pub const fn gibibytes(count: u64) -> Self {
     Self(count << 30)
   }
@@ -358,16 +367,16 @@ impl Memory {
   }
 }
 
-impl std::str::FromStr for Memory {
-  type Err = InvalidMemory;
+impl std::str::FromStr for Size {
+  type Err = InvalidSize;
 
-  fn from_str(text: &str) -> Result<Self, InvalidMemory> {
-    let invalid = || InvalidMemory(text.to_string());
+  fn from_str(text: &str) -> Result<Self, InvalidSize> {
+    let invalid = || InvalidSize(text.to_string());
     let trimmed = text.trim();
 
     let (digits, scale) = match trimmed.char_indices().last() {
       Some((at, unit)) if unit.is_ascii_alphabetic() => {
-        let (_, scale) = MEMORY_UNITS
+        let (_, scale) = SIZE_UNITS
           .iter()
           .find(|(name, _)| name.eq_ignore_ascii_case(&unit))
           .ok_or_else(invalid)?;
@@ -388,23 +397,23 @@ impl std::str::FromStr for Memory {
   }
 }
 
-impl TryFrom<String> for Memory {
-  type Error = InvalidMemory;
+impl TryFrom<String> for Size {
+  type Error = InvalidSize;
 
-  fn try_from(text: String) -> Result<Self, InvalidMemory> {
+  fn try_from(text: String) -> Result<Self, InvalidSize> {
     text.parse()
   }
 }
 
-impl From<Memory> for String {
-  fn from(memory: Memory) -> Self {
-    memory.to_string()
+impl From<Size> for String {
+  fn from(size: Size) -> Self {
+    size.to_string()
   }
 }
 
-impl std::fmt::Display for Memory {
+impl std::fmt::Display for Size {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match MEMORY_UNITS
+    match SIZE_UNITS
       .iter()
       .find(|(_, scale)| self.0.is_multiple_of(*scale))
     {
@@ -712,9 +721,10 @@ impl Manifest {
       },
       container: ContainerConfig {
         cpus: 4,
+        disk: Size::gibibytes(8),
         env: vec!["TOKEN".to_string()],
         environment: [("MODE".to_string(), "fast".to_string())].into(),
-        memory: Memory::gibibytes(8),
+        memory: Size::gibibytes(8),
         setup: vec!["true".to_string()],
       },
       host: HostConfig {
@@ -775,6 +785,7 @@ name  = "compostbin"
 
 [container]
 cpus   = 4
+disk   = "32G"
 env    = ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
 memory = "8G"
 setup  = ["./bin/setup"]
@@ -803,6 +814,7 @@ run_as_root = ["install -d -o claude /opt/vendor"]
 shared = ["widgets"]
 
 [container]
+disk = "32G"
 env = ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
 setup = ["./bin/setup"]
 
@@ -1137,7 +1149,7 @@ roots = ["~/elsewhere"]
       ["OTHER_TOKEN"],
       "a list is replaced, not extended"
     );
-    assert_eq!(loaded.container.memory, Memory::gibibytes(8));
+    assert_eq!(loaded.container.memory, Size::gibibytes(8));
     assert_eq!(loaded.container.setup, ["./bin/setup"]);
     assert!(loaded.host.clipboard);
     assert_eq!(loaded.image.packages, ["ripgrep"]);
@@ -1381,8 +1393,9 @@ roots = ["~/elsewhere"]
     assert_eq!(manifest.project.name.as_deref(), Some("compostbin"));
 
     assert_eq!(manifest.container.cpus, 4);
+    assert_eq!(manifest.container.disk, Size::gibibytes(32));
     assert_eq!(manifest.container.env, ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]);
-    assert_eq!(manifest.container.memory, Memory::gibibytes(8));
+    assert_eq!(manifest.container.memory, Size::gibibytes(8));
     assert_eq!(manifest.container.setup, ["./bin/setup"]);
 
     assert_eq!(manifest.workspace.roots, ["~/workspace"]);
@@ -1450,13 +1463,14 @@ roots = ["~/elsewhere"]
 
   #[test]
   fn renders_a_value_that_differs_from_its_default() {
-    let manifest: Manifest =
-      toml::from_str("[container]\ncpus = 2\nmemory = \"4G\"\n[host]\nclipboard = true\nconcurrency = 2\n")
-        .expect("manifest should parse");
+    let manifest: Manifest = toml::from_str(
+      "[container]\ncpus = 2\ndisk = \"16G\"\nmemory = \"4G\"\n[host]\nclipboard = true\nconcurrency = 2\n",
+    )
+    .expect("manifest should parse");
 
     let rendered = toml::to_string(&manifest).expect("manifest should serialize");
 
-    for line in ["cpus = 2", "memory = \"4G\"", "concurrency = 2"] {
+    for line in ["cpus = 2", "disk = \"16G\"", "memory = \"4G\"", "concurrency = 2"] {
       assert!(rendered.contains(line), "{line} should survive: {rendered}");
     }
   }
@@ -1504,18 +1518,18 @@ source = "~/a-first"
   }
 
   #[test]
-  fn reads_the_memory_forms_a_manifest_uses() {
+  fn reads_the_size_forms_a_manifest_uses() {
     for (text, bytes) in [("8G", 8 << 30), ("512M", 512 << 20), ("1024k", 1 << 20), ("2048", 2048)] {
-      assert_eq!(text.parse::<Memory>().map(Memory::bytes), Ok(bytes), "{text}");
+      assert_eq!(text.parse::<Size>().map(Size::bytes), Ok(bytes), "{text}");
     }
   }
 
   #[test]
-  fn writes_memory_back_the_way_it_reads() {
+  fn writes_a_size_back_the_way_it_reads() {
     for text in ["8G", "512M", "1536K", "1000"] {
       assert_eq!(
         text
-          .parse::<Memory>()
+          .parse::<Size>()
           .expect("a size should parse")
           .to_string(),
         text
@@ -1524,14 +1538,17 @@ source = "~/a-first"
   }
 
   #[test]
-  fn refuses_memory_that_is_not_a_size() {
+  fn refuses_what_is_not_a_size() {
     for text in ["", "lots", "8GB", "8T", "0", "-1G"] {
-      assert!(text.parse::<Memory>().is_err(), "{text:?} should not parse");
+      assert!(text.parse::<Size>().is_err(), "{text:?} should not parse");
     }
 
-    let error = toml::from_str::<Manifest>("[container]\nmemory = \"8GB\"\n").expect_err("8GB is not a size");
+    for key in ["disk", "memory"] {
+      let error =
+        toml::from_str::<Manifest>(&format!("[container]\n{key} = \"8GB\"\n")).expect_err("8GB is not a size");
 
-    assert!(error.to_string().contains("\"8GB\" is not a memory size"), "{error}");
+      assert!(error.to_string().contains("\"8GB\" is not a size"), "{error}");
+    }
   }
 
   #[test]
@@ -1542,8 +1559,9 @@ source = "~/a-first"
     assert_eq!(manifest.project.name, None);
 
     assert_eq!(manifest.container.cpus, 4);
+    assert_eq!(manifest.container.disk, Size::gibibytes(8));
     assert_eq!(manifest.container.env, [] as [String; 0]);
-    assert_eq!(manifest.container.memory, Memory::gibibytes(8));
+    assert_eq!(manifest.container.memory, Size::gibibytes(8));
     assert_eq!(manifest.container.setup, [] as [String; 0]);
 
     assert_eq!(manifest.workspace.roots, [] as [String; 0]);

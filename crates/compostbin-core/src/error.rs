@@ -174,19 +174,19 @@ impl From<PathError> for SessionError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InvalidMemory(pub(crate) String);
+pub struct InvalidSize(pub(crate) String);
 
-impl fmt::Display for InvalidMemory {
+impl fmt::Display for InvalidSize {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
       formatter,
-      "\"{}\" is not a memory size: expected a number, optionally followed by G, M, or K",
+      "\"{}\" is not a size: expected a number, optionally followed by G, M, or K",
       self.0
     )
   }
 }
 
-impl Error for InvalidMemory {}
+impl Error for InvalidSize {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvalidSocketMode(pub(crate) String);

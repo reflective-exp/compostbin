@@ -18,7 +18,7 @@ use crate::builder::Builder;
 use crate::error::EngineError;
 use crate::images::Images;
 use crate::machine::{Listener, Machine};
-use crate::model::{BuildPlan, ExecSpec, RunSpec};
+use crate::model::{BuildPlan, ExecSpec, Resources, RunSpec};
 use containerization_framework::containerization::container::container_manager::CreateWithRootfsOptions;
 use containerization_framework::containerization::container::{ContainerManager, LinuxContainer};
 use containerization_framework::containerization::image::{Image, ImageStore};
@@ -207,10 +207,10 @@ impl Images for Store {
     Ok(references)
   }
 
-  fn is_prepared(&self, image: &str) -> Result<bool, EngineError> {
+  fn is_prepared(&self, image: &str, resources: Resources) -> Result<bool, EngineError> {
     let image = built(&self.images()?, image)?;
 
-    Ok(Unpacked::at(self.unpacked()).holds(&image))
+    Ok(Unpacked::at(self.unpacked()).holds(&image, resources.disk_in_bytes))
   }
 
   fn missing(&self, image: &str) -> Result<Option<String>, EngineError> {
@@ -272,7 +272,12 @@ impl FrameworkMachine {
       .and_then(|_| sweep::claim(&directory))
       .map_err(|error| EngineError::failed(format!("boot {}", spec.name), error))?;
 
-    let rootfs = Unpacked::at(self.store.unpacked()).rootfs(&image, &platform, &directory.join("rootfs.ext4"))?;
+    let rootfs = Unpacked::at(self.store.unpacked()).rootfs(
+      &image,
+      &platform,
+      spec.resources.disk_in_bytes,
+      &directory.join("rootfs.ext4"),
+    )?;
 
     // The manager has no `Network`; interfaces are configured by `spec` on Virtualization's NAT.
     let options = CreateWithRootfsOptions {
@@ -558,7 +563,14 @@ mod tests {
         .missing("compostbin/absent")
         .expect_err("nothing is built"),
       store
-        .is_prepared("compostbin/absent")
+        .is_prepared(
+          "compostbin/absent",
+          Resources {
+            cpus: 1,
+            disk_in_bytes: 1 << 30,
+            memory_in_bytes: 1 << 30,
+          },
+        )
         .expect_err("nothing is built"),
     ] {
       assert_eq!(

@@ -16,6 +16,7 @@ const CONTEXT_MOUNT: &str = "/mnt/compostbin-context";
 /// Independent of `[container]`; 2 GB is too little to install Claude Code.
 const BUILD_RESOURCES: Resources = Resources {
   cpus: 4,
+  disk_in_bytes: 8 << 30,
   memory_in_bytes: 8 << 30,
 };
 /// Must be registry-qualified; bare names are not resolved.
@@ -272,10 +273,11 @@ mod tests {
   }
 
   #[test]
-  fn the_session_memory_does_not_reach_the_build() {
+  fn the_session_resources_do_not_reach_the_build() {
     let (_home, mut session) = temp_session("", "project");
     session.manifest.container.cpus = 16;
-    session.manifest.container.memory = crate::manifest::Memory::gibibytes(16);
+    session.manifest.container.disk = crate::manifest::Size::gibibytes(64);
+    session.manifest.container.memory = crate::manifest::Size::gibibytes(16);
     session.manifest.image.packages = vec!["jq".to_string()];
     let builder = RecordingBuilder::new();
 

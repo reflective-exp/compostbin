@@ -130,6 +130,7 @@ impl Session {
       name: self.container_name(),
       resources: Resources {
         cpus: container.cpus,
+        disk_in_bytes: container.disk.bytes(),
         memory_in_bytes: container.memory.bytes(),
       },
       // Root, to make each socket at its target and give it to the sockets group. Attached processes still run
@@ -445,6 +446,7 @@ mod tests {
         name: "compostbin-cb".to_string(),
         resources: Resources {
           cpus: 4,
+          disk_in_bytes: 8 << 30,
           memory_in_bytes: 8 << 30,
         },
         user: None,

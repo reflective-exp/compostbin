@@ -19,6 +19,7 @@ name  = "my-project"
 ``` toml
 [container]
 cpus   = 4
+disk   = "8G"
 env    = ["GITHUB_TOKEN"]
 memory = "8G"
 setup  = ["direnv allow"]
@@ -28,6 +29,9 @@ RUST_LOG = "info"
 ```
 
 - `cpus` (`4`).
+- `disk` (`"8G"`): the root filesystem's capacity, in the same form as
+  `memory`. Sparse, so the host stores only what is written. Does not apply to
+  `compostbin build`.
 - `env` (`[]`): names of host environment variables passed through. Neither
   this nor `environment` may set reserved variables (`CLAUDE_CONFIG_DIR`,
   `IS_SANDBOX`, or `WAYLAND_DISPLAY`). May be used to inject secrets from the

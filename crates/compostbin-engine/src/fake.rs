@@ -2,7 +2,7 @@ use crate::builder::Builder;
 use crate::error::EngineError;
 use crate::images::Images;
 use crate::machine::{Listener, Machine};
-use crate::model::{BuildPlan, ExecSpec, RunSpec};
+use crate::model::{BuildPlan, ExecSpec, Resources, RunSpec};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
@@ -156,7 +156,7 @@ impl Images for RecordingEngine {
       .ok_or_else(|| EngineError::unavailable("read the image store", "there is none"))
   }
 
-  fn is_prepared(&self, image: &str) -> Result<bool, EngineError> {
+  fn is_prepared(&self, image: &str, _resources: Resources) -> Result<bool, EngineError> {
     self.calls.record(Call::IsPrepared(image.to_string()));
 
     Ok(
@@ -293,6 +293,7 @@ mod tests {
       "compostbin/base:latest",
       Resources {
         cpus: 4,
+        disk_in_bytes: 8 << 30,
         memory_in_bytes: 8 << 30,
       },
     );

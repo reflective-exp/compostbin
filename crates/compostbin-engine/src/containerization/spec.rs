@@ -129,6 +129,7 @@ mod tests {
       name: "session-one".to_string(),
       resources: Resources {
         cpus: 4,
+        disk_in_bytes: 8 << 30,
         memory_in_bytes: 8 << 30,
       },
       user: None,

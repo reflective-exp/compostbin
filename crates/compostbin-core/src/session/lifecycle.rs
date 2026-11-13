@@ -84,7 +84,7 @@ impl Session {
       );
     }
 
-    if !images.is_prepared(&spec.image)? {
+    if !images.is_prepared(&spec.image, spec.resources)? {
       notify(Notice::Unpacking(spec.image.clone()));
     }
 

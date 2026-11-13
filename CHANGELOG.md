@@ -6,6 +6,8 @@
   session or build has exited, unpacked rootfs files no image uses,
   unreferenced blobs (skipped while a build runs), and build-cache records
   whose image is gone.
+- Add `[container] disk` (default `"8G"`) to size the container's root
+  filesystem.
 
 ## v0.22.0
 

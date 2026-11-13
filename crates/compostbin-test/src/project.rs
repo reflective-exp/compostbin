@@ -3,7 +3,7 @@ use crate::poll::poll_until;
 use crate::signing::signed_binary;
 use crate::store;
 use crate::terminal::Terminal;
-use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, Memory, TomlFile};
+use compostbin_core::manifest::{MANIFEST_RELATIVE_PATH, Manifest, Size, TomlFile};
 use compostbin_core::session::Session;
 use compostbin_core::workspace::paths::PathResolver;
 use compostbin_engine::containerization::control_socket;
@@ -19,7 +19,7 @@ const HOME_PARENT: &str = "/tmp";
 const GUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const FAKE_API_KEY: &str = "not-a-real-key";
 const TEST_CPUS: u32 = 1;
-const TEST_MEMORY: Memory = Memory::gibibytes(1);
+const TEST_MEMORY: Size = Size::gibibytes(1);
 
 /// The name must be unique across the suite because it names the container.
 pub struct Project {
