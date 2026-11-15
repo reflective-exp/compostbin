@@ -33,10 +33,11 @@ clipboard = true
 
 - `keychain` (`false`): copies the Claude Code login between the host's login
   Keychain and the session, toward whichever holds an older login or none, so a
-  session starts signed in and a login or refresh in the container reaches the
-  host. MCP tokens stay where they were made. Otherwise, set
-  `ANTHROPIC_API_KEY` or log in interactively once; the login persists across
-  sessions with the container's Claude home.
+  session starts signed in, a login or refresh in the container reaches the
+  host, and a refresh on the host reaches a running session. MCP tokens stay
+  where they were made. Otherwise, set `ANTHROPIC_API_KEY` or log in
+  interactively once; the login persists across sessions with the container's
+  Claude home.
 - `shared` (`[]`): merges into the project's `[claude] shared`.
 - `clipboard` (`false`): turns on the project's `[host] clipboard`; see
   [Clipboard](host.md#clipboard). A manifest cannot turn it back off.

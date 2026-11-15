@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 pub const CREDENTIALS_FILE_NAME: &str = ".credentials.json";
 pub const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
@@ -15,6 +15,8 @@ pub const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 const LOGIN: &str = "claudeAiOauth";
 
 const WATCH_INTERVAL: Duration = Duration::from_millis(250);
+/// Reading the store spawns `security`, so it is polled far less often than the file.
+const STORE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// `Ok(None)` means no entry, which is not an error since the session may use an API key.
 pub trait CredentialStore {
@@ -242,7 +244,9 @@ pub fn sync(from: &impl CredentialStore, to: &impl CredentialStore) -> Result<()
 }
 
 /// Saves on starting too, catching a token left by a session killed before it could save, and
-/// checks once more on stopping.
+/// checks once more on stopping. Also takes a login refreshed elsewhere into the session: a
+/// refresh revokes the refresh token it replaced, so a session left holding that one is logged
+/// out when its own token expires.
 pub fn watch(claude_home: &Path, store: &impl CredentialStore, stop: &AtomicBool) {
   let file = CredentialsFile::from(claude_home);
   let modified = || -> Option<SystemTime> {
@@ -251,9 +255,16 @@ pub fn watch(claude_home: &Path, store: &impl CredentialStore, stop: &AtomicBool
       .ok()
   };
   let mut seen = None;
+  let mut read_store: Option<Instant> = None;
 
   loop {
     let stopping = stop.load(Ordering::Relaxed);
+
+    if read_store.is_none_or(|at| at.elapsed() >= STORE_INTERVAL) {
+      read_store = Some(Instant::now());
+      let _ = sync(store, &file);
+    }
+
     let current = modified();
 
     if current != seen {
@@ -423,6 +434,21 @@ mod tests {
     watch(&claude_home(&home), &store, &AtomicBool::new(true));
 
     assert_eq!(store.kept(), Some(token(2000)));
+  }
+
+  #[test]
+  fn watching_takes_a_token_refreshed_elsewhere() {
+    let home = TempDir::new().expect("temp dir");
+    session_holds(&home, &token(1000));
+    let store = FakeStore::from(token(2000).as_str());
+
+    watch(&claude_home(&home), &store, &AtomicBool::new(true));
+
+    assert_eq!(
+      std::fs::read_to_string(credentials_path(&home)).expect("credentials should exist"),
+      token(2000)
+    );
+    assert_eq!(store.writes(), 0, "the store already holds the newer token");
   }
 
   #[test]
