@@ -20,12 +20,15 @@ Keychain item Claude Code keeps for it.
 ## Global configuration
 
 `~/.config/compostbin/config.toml` applies to every session, whichever manifest
-or profile configures it. It takes only `[claude]`:
+or profile configures it. It takes only `[claude]` and `[host] clipboard`:
 
 ``` toml
 [claude]
 keychain = true
 shared   = ["commands"]
+
+[host]
+clipboard = true
 ```
 
 - `keychain` (`false`): copies the Claude Code login between the host's login
@@ -35,6 +38,8 @@ shared   = ["commands"]
   `ANTHROPIC_API_KEY` or log in interactively once; the login persists across
   sessions with the container's Claude home.
 - `shared` (`[]`): merges into the project's `[claude] shared`.
+- `clipboard` (`false`): turns on the project's `[host] clipboard`; see
+  [Clipboard](host.md#clipboard). A manifest cannot turn it back off.
 
 Anything `settings.json` refers to by path must be reachable in the guest: the
 session's Claude home is `~/.claude` there too, but an absolute host path such

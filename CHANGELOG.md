@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `[host] clipboard` may be set globally in `~/.config/compostbin/config.toml`.
+
 ## v0.23.0
 
 - `clean` also sweeps the shared image store: container directories whose

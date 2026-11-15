@@ -82,11 +82,12 @@ impl Session {
     project_dir: impl Into<PathBuf>,
   ) -> Result<Self, ManifestError> {
     let project_dir = project_dir.into();
-    let manifest = match profile {
+    let mut manifest = match profile {
       Some(name) => Manifest::parse(&resolver.resolve(&profile_path(name)))?,
       None => Manifest::load(&project_dir.join(MANIFEST_RELATIVE_PATH))?,
     };
     let user = UserConfig::load_if_present(&resolver.resolve(USER_CONFIG_PATH))?.unwrap_or_default();
+    manifest.host.clipboard |= user.host.clipboard;
 
     Ok(Self {
       manifest,
@@ -275,6 +276,22 @@ mod tests {
 
     assert_eq!(session.manifest.container.cpus, 1);
     assert_eq!(session.config_path(), MANIFEST_RELATIVE_PATH);
+  }
+
+  #[test]
+  fn the_user_config_turns_the_clipboard_on_for_every_project() {
+    let temp = TempDir::new().expect("temp dir");
+    let project_dir = temp.path().join("api");
+    std::fs::create_dir_all(project_dir.join(".config")).expect("project dir");
+    std::fs::write(project_dir.join(MANIFEST_RELATIVE_PATH), "").expect("manifest");
+    let resolver = PathResolver::new(&project_dir, temp.path());
+    let user_config = resolver.resolve(USER_CONFIG_PATH);
+    std::fs::create_dir_all(user_config.parent().expect("config dir")).expect("config dir");
+    std::fs::write(&user_config, "[host]\nclipboard = true\n").expect("user config");
+
+    let session = Session::load(None, resolver, &project_dir).expect("the manifest should load");
+
+    assert!(session.manifest.host.clipboard);
   }
 
   #[test]

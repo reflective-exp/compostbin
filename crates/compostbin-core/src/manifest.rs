@@ -210,6 +210,7 @@ impl TomlFile for UserConfig {}
 #[serde(default, deny_unknown_fields)]
 pub struct UserConfig {
   pub claude: UserClaudeConfig,
+  pub host: UserHostConfig,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -217,6 +218,12 @@ pub struct UserConfig {
 pub struct UserClaudeConfig {
   pub keychain: bool,
   pub shared: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UserHostConfig {
+  pub clipboard: bool,
 }
 
 pub(crate) fn local_path(manifest_path: &Path) -> PathBuf {
@@ -1433,9 +1440,19 @@ roots = ["~/elsewhere"]
   }
 
   #[test]
+  fn user_config_turns_the_clipboard_on() {
+    assert!(!UserConfig::default().host.clipboard);
+
+    let config: UserConfig = toml::from_str("[host]\nclipboard = true\n").expect("config should parse");
+
+    assert!(config.host.clipboard);
+  }
+
+  #[test]
   fn user_config_refuses_project_settings() {
     assert!(toml::from_str::<UserConfig>("[container]\ncpus = 8\n").is_err());
     assert!(toml::from_str::<UserConfig>("[claude]\nhome = \"~/home\"\n").is_err());
+    assert!(toml::from_str::<UserConfig>("[host]\nports = [7001]\n").is_err());
   }
 
   #[test]

@@ -50,7 +50,8 @@ ports       = [7001, 7002]
 ```
 
 - `clipboard` (`false`): serves `compostbin-host clipboard` as the host's
-  `pbcopy`. See [Clipboard](#clipboard).
+  `pbcopy`. See [Clipboard](#clipboard). Also set by the global config's
+  `[host] clipboard`.
 - `concurrency` (`8`): how many host commands may run at once. Subagents call
   `compostbin-host` independently.
 - `ports` (`[]`): host loopback ports the guest reaches at its own `localhost`.
