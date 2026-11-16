@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.24.0
+
 - `[host] clipboard` may be set globally in `~/.config/compostbin/config.toml`.
 - With `[claude] keychain`, running sessions receive tokens refreshed on the
   host or by other sessions.
