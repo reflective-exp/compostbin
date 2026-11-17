@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Update containerization-framework to v0.12.0.
+- Boot the Containerization 0.55.0 init image.
+
 ## v0.24.0
 
 - `[host] clipboard` may be set globally in `~/.config/compostbin/config.toml`.
