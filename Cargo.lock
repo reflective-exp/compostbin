@@ -174,9 +174,9 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "containerization-framework"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c24d644e5c5f75429819151705a70e9c06e3ccf38f9820850af31b37f619f019"
+checksum = "d9f27e2b2671d053c64b64285f742c90c6b6e190a3c422363683a1901c96612a"
 dependencies = [
  "swift-bridge",
  "swift-bridge-build",
