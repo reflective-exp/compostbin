@@ -2,7 +2,8 @@
 
 `.config/compostbin.local.toml` holds settings one developer wants that the
 project should not commit; add it to `.gitignore`. It accepts any manifest
-key. A profile replaces it along with the manifest.
+key, and applies whether or not `.config/compostbin.toml` exists. A profile
+replaces it along with the manifest.
 
 ``` toml
 [container]

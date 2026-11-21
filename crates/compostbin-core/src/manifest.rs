@@ -53,8 +53,9 @@ impl Manifest {
 
   /// Includes the local manifest beside it, if any. Each key it sets replaces the shared one,
   /// tables merging key by key down to a whole host command, and its `[[paths]]` are added.
+  /// Either file may be absent.
   pub fn load(path: &Path) -> Result<Self, ManifestError> {
-    let mut shared = read_table(path)?;
+    let mut shared = Table::load_if_present(path)?.unwrap_or_default();
     let local_path = local_path(path);
 
     let Some(mut local) = Table::load_if_present(&local_path)? else {
@@ -1380,11 +1381,42 @@ roots = ["~/elsewhere"]
   }
 
   #[test]
-  fn load_names_a_missing_file() {
+  fn loads_defaults_without_a_manifest() {
+    let temp = TempDir::new().expect("temp dir");
+
+    let loaded = Manifest::load(&temp.path().join(MANIFEST_RELATIVE_PATH)).expect("load should succeed");
+
+    assert_eq!(loaded.project.image, DEFAULT_IMAGE);
+    assert_eq!(loaded.project.name, None);
+    assert_eq!(loaded.container, ContainerConfig::default());
+  }
+
+  #[test]
+  fn loads_a_local_manifest_without_a_shared_one() {
     let temp = TempDir::new().expect("temp dir");
     let path = temp.path().join(MANIFEST_RELATIVE_PATH);
+    std::fs::create_dir_all(path.parent().expect("manifest dir")).expect("create manifest dir");
+    std::fs::write(
+      local_path(&path),
+      "[container]\ncpus = 8\n\n[[paths]]\nsource = \"~/scratch\"\n",
+    )
+    .expect("local manifest should write");
 
-    let error = Manifest::load(&path).expect_err("missing manifest should error");
+    let loaded = Manifest::load(&path).expect("load should succeed");
+
+    assert_eq!(loaded.container.cpus, 8);
+    assert_eq!(loaded.container.memory, DEFAULT_CONTAINER_MEMORY);
+    assert_eq!(loaded.paths.len(), 1);
+    assert!(loaded.paths[0].local);
+  }
+
+  #[test]
+  fn load_names_an_unreadable_manifest() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join(MANIFEST_RELATIVE_PATH);
+    std::fs::create_dir_all(&path).expect("a directory where the manifest goes");
+
+    let error = Manifest::load(&path).expect_err("a directory is not a manifest");
 
     assert!(
       error.to_string().contains("compostbin.toml"),

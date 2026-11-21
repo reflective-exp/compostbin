@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `.config/compostbin.toml` is optional. Without it, every key uses its
+  default, the project is named after its directory, and
+  `.config/compostbin.local.toml` still applies.
+
 ## v0.26.0
 
 - Update containerization-framework to v0.13.0.

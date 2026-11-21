@@ -315,17 +315,23 @@ fn add_local_records_the_path_beside_the_committed_manifest() {
 }
 
 #[test]
-fn ls_without_a_manifest_names_the_missing_file() {
+fn ls_without_a_manifest_mounts_the_project() {
   let temp = TempDir::new().expect("temp dir");
   let home = home(&temp);
+  let project_dir = home.join("my-project");
+  std::fs::create_dir(&project_dir).expect("create project dir");
 
-  let output = compostbin(&home, &home, &["ls"]);
+  let output = compostbin(&home, &project_dir, &["ls"]);
 
-  assert!(!output.status.success(), "ls should fail without a manifest");
-  let stderr = String::from_utf8_lossy(&output.stderr);
   assert!(
-    stderr.contains(".config/compostbin.toml"),
-    "error should name the manifest: {stderr}"
+    output.status.success(),
+    "ls failed: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert!(
+    stdout.contains(&format!("{} -> /workspace/my-project", project_dir.display())),
+    "ls should list the project: {stdout}"
   );
 }
 

@@ -7,8 +7,9 @@ description: Schema for editing .config/compostbin.toml, the compostbin manifest
 
 `.config/compostbin.toml`, in the project root. Read on the host when the
 container is created: edits take effect only after the user exits and runs
-`compostbin run` again (`-- --continue` resumes). Every key is optional; an
-unknown key is an error at the next start. Paths are host paths; `~` allowed.
+`compostbin run` again (`-- --continue` resumes). The file and every key are
+optional; an unknown key is an error at the next start. Paths are host paths;
+`~` allowed.
 
 With `--profile <name>`, the session reads
 `~/.config/compostbin/profiles/<name>.toml` instead (same schema); the briefing

@@ -279,6 +279,18 @@ mod tests {
   }
 
   #[test]
+  fn without_a_manifest_the_session_is_named_after_its_directory() {
+    let temp = TempDir::new().expect("temp dir");
+    let project_dir = temp.path().join("api");
+    std::fs::create_dir_all(&project_dir).expect("project dir");
+
+    let session = Session::load(None, PathResolver::new(&project_dir, temp.path()), &project_dir)
+      .expect("no manifest should leave every key its default");
+
+    assert_eq!(session.container_name(), "compostbin-api");
+  }
+
+  #[test]
   fn the_user_config_turns_the_clipboard_on_for_every_project() {
     let temp = TempDir::new().expect("temp dir");
     let project_dir = temp.path().join("api");

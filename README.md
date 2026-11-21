@@ -25,11 +25,11 @@ compostbin doctor
 
 ## Usage
 
-Every command runs from a project root and reads its manifest at
-`.config/compostbin.toml`. A first session:
+Every command runs from a project root and reads the manifest at
+`.config/compostbin.toml` (if present). A first session:
 
 ``` sh
-compostbin init         # write the manifest
+compostbin init         # write the manifest (optional)
 compostbin build        # build the base image, shared by every project
 compostbin doctor       # check the store, the image, credentials, the mounts
 compostbin run          # start the session and attach Claude
@@ -169,8 +169,9 @@ Both also sweep the shared image store for orphaned files.
 
 ## Configuration
 
-`.config/compostbin.toml` declares what the project needs. Every table is
-optional, and changes take effect when the container is next created.
+`.config/compostbin.toml` declares project config. The file (and all options)
+are optional; `.config/compostbin.local.toml` applies either way. Changes take
+effect on the next `run`.
 
 ``` toml
 [container]
