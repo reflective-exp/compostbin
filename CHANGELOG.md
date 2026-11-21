@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.27.0
+
 - `.config/compostbin.toml` is optional. Without it, every key uses its
   default, the project is named after its directory, and
   `.config/compostbin.local.toml` still applies.
