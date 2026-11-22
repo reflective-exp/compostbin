@@ -1,7 +1,7 @@
 //! Uses managed settings because `settings::share` overwrites `settings.json` from the host.
 
 use crate::error::{At, PathError};
-use crate::host::{CLIPBOARD_COMMAND, GUEST_SOCKETS_GROUP, served_commands};
+use crate::host::{CLIPBOARD_COMMAND, CLIPBOARD_IMAGE_COMMAND, GUEST_SOCKETS_GROUP, served_commands};
 use crate::manifest::Manifest;
 use std::path::Path;
 
@@ -92,7 +92,8 @@ pub fn briefing(manifest: &Manifest, config: &str) -> String {
     text.push_str(&format!(
       "\nCopying to the clipboard reaches the user's macOS clipboard: `pbcopy`, `xclip`, `xsel` \
        and `wl-copy` here all send what they read to `compostbin-host {CLIPBOARD_COMMAND}`. \
-       It is write-only; nothing can be pasted from the host.\n"
+       Pasting from it serves only an image, as PNG, through `compostbin-host {CLIPBOARD_IMAGE_COMMAND}`; \
+       its text never reaches here.\n"
     ));
   }
 
@@ -234,8 +235,16 @@ mod tests {
     let manifest: Manifest = toml::from_str("[host]\nclipboard = true\n").expect("manifest should parse");
     let briefing = briefing(&manifest, MANIFEST_RELATIVE_PATH);
 
-    assert!(briefing.contains("compostbin-host clipboard  pbcopy"), "{briefing}");
+    assert!(
+      briefing.contains("compostbin-host clipboard        pbcopy"),
+      "{briefing}"
+    );
+    assert!(
+      briefing.contains("compostbin-host clipboard-image  osascript"),
+      "{briefing}"
+    );
     assert!(briefing.contains("macOS clipboard"), "{briefing}");
+    assert!(briefing.contains("only an image"), "{briefing}");
     assert!(!super::briefing(&manifest_with_commands(), MANIFEST_RELATIVE_PATH).contains("clipboard"));
   }
 

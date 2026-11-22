@@ -50,8 +50,9 @@ ports       = [7001, 7002]
 ```
 
 - `clipboard` (`false`): serves `compostbin-host clipboard` as the host's
-  `pbcopy`. See [Clipboard](#clipboard). Also set by the global config's
-  `[host] clipboard`.
+  `pbcopy`, and `compostbin-host clipboard-image`, which returns the
+  clipboard's image. See [Clipboard](#clipboard). Also set by the global
+  config's `[host] clipboard`.
 - `concurrency` (`8`): how many host commands may run at once. Subagents call
   `compostbin-host` independently.
 - `ports` (`[]`): host loopback ports the guest reaches at its own `localhost`.
@@ -69,8 +70,13 @@ host's `pbcopy`, so Claude's `/copy` and `some-command | pbcopy` in
 `compostbin shell` reach the Mac's clipboard. The session sets
 `WAYLAND_DISPLAY`, which is what makes Claude look for `wl-copy`.
 
-Write-only: the host clipboard never reaches the guest. A declared
-`[host.commands.clipboard]` replaces the built-in one.
+Pasting serves only images: `xclip -t image/png -o` and
+`wl-paste --type image/png` return the clipboard's image as PNG, converting a
+TIFF, so Ctrl+V pastes images into Claude. The guest is not allowed to reach
+text in the host clipboard via this mechanism.
+
+A declared `[host.commands.clipboard]` or `[host.commands.clipboard-image]`
+replaces the built-in one.
 
 ## Ports
 

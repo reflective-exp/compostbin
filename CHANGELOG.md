@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- With `[host] clipboard`, an image on the host clipboard can be pasted into
+  Claude with Ctrl+V.
+
 ## v0.27.0
 
 - `.config/compostbin.toml` is optional. Without it, every key uses its

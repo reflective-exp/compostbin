@@ -40,6 +40,7 @@ const PACKAGES: [&str; 10] = [
   "unzip",
 ];
 pub const CLIPBOARD_TOOLS: [&str; 4] = ["pbcopy", "wl-copy", "xclip", "xsel"];
+const PASTE_TOOL: &str = "wl-paste";
 const GUEST_CLIENT: &str = include_str!("compostbin-host");
 const GUEST_CLIENT_NAME: &str = "compostbin-host";
 const GUEST_CLIPBOARD: &str = include_str!("compostbin-clipboard");
@@ -106,7 +107,7 @@ fn base_plan(session: &Session) -> BuildPlan {
     BuildStep::root(
       "guest scripts",
       format!(
-        "{installs} \\\n && for tool in {tools}; do \\\n      ln -s {GUEST_CLIPBOARD_NAME} \"/usr/local/bin/$tool\"; \\\n    done",
+        "{installs} \\\n && for tool in {tools} {PASTE_TOOL}; do \\\n      ln -s {GUEST_CLIPBOARD_NAME} \"/usr/local/bin/$tool\"; \\\n    done",
         installs = GUEST_SCRIPTS
           .map(|(name, _)| format!("install -m 755 {CONTEXT_MOUNT}/{name} /usr/local/bin/{name}"))
           .join(" \\\n && "),
@@ -258,7 +259,7 @@ mod tests {
     }
 
     assert!(
-      scripts.contains(&format!("for tool in {}", CLIPBOARD_TOOLS.join(" "))),
+      scripts.contains(&format!("for tool in {} {PASTE_TOOL};", CLIPBOARD_TOOLS.join(" "))),
       "the clipboard tools are not linked: {scripts}"
     );
   }

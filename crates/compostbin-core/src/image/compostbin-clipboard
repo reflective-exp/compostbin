@@ -1,18 +1,37 @@
 #!/bin/sh
-# pbcopy, xclip, xsel and wl-copy, dispatched on $0, sending copies to `compostbin-host clipboard`.
-# Pasting is refused, and copies to the primary selection are discarded.
+# pbcopy, xclip, xsel, wl-copy and wl-paste, dispatched on $0. Copies go to `compostbin-host clipboard`,
+# and copies to the primary selection are discarded. Pasting serves only an image, as PNG, from
+# `compostbin-host clipboard-image`.
 set -eu
 
 name=$(basename "$0")
 
-paste() {
-  echo "$name: the host clipboard is write-only from a compostbin container; there is nothing to paste" >&2
+refuse() {
+  echo "$name: only an image can be pasted from the host clipboard into a compostbin container" >&2
   exit 1
+}
+
+# Claude asks for TARGETS to check for an image, then for image/png.
+paste() {
+  [ "$primary" -eq 0 ] || refuse
+
+  case "$target" in
+    TARGETS)
+      compostbin-host clipboard-image < /dev/null > /dev/null
+      echo image/png
+      ;;
+    image/png) exec compostbin-host clipboard-image < /dev/null ;;
+    *) refuse ;;
+  esac
+
+  exit 0
 }
 
 primary=0
 text=0
 input=0
+output=0
+target=
 count=$#
 
 # Anything left in "$@" after this loop is a file (xclip) or text (wl-copy).
@@ -22,10 +41,11 @@ while [ "$count" -gt 0 ]; do
   count=$((count - 1))
 
   case "$name:$argument" in
-    xclip:-o | xclip:-out | xsel:-o | xsel:--output) paste ;;
+    xclip:-o | xclip:-out | xsel:-o | xsel:--output) output=1 ;;
+    wl-paste:-l | wl-paste:--list-types) target=TARGETS ;;
     xsel:-i | xsel:--input) input=1 ;;
     xsel:-p | xsel:--primary | xsel:-s | xsel:--secondary) primary=1 ;;
-    wl-copy:-p | wl-copy:--primary) primary=1 ;;
+    wl-copy:-p | wl-copy:--primary | wl-paste:-p | wl-paste:--primary) primary=1 ;;
     xsel:-c | xsel:--clear | xsel:-d | xsel:--delete | wl-copy:-c | wl-copy:--clear) exit 0 ;;
     xclip:-selection | xclip:-sel | xclip:-se | xclip:-s)
       case "${1:-}" in
@@ -34,11 +54,16 @@ while [ "$count" -gt 0 ]; do
       shift
       count=$((count - 1))
       ;;
-    xclip:-display | xclip:-d | xclip:-loops | xclip:-l | xclip:-target | xclip:-t | wl-copy:-t | wl-copy:--type)
+    xclip:-target | xclip:-t | wl-copy:-t | wl-copy:--type | wl-paste:-t | wl-paste:--type)
+      target=${1:-}
       shift
       count=$((count - 1))
       ;;
-    xclip:-* | xsel:-* | wl-copy:-* | pbcopy:-*) ;;
+    xclip:-display | xclip:-d | xclip:-loops | xclip:-l)
+      shift
+      count=$((count - 1))
+      ;;
+    xclip:-* | xsel:-* | wl-copy:-* | wl-paste:-* | pbcopy:-*) ;;
     wl-copy:*)
       text=1
       set -- "$@" "$argument"
@@ -49,6 +74,10 @@ done
 
 # xsel with neither flag pastes when its stdin is a terminal.
 if [ "$name" = xsel ] && [ "$input" -eq 0 ] && [ -t 0 ]; then
+  output=1
+fi
+
+if [ "$name" = wl-paste ] || [ "$output" -eq 1 ]; then
   paste
 fi
 
