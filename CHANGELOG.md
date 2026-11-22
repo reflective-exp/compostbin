@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.28.0
+
 - With `[host] clipboard`, an image on the host clipboard can be pasted into
   Claude with Ctrl+V.
 
