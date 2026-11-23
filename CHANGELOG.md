@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.29.0
+
 - Control sockets are named by a hash of the container name, and
   `compostbin clean` removes those of ended sessions.
 
