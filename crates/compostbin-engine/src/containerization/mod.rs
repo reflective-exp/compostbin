@@ -26,6 +26,7 @@ use containerization_framework::containerization::process::{LinuxProcess, LinuxP
 use containerization_framework::containerization::vm::{Kernel, SystemPlatform, VsockListener};
 use containerization_framework::containerization_error::Code;
 use containerization_framework::containerization_oci::image::{ImageConfig, Platform};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::error::Error;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -38,8 +39,14 @@ pub use control::served;
 pub use store::{Store, StoreError};
 pub use sweep::{Blobs, Swept, describe, sweep};
 
+/// Hashed so a long container name cannot push the path past macOS's 103-byte socket limit.
 pub fn control_socket(runtime_dir: &Path, name: &str) -> PathBuf {
-  runtime_dir.join(name).join(control::CONTROL_SOCKET)
+  let hash: String = Sha256::digest(name.as_bytes())[..8]
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect();
+
+  runtime_dir.join(format!("{hash}.sock"))
 }
 
 /// Distinct from joiners' `attach-<n>` ids.
@@ -300,7 +307,8 @@ impl FrameworkMachine {
 
   fn serve_control_socket(&self, name: String) -> Result<(), EngineError> {
     let path = control_socket(&self.runtime_dir, &name);
-    let listener = control::bind(&path).map_err(|error| EngineError::failed("bind the control socket", error))?;
+    let listener = control::bind(&path)
+      .map_err(|error| EngineError::failed(format!("bind the control socket at {}", path.display()), error))?;
     let attach_failed = Arc::clone(&self.attach_failed);
     let running = Arc::clone(&self.running);
 
@@ -469,6 +477,24 @@ mod tests {
     };
 
     seed(&config).expect("a seed")
+  }
+
+  #[test]
+  fn binds_a_control_socket_for_a_long_container_name() {
+    let directory = tempfile::tempdir().expect("a temp dir");
+    let long = format!("compostbin-{}", "a".repeat(200));
+
+    assert!(control::bind(&control_socket(directory.path(), &long)).is_ok());
+  }
+
+  #[test]
+  fn gives_each_container_its_own_control_socket() {
+    let runtime_dir = Path::new("/sessions");
+
+    assert_ne!(
+      control_socket(runtime_dir, "compostbin-a"),
+      control_socket(runtime_dir, "compostbin-b")
+    );
   }
 
   #[test]

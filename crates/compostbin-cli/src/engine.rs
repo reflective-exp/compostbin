@@ -19,7 +19,6 @@ pub fn build_base_image(session: &Session, cache: bool) -> Result<i32, Box<dyn E
 }
 
 pub fn clean(session: &Session, all: bool) -> Result<i32, Box<dyn Error>> {
-  // Before `session.clean`, which with `all` takes the control socket the sweep checks.
   let swept = sweep(&Store::at(image::store(session.resolver())), &session.sessions_dir());
 
   for path in swept.removed {

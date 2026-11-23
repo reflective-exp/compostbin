@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Control sockets are named by a hash of the container name, and
+  `compostbin clean` removes those of ended sessions.
+
 ## v0.28.0
 
 - With `[host] clipboard`, an image on the host clipboard can be pasted into

@@ -5,6 +5,7 @@ use super::{control, control_socket, oci};
 use crate::error::EngineError;
 use containerization_framework::containerization::image::{Image, ImageStore};
 use std::fs::{File, TryLockError};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -88,6 +89,18 @@ pub fn abandoned(store: &Store, runtime_dir: Option<&Path>) -> Vec<PathBuf> {
     .collect()
 }
 
+/// Control sockets outlive their owners, and nothing else removes them.
+fn dead_sockets(runtime_dir: &Path) -> Vec<PathBuf> {
+  std::fs::read_dir(runtime_dir)
+    .into_iter()
+    .flatten()
+    .flatten()
+    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_socket()))
+    .map(|entry| entry.path())
+    .filter(|path| !control::served(path) && std::fs::remove_file(path).is_ok())
+    .collect()
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum Blobs {
   /// A build's blobs are unreferenced until it tags its image.
@@ -156,6 +169,7 @@ pub fn sweep(store: &Store, runtime_dir: &Path) -> Swept {
   }
 
   let mut removed = abandoned(store, Some(runtime_dir));
+  removed.extend(dead_sockets(runtime_dir));
 
   let blobs = store.content().and_then(|(content, images)| {
     let (evicted, blobs) = reclaim(store, &images);
@@ -246,6 +260,21 @@ mod tests {
 
     drop(building);
     assert!(file.try_lock().is_ok());
+  }
+
+  #[test]
+  fn removes_only_control_sockets_nobody_answers() {
+    let root = tempfile::tempdir().expect("a temp dir");
+    let live = control_socket(root.path(), "compostbin-live");
+    let dead = control_socket(root.path(), "compostbin-dead");
+    let session = root.path().join("compostbin-live");
+    let _listener = control::bind(&live).expect("bind the live socket");
+    drop(control::bind(&dead).expect("bind the dead socket"));
+    std::fs::create_dir(&session).expect("a session directory");
+
+    assert_eq!(dead_sockets(root.path()), [dead]);
+    assert!(live.exists());
+    assert!(session.exists());
   }
 
   #[test]

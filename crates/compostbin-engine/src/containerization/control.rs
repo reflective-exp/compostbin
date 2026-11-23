@@ -7,8 +7,6 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
-pub const CONTROL_SOCKET: &str = "control.sock";
-
 /// Cannot occur in an argument or environment variable.
 const UNIT: char = '\u{1f}';
 
@@ -331,6 +329,8 @@ const _: () = assert!(CMSG_SPACE >= 32 + MAX_DESCRIPTORS * size_of::<RawFd>());
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  const CONTROL_SOCKET: &str = "control.sock";
 
   fn request() -> Request {
     Request {
