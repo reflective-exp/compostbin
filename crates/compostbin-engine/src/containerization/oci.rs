@@ -3,6 +3,7 @@ use crate::error::EngineError;
 use containerization_framework::containerization::image::Image;
 use containerization_framework::containerization_oci::content::{ContentWriter, LocalContentStore};
 use containerization_framework::containerization_oci::image::{Descriptor, MediaTypes, Platform};
+use containerization_framework::task::BlockOn;
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -14,8 +15,8 @@ pub type ImageConfig = Map<String, Value>;
 
 /// Raw JSON, keeping keys the framework's `ImageConfig` has no field for.
 pub fn image_config(image: &Image, platform: &Platform) -> Result<ImageConfig, EngineError> {
-  let digest = image.manifest(platform)?.config.digest;
-  let data = image.get_content(&digest)?.data()?;
+  let digest = image.manifest(platform).block_on()?.config.digest;
+  let data = image.get_content(&digest).block_on()?.data()?;
   let mut document: Value =
     serde_json::from_slice(&data).map_err(|error| EngineError::failed(format!("read {digest}"), error))?;
 
@@ -45,36 +46,38 @@ pub fn ingest(content: &LocalContentStore, built: Built) -> Result<Descriptor, E
   let index = Arc::new(Mutex::new(None));
   let written = Arc::clone(&index);
 
-  content.ingest(move |directory| {
-    let writer = ContentWriter::new(directory)?;
-    let document = |value: Value| writer.write(value.to_string().as_bytes());
+  content
+    .ingest(move |directory| {
+      let writer = ContentWriter::new(directory)?;
+      let document = |value: Value| writer.write(value.to_string().as_bytes());
 
-    let (size, layer) = writer.create(&built.layer)?;
-    let layer = descriptor(LAYER, &layer, size);
-    let platform = platform(&built.platform);
+      let (size, layer) = writer.create(&built.layer)?;
+      let layer = descriptor(LAYER, &layer, size);
+      let platform = platform(&built.platform);
 
-    let mut config = platform.clone();
-    config["config"] = Value::Object(built.config);
-    config["rootfs"] = json!({ "type": "layers", "diff_ids": [layer["digest"]] });
-    let (size, digest) = document(config)?;
-    let config = descriptor(MediaTypes::IMAGE_CONFIG, &digest, size);
+      let mut config = platform.clone();
+      config["config"] = Value::Object(built.config);
+      config["rootfs"] = json!({ "type": "layers", "diff_ids": [layer["digest"]] });
+      let (size, digest) = document(config)?;
+      let config = descriptor(MediaTypes::IMAGE_CONFIG, &digest, size);
 
-    let (size, digest) = document(json!({
-      "schemaVersion": 2,
-      "mediaType": MediaTypes::IMAGE_MANIFEST,
-      "config": config,
-      "layers": [layer],
-    }))?;
-    let mut manifest = descriptor(MediaTypes::IMAGE_MANIFEST, &digest, size);
-    manifest["platform"] = platform;
+      let (size, digest) = document(json!({
+        "schemaVersion": 2,
+        "mediaType": MediaTypes::IMAGE_MANIFEST,
+        "config": config,
+        "layers": [layer],
+      }))?;
+      let mut manifest = descriptor(MediaTypes::IMAGE_MANIFEST, &digest, size);
+      manifest["platform"] = platform;
 
-    let (size, digest) =
-      document(json!({ "schemaVersion": 2, "mediaType": MediaTypes::INDEX, "manifests": [manifest] }))?;
+      let (size, digest) =
+        document(json!({ "schemaVersion": 2, "mediaType": MediaTypes::INDEX, "manifests": [manifest] }))?;
 
-    *lock(&written) = Some(Descriptor::new(MediaTypes::INDEX, digest, size));
+      *lock(&written) = Some(Descriptor::new(MediaTypes::INDEX, digest, size));
 
-    Ok(())
-  })?;
+      Ok(())
+    })
+    .block_on()?;
 
   lock(&index)
     .take()
@@ -98,7 +101,7 @@ fn platform(platform: &Platform) -> Value {
 /// Blobs are reclaimed once unreferenced, so a cached descriptor may name missing ones.
 pub fn holds(content: &LocalContentStore, descriptor: &Descriptor) -> bool {
   let read = |digest: &str| -> Option<Value> {
-    let data = content.get(digest).ok()??.data().ok()?;
+    let data = content.get(digest).block_on().ok()??.data().ok()?;
 
     serde_json::from_slice(&data).ok()
   };
@@ -124,7 +127,7 @@ pub fn holds(content: &LocalContentStore, descriptor: &Descriptor) -> bool {
         .all(|blob| {
           blob["digest"]
             .as_str()
-            .is_some_and(|digest| matches!(content.get(digest), Ok(Some(_))))
+            .is_some_and(|digest| matches!(content.get(digest).block_on(), Ok(Some(_))))
         })
     })
 }

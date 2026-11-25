@@ -26,6 +26,7 @@ use containerization_framework::containerization::process::{LinuxProcess, LinuxP
 use containerization_framework::containerization::vm::{Kernel, SystemPlatform, VsockListener};
 use containerization_framework::containerization_error::Code;
 use containerization_framework::containerization_oci::image::{ImageConfig, Platform};
+use containerization_framework::task::BlockOn;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::error::Error;
@@ -92,23 +93,24 @@ impl Running {
     let process = Arc::new(
       booted
         .container
-        .exec(id, configuration(&booted.seed, request, stdio))?,
+        .exec(id, configuration(&booted.seed, request, stdio))
+        .block_on()?,
     );
 
     lock(&self.processes).insert(id.to_string(), Arc::clone(&process));
 
     let ran = (|| {
-      process.start()?;
+      process.start().block_on()?;
 
       if stdio.has_terminal() {
         let _ = self.resize(id, stdio.terminal);
       }
 
-      process.wait(None)
+      process.wait(None).block_on()
     })();
 
     lock(&self.processes).remove(id);
-    let _ = process.delete();
+    let _ = process.delete().block_on();
 
     Ok(ran?.exit_code)
   }
@@ -121,7 +123,7 @@ impl Running {
 
     let size = terminal::size(terminal).map_err(|error| EngineError::failed(format!("resize {id}"), error))?;
 
-    Ok(process.resize(size)?)
+    Ok(process.resize(size).block_on()?)
   }
 }
 
@@ -184,7 +186,7 @@ fn seed(config: &ImageConfig) -> Result<LinuxProcessConfiguration, containerizat
 
 /// Never pulls.
 fn built(images: &ImageStore, reference: &str) -> Result<Image, EngineError> {
-  images.get(reference, false).map_err(|error| {
+  images.get(reference, false).block_on().map_err(|error| {
     if error.is_code(Code::NotFound) {
       EngineError::unavailable(
         format!("find {reference}"),
@@ -204,7 +206,8 @@ impl Images for Store {
 
     let mut references: Vec<String> = self
       .images()?
-      .list()?
+      .list()
+      .block_on()?
       .iter()
       .map(Image::reference)
       .collect();
@@ -223,8 +226,8 @@ impl Images for Store {
   fn missing(&self, image: &str) -> Result<Option<String>, EngineError> {
     let (content, images) = self.content()?;
 
-    for digest in built(&images, image)?.referenced_digests()? {
-      if content.get(&digest)?.is_none() {
+    for digest in built(&images, image)?.referenced_digests().block_on()? {
+      if content.get(&digest).block_on()?.is_none() {
         return Ok(Some(format!("blob sha256:{digest}")));
       }
     }
@@ -271,9 +274,15 @@ impl FrameworkMachine {
       &images,
       Default::default(),
     )?;
-    let image = images.get(&spec.image, true)?;
+    let image = images.get(&spec.image, true).block_on()?;
     let platform = Platform::current()?;
-    let seed = seed(&image.config(&platform)?.config.unwrap_or_default())?;
+    let seed = seed(
+      &image
+        .config(&platform)
+        .block_on()?
+        .config
+        .unwrap_or_default(),
+    )?;
 
     let owner = std::fs::create_dir_all(&directory)
       .and_then(|_| sweep::claim(&directory))
@@ -292,10 +301,12 @@ impl FrameworkMachine {
       vm: spec::vm(spec.resources),
       ..Default::default()
     };
-    let container = manager.create_with_rootfs(&spec.name, &image, rootfs, options, spec::configure(spec))?;
+    let container = manager
+      .create_with_rootfs(&spec.name, &image, rootfs, options, spec::configure(spec))
+      .block_on()?;
 
-    container.create()?;
-    container.start()?;
+    container.create().block_on()?;
+    container.start().block_on()?;
 
     Ok(Booted {
       _owner: owner,
@@ -403,7 +414,8 @@ impl Machine for FrameworkMachine {
       .ok_or_else(|| EngineError::unavailable(format!("listen for {name}"), "this process is not running it"))?;
     let listener = booted
       .container
-      .with_virtual_machine_instance(|instance| instance.listen(port))?;
+      .with_virtual_machine_instance(|instance| instance.listen(port))
+      .block_on()?;
 
     Ok(Box::new(listener))
   }
@@ -424,7 +436,7 @@ impl Machine for FrameworkMachine {
 
 impl Listener for VsockListener {
   fn accept(&self) -> Option<OwnedFd> {
-    self.into_iter().next()
+    self.blocking_iter().next()
   }
 
   fn finish(&self) {

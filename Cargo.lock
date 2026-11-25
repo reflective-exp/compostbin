@@ -174,10 +174,11 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "containerization-framework"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9f27e2b2671d053c64b64285f742c90c6b6e190a3c422363683a1901c96612a"
+checksum = "86f9816ba9f2ca8eb47106d69ace1b85be587dcd41b03ff9bb15935b455fa718"
 dependencies = [
+ "futures-core",
  "swift-bridge",
  "swift-bridge-build",
 ]
@@ -232,6 +233,12 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
+name = "futures-core"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
 name = "getrandom"

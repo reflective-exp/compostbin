@@ -4,6 +4,7 @@ use super::unpacked::Unpacked;
 use super::{control, control_socket, oci};
 use crate::error::EngineError;
 use containerization_framework::containerization::image::{Image, ImageStore};
+use containerization_framework::task::BlockOn;
 use std::fs::{File, TryLockError};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
@@ -128,6 +129,7 @@ pub fn describe(reclaimed: &Result<Blobs, EngineError>) -> Option<String> {
 pub fn reclaim(store: &Store, images: &ImageStore) -> (Vec<PathBuf>, Result<Blobs, EngineError>) {
   let evicted = images
     .list()
+    .block_on()
     .map(|listed| Unpacked::at(store.unpacked()).evict(listed.iter().map(Image::digest)))
     .unwrap_or_default();
 
@@ -141,7 +143,7 @@ pub fn reclaim(store: &Store, images: &ImageStore) -> (Vec<PathBuf>, Result<Blob
       Err(TryLockError::Error(error)) => return Err(EngineError::failed("lock the image store", error)),
     }
 
-    let (deleted, freed_in_bytes) = images.clean_up_orphaned_blobs()?;
+    let (deleted, freed_in_bytes) = images.clean_up_orphaned_blobs().block_on()?;
 
     Ok(Blobs::Reclaimed {
       count: deleted.len(),

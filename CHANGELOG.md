@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Update containerization-framework to 0.14.
+  - Async APIs now must be driven explicitly, though we use the blocking
+    versions.
+
 ## v0.29.0
 
 - Control sockets are named by a hash of the container name, and

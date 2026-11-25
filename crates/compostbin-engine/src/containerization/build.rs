@@ -21,6 +21,7 @@ use containerization_framework::containerization_ext4::ext4::EXT4Reader;
 use containerization_framework::containerization_oci::content::LocalContentStore;
 use containerization_framework::containerization_oci::image::{Descriptor, Platform};
 use containerization_framework::containerization_oci::runtime::User;
+use containerization_framework::task::BlockOn;
 use serde_json::Value;
 use std::path::Path;
 
@@ -56,7 +57,9 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
     && oci::holds(&content, &descriptor)
   {
     note(&format!("{} is already built", plan.tag));
-    images.create(&image::Description::new(&plan.tag, descriptor))?;
+    images
+      .create(&image::Description::new(&plan.tag, descriptor))
+      .block_on()?;
     drop(building);
     reclaim(store, &images);
     snapshots.evict();
@@ -92,7 +95,9 @@ pub fn build(store: &Store, plan: &BuildPlan, keys: Keys, name: &str) -> Result<
 
   let descriptor = ingest(&content, &rootfs, plan, base_config, environment, platform)?;
 
-  images.create(&image::Description::new(&plan.tag, descriptor.clone()))?;
+  images
+    .create(&image::Description::new(&plan.tag, descriptor.clone()))
+    .block_on()?;
   snapshots.save_image(&descriptor, &keys.image);
 
   // Not `ContainerManager::delete`: a fully cached build has no manager.
@@ -139,7 +144,9 @@ fn prepare(
   }
 
   note(&format!("unpacking {}", plan.base));
-  EXT4Unpacker::new(plan.resources.disk_in_bytes, None).unpack(base, platform, rootfs, None)?;
+  EXT4Unpacker::new(plan.resources.disk_in_bytes, None)
+    .unpack(base, platform, rootfs, None)
+    .block_on()?;
   snapshots.save_rootfs(rootfs, &keys.base);
 
   Ok(0)
@@ -147,7 +154,7 @@ fn prepare(
 
 /// Not `get(_, true)`, which pulls without reporting progress.
 fn pulled(images: &ImageStore, reference: &str) -> Result<Image, EngineError> {
-  match images.get(reference, false) {
+  match images.get(reference, false).block_on() {
     Err(error) if error.is_code(Code::NotFound) => {
       note(&format!("pulling {reference}"));
       let meter = Meter::new();
@@ -156,7 +163,7 @@ fn pulled(images: &ImageStore, reference: &str) -> Result<Image, EngineError> {
         ..Default::default()
       };
 
-      Ok(images.pull(reference, options)?)
+      Ok(images.pull(reference, options).block_on()?)
     }
     image => Ok(image?),
   }
@@ -181,16 +188,18 @@ impl Builder<'_> {
       vm: spec::vm(self.plan.resources),
       ..Default::default()
     };
-    let container = manager.create_with_rootfs(
-      self.name,
-      self.base,
-      ext4_root(self.rootfs),
-      options,
-      self.configuration(),
-    )?;
+    let container = manager
+      .create_with_rootfs(
+        self.name,
+        self.base,
+        ext4_root(self.rootfs),
+        options,
+        self.configuration(),
+      )
+      .block_on()?;
 
-    container.create()?;
-    container.start()?;
+    container.create().block_on()?;
+    container.start().block_on()?;
 
     let ran = (start..self.plan.steps.len()).try_for_each(|index| {
       self.step(&container, index)?;
@@ -199,11 +208,11 @@ impl Builder<'_> {
 
     if ran.is_err() {
       // Left for inspection; the next build sweeps it.
-      let _ = container.stop();
+      let _ = container.stop().block_on();
       return ran;
     }
 
-    container.stop()?;
+    container.stop().block_on()?;
 
     Ok(())
   }
@@ -241,26 +250,28 @@ impl Builder<'_> {
 
     note(&format!("--> {}", step.name));
 
-    let process = container.exec(
-      &format!("build-{index}"),
-      LinuxProcessConfiguration {
-        arguments: SHELL
-          .iter()
-          .map(|argument| argument.to_string())
-          .chain([step.script.clone()])
-          .collect(),
-        environment_variables: self.environment.to_vec(),
-        working_directory: "/".to_string(),
-        user: user(step.user.as_deref()),
-        stdout: Some(libc::STDERR_FILENO),
-        stderr: Some(libc::STDERR_FILENO),
-        ..Default::default()
-      },
-    )?;
+    let process = container
+      .exec(
+        &format!("build-{index}"),
+        LinuxProcessConfiguration {
+          arguments: SHELL
+            .iter()
+            .map(|argument| argument.to_string())
+            .chain([step.script.clone()])
+            .collect(),
+          environment_variables: self.environment.to_vec(),
+          working_directory: "/".to_string(),
+          user: user(step.user.as_deref()),
+          stdout: Some(libc::STDERR_FILENO),
+          stderr: Some(libc::STDERR_FILENO),
+          ..Default::default()
+        },
+      )
+      .block_on()?;
 
-    process.start()?;
-    let status = process.wait(None)?;
-    let _ = process.delete();
+    process.start().block_on()?;
+    let status = process.wait(None).block_on()?;
+    let _ = process.delete().block_on();
 
     if status.exit_code != 0 {
       return Err(EngineError::failed(
@@ -275,15 +286,22 @@ impl Builder<'_> {
 
 /// Freezing flushes guest writes so the clone is consistent; trimming first keeps freed blocks out of it.
 fn snapshot(container: &LinuxContainer, rootfs: &Path, snapshots: &Snapshots, key: &str) -> Result<(), EngineError> {
-  let _ = container.filesystem_operation(FilesystemOperation::Trim, "/");
+  let _ = container
+    .filesystem_operation(FilesystemOperation::Trim, "/")
+    .block_on();
 
-  if let Err(error) = container.filesystem_operation(FilesystemOperation::Freeze, "/") {
+  if let Err(error) = container
+    .filesystem_operation(FilesystemOperation::Freeze, "/")
+    .block_on()
+  {
     note(&format!("could not cache the rootfs for {}: {error}", short(key)));
     return Ok(());
   }
 
   snapshots.save_rootfs(rootfs, key);
-  container.filesystem_operation(FilesystemOperation::Thaw, "/")?;
+  container
+    .filesystem_operation(FilesystemOperation::Thaw, "/")
+    .block_on()?;
 
   Ok(())
 }

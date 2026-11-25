@@ -3,6 +3,7 @@ use crate::error::EngineError;
 use containerization_framework::containerization::container::Mount;
 use containerization_framework::containerization::image::{EXT4Unpacker, Image};
 use containerization_framework::containerization_oci::image::Platform;
+use containerization_framework::task::BlockOn;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -66,6 +67,7 @@ impl Unpacked {
     let scratch = partial(&self.root).map_err(failed)?;
     let moved = EXT4Unpacker::new(size_in_bytes, None)
       .unpack(image, platform, &scratch, None)
+      .block_on()
       .map_err(EngineError::from)
       .and_then(|_| settle(&scratch, destination).map_err(failed));
     let _ = std::fs::remove_file(&scratch);

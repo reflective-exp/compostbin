@@ -11,6 +11,7 @@ use containerization_framework::containerization::image::Image;
 use containerization_framework::containerization::image::image_store::GetInitImageOptions;
 use containerization_framework::containerization::vm::SystemPlatform;
 use containerization_framework::containerization_error::Code;
+use containerization_framework::task::BlockOn;
 use containerization_framework::versions::{INIT_IMAGE, KERNEL_ARCHIVE_URL, KERNEL_IN_ARCHIVE};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,13 +38,13 @@ fn retire(store: &Store) {
   let Ok(images) = store.images() else {
     return;
   };
-  let Ok(listed) = images.list() else {
+  let Ok(listed) = images.list().block_on() else {
     return;
   };
   let references: Vec<String> = listed.iter().map(Image::reference).collect();
 
   for reference in retired_init_images(&references) {
-    match images.delete(reference, false) {
+    match images.delete(reference, false).block_on() {
       Ok(()) => note(&format!("removed {reference}")),
       Err(error) => note(&format!("could not remove {reference}: {error}")),
     }
@@ -161,25 +162,28 @@ fn initfs(store: &Store) -> Result<(), EngineError> {
 
   let images = store.images()?;
 
-  match images.get(INIT_IMAGE, false) {
+  match images.get(INIT_IMAGE, false).block_on() {
     Err(error) if error.is_code(Code::NotFound) => note(&format!("pulling {INIT_IMAGE}")),
     Err(error) => return Err(error.into()),
     Ok(_) => {}
   }
 
   let meter = Meter::new();
-  let image = images.get_init_image(
-    INIT_IMAGE,
-    GetInitImageOptions {
-      progress: meter.handler(),
-      ..Default::default()
-    },
-  )?;
+  let image = images
+    .get_init_image(
+      INIT_IMAGE,
+      GetInitImageOptions {
+        progress: meter.handler(),
+        ..Default::default()
+      },
+    )
+    .block_on()?;
   drop(meter);
   // Unpacked aside so concurrent first builds never share a partial file.
   let scratch = partial(directory).map_err(failed)?;
   let moved = image
     .init_block(&scratch, SystemPlatform::LINUX_ARM)
+    .block_on()
     .map_err(EngineError::from)
     .and_then(|_| settle(&scratch, &destination).map_err(failed));
   let _ = std::fs::remove_file(&scratch);
